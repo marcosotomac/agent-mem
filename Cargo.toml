@@ -1,6 +1,6 @@
 [package]
 name = "agent-mem"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 authors = ["Marco Soto Maceda <158858927+marcosotomac@users.noreply.github.com>"]
 description = "Local-first, sub-millisecond memory engine for AI coding agents"
