@@ -59,6 +59,15 @@ impl Store {
         }
         conn.execute_batch(pragma_stmt)?;
 
+        let user_version: u32 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        if user_version >= 1 {
+            // Fast path: schema and migrations already initialized. Bypasses DDL and table scans completely!
+            return Ok(());
+        }
+
         let has_schema: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories');",
             [],
@@ -103,7 +112,7 @@ impl Store {
 
             conn.execute("PRAGMA user_version = 1;", [])?;
         } else {
-            // Migration check: ensure anchor column exists in memories table
+            // Legacy migration check: ensure anchor column exists in memories table
             let has_anchor: bool = conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'anchor';",
@@ -127,6 +136,7 @@ impl Store {
                     [],
                 );
             }
+            conn.execute("PRAGMA user_version = 1;", [])?;
         }
 
         Ok(())
@@ -181,7 +191,7 @@ impl Store {
         }
         let mut stmt = self
             .conn
-            .prepare("SELECT val, anchor FROM memories WHERE key = ?1 LIMIT 1;")?;
+            .prepare_cached("SELECT val, anchor FROM memories WHERE key = ?1 LIMIT 1;")?;
         let mut rows = stmt.query(params![key.trim()])?;
 
         if let Some(row) = rows.next()? {
@@ -200,7 +210,7 @@ impl Store {
         }
         let mut stmt = self
             .conn
-            .prepare("SELECT val FROM memories WHERE key = ?1 LIMIT 1;")?;
+            .prepare_cached("SELECT val FROM memories WHERE key = ?1 LIMIT 1;")?;
         let mut rows = stmt.query(params![key.trim()])?;
 
         if let Some(row) = rows.next()? {
