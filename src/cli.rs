@@ -8,21 +8,34 @@ use std::path::Path;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Init,
-    Get { key: String },
+    Get {
+        key: String,
+    },
     Set {
         key: String,
         val: String,
         anchor: Option<String>,
     },
-    Del { key: String },
-    Find { query: String },
+    Del {
+        key: String,
+    },
+    Find {
+        query: String,
+    },
     Dump,
     Context,
-    SessionAdd { summary: String },
+    SessionAdd {
+        summary: String,
+    },
     SessionList,
-    Sync { file: Option<String>, export: bool },
+    Sync {
+        file: Option<String>,
+        export: bool,
+    },
     Mcp,
-    McpInstall { client: Option<String> },
+    McpInstall {
+        client: Option<String>,
+    },
     Help,
     Version,
 }
@@ -61,7 +74,9 @@ where
         }
         "set" => {
             if args.len() < 4 {
-                return Err(Error::Usage("Usage: agent-mem set <key> <value> [--anchor <path:line>]".to_string()));
+                return Err(Error::Usage(
+                    "Usage: agent-mem set <key> <value> [--anchor <path:line>]".to_string(),
+                ));
             }
             let key = args[2].clone();
             let mut val_parts = Vec::new();
@@ -101,18 +116,25 @@ where
         }
         "session" => {
             if args.len() < 3 {
-                return Err(Error::Usage("Usage: agent-mem session [add <msg> | list]".to_string()));
+                return Err(Error::Usage(
+                    "Usage: agent-mem session [add <msg> | list]".to_string(),
+                ));
             }
             match args[2].as_str() {
                 "add" => {
                     if args.len() < 4 {
-                        return Err(Error::Usage("Usage: agent-mem session add <summary>".to_string()));
+                        return Err(Error::Usage(
+                            "Usage: agent-mem session add <summary>".to_string(),
+                        ));
                     }
                     let summary = args[3..].join(" ");
                     Ok(Command::SessionAdd { summary })
                 }
                 "list" | "ls" => Ok(Command::SessionList),
-                other => Err(Error::Usage(format!("Unknown session subcommand '{}'. Usage: agent-mem session [add|list]", other))),
+                other => Err(Error::Usage(format!(
+                    "Unknown session subcommand '{}'. Usage: agent-mem session [add|list]",
+                    other
+                ))),
             }
         }
         "context" => Ok(Command::Context),
@@ -143,7 +165,10 @@ where
         "--mcp" => Ok(Command::Mcp),
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
-        unknown => Err(Error::Usage(format!("Unknown command '{}'. Run 'agent-mem --help' for usage.", unknown))),
+        unknown => Err(Error::Usage(format!(
+            "Unknown command '{}'. Run 'agent-mem --help' for usage.",
+            unknown
+        ))),
     }
 }
 
@@ -170,15 +195,31 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             use std::io::IsTerminal;
             let results = crate::installer::install_all_or_target(client.as_deref())?;
             if results.is_empty() {
-                println!("No supported clients detected. Run 'agent-mem mcp install [claude|cursor|antigravity]'.");
+                println!(
+                    "No supported clients detected. Run 'agent-mem mcp install [claude|cursor|antigravity]'."
+                );
             } else {
                 let is_tty = std::io::stdout().is_terminal();
                 for r in results {
-                    let status = if r.already_configured { "updated" } else { "configured" };
-                    if is_tty {
-                        println!("  \x1b[38;5;150m✓\x1b[0m  \x1b[38;5;245m{}\x1b[0m  \x1b[1;37m{}\x1b[0m  \x1b[38;5;240m·\x1b[0m  \x1b[38;5;245m{}\x1b[0m", status, r.client.display_name(), r.path.display());
+                    let status = if r.already_configured {
+                        "updated"
                     } else {
-                        println!("{} {} in {}", status, r.client.display_name(), r.path.display());
+                        "configured"
+                    };
+                    if is_tty {
+                        println!(
+                            "  \x1b[38;5;150m✓\x1b[0m  \x1b[38;5;245m{}\x1b[0m  \x1b[1;37m{}\x1b[0m  \x1b[38;5;240m·\x1b[0m  \x1b[38;5;245m{}\x1b[0m",
+                            status,
+                            r.client.display_name(),
+                            r.path.display()
+                        );
+                    } else {
+                        println!(
+                            "{} {} in {}",
+                            status,
+                            r.client.display_name(),
+                            r.path.display()
+                        );
                     }
                 }
             }

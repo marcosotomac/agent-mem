@@ -1,5 +1,5 @@
 use crate::error::Result;
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -137,20 +137,29 @@ impl Store {
         let trimmed_key = key.trim();
         let trimmed_val = val.trim();
         if trimmed_key.is_empty() {
-            return Err(crate::error::Error::Usage("Memory key cannot be empty".into()));
+            return Err(crate::error::Error::Usage(
+                "Memory key cannot be empty".into(),
+            ));
         }
         if trimmed_val.is_empty() {
-            return Err(crate::error::Error::Usage("Memory value cannot be empty".into()));
+            return Err(crate::error::Error::Usage(
+                "Memory value cannot be empty".into(),
+            ));
         }
 
         let now = now_epoch();
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO memories (key, val, updated_at, anchor) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor;",
             params![trimmed_key, trimmed_val, now, anchor],
         )?;
-        tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![trimmed_key])?;
+        tx.execute(
+            "DELETE FROM memories_fts WHERE key = ?1;",
+            params![trimmed_key],
+        )?;
         tx.execute(
             "INSERT INTO memories_fts (key, val, anchor) VALUES (?1, ?2, ?3);",
             params![trimmed_key, trimmed_val, anchor],
@@ -170,7 +179,9 @@ impl Store {
         if key.trim().is_empty() {
             return Ok(None);
         }
-        let mut stmt = self.conn.prepare("SELECT val, anchor FROM memories WHERE key = ?1 LIMIT 1;")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT val, anchor FROM memories WHERE key = ?1 LIMIT 1;")?;
         let mut rows = stmt.query(params![key.trim()])?;
 
         if let Some(row) = rows.next()? {
@@ -187,7 +198,9 @@ impl Store {
         if key.trim().is_empty() {
             return Ok(None);
         }
-        let mut stmt = self.conn.prepare("SELECT val FROM memories WHERE key = ?1 LIMIT 1;")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT val FROM memories WHERE key = ?1 LIMIT 1;")?;
         let mut rows = stmt.query(params![key.trim()])?;
 
         if let Some(row) = rows.next()? {
@@ -203,10 +216,15 @@ impl Store {
         if key.trim().is_empty() {
             return Ok(false);
         }
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changes = tx.execute("DELETE FROM memories WHERE key = ?1;", params![key.trim()])?;
         if changes > 0 {
-            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![key.trim()])?;
+            tx.execute(
+                "DELETE FROM memories_fts WHERE key = ?1;",
+                params![key.trim()],
+            )?;
         }
         tx.commit()?;
         Ok(changes > 0)
@@ -214,7 +232,9 @@ impl Store {
 
     /// Dump all memories ordered by key.
     pub fn dump(&self) -> Result<Vec<RuleEntry>> {
-        let mut stmt = self.conn.prepare("SELECT key, val, anchor FROM memories ORDER BY key ASC;")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, val, anchor FROM memories ORDER BY key ASC;")?;
         let mut rows = stmt.query([])?;
         let mut list = Vec::new();
 
@@ -227,7 +247,9 @@ impl Store {
     /// Build a safe FTS5 query string from user input without breaking Porter stemming.
     fn sanitize_fts_query(raw: &str) -> String {
         let clean_tokens: Vec<String> = raw
-            .split(|c: char| c.is_whitespace() || (c.is_ascii_punctuation() && c != '_' && c != '-' && c != '*'))
+            .split(|c: char| {
+                c.is_whitespace() || (c.is_ascii_punctuation() && c != '_' && c != '-' && c != '*')
+            })
             .filter_map(|token| {
                 let is_prefix = token.ends_with('*');
                 let trimmed = if is_prefix {
@@ -284,7 +306,10 @@ impl Store {
         }
 
         // Fallback to substring matching only if FTS query failed to execute
-        let escaped = trimmed.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         let like_pattern = format!("%{}%", escaped);
         let mut stmt = self.conn.prepare(
             "SELECT key, val, anchor FROM memories WHERE key LIKE ?1 ESCAPE '\\' OR val LIKE ?1 ESCAPE '\\' OR anchor LIKE ?1 ESCAPE '\\' ORDER BY key ASC LIMIT 10;",
@@ -303,11 +328,15 @@ impl Store {
     pub fn session_add(&mut self, summary: &str) -> Result<i64> {
         let trimmed = summary.trim();
         if trimmed.is_empty() {
-            return Err(crate::error::Error::Usage("Session summary cannot be empty".into()));
+            return Err(crate::error::Error::Usage(
+                "Session summary cannot be empty".into(),
+            ));
         }
 
         let now = now_epoch();
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);",
             params![trimmed, now],
@@ -324,7 +353,9 @@ impl Store {
 
     /// List recent session checkpoints.
     pub fn session_list(&self, limit: usize) -> Result<Vec<SessionEntry>> {
-        let mut stmt = self.conn.prepare("SELECT id, summary FROM sessions ORDER BY id DESC LIMIT ?1;")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, summary FROM sessions ORDER BY id DESC LIMIT ?1;")?;
         let mut rows = stmt.query(params![limit as i64])?;
         let mut list = Vec::new();
 
@@ -374,14 +405,28 @@ impl Store {
                 if let Some(idx) = rest.rfind(" (@ ") {
                     let v = rest[..idx].trim();
                     let a = rest[idx + 4..rest.len() - 1].trim();
-                    (v.to_string(), if a.is_empty() { None } else { Some(a.to_string()) })
+                    (
+                        v.to_string(),
+                        if a.is_empty() {
+                            None
+                        } else {
+                            Some(a.to_string())
+                        },
+                    )
                 } else {
                     (rest.to_string(), None)
                 }
             } else if let Some(idx) = rest.rfind(" @ ") {
                 let v = rest[..idx].trim();
                 let a = rest[idx + 3..].trim();
-                (v.to_string(), if a.is_empty() { None } else { Some(a.to_string()) })
+                (
+                    v.to_string(),
+                    if a.is_empty() {
+                        None
+                    } else {
+                        Some(a.to_string())
+                    },
+                )
             } else {
                 (rest.to_string(), None)
             };
@@ -438,7 +483,9 @@ impl Store {
         let content = fs::read_to_string(path)?;
         let rules = Self::parse_rules_text(&content);
 
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM memories;", [])?;
         tx.execute("DELETE FROM memories_fts;", [])?;
 

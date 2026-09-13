@@ -2,12 +2,12 @@ use crate::init::InitReport;
 use std::io::{self, BufWriter, IsTerminal, Write};
 
 // shadcn / geist color tokens (256-color ANSI for terminal fidelity)
-const ACCENT: &str = "\x1b[1;37m";        // Pure white bold (headings, keys)
-const MUTED: &str = "\x1b[38;5;245m";     // Zinc-400 (secondary text, labels)
-const SUBTLE: &str = "\x1b[38;5;240m";    // Zinc-700 (dots, borders, numbers)
-const BODY: &str = "\x1b[38;5;252m";      // Zinc-200 (readable body text)
-const EMERALD: &str = "\x1b[38;5;150m";   // Soft emerald green (checks, success)
-const AMBER: &str = "\x1b[38;5;216m";     // Soft amber (warnings, deletions)
+const ACCENT: &str = "\x1b[1;37m"; // Pure white bold (headings, keys)
+const MUTED: &str = "\x1b[38;5;245m"; // Zinc-400 (secondary text, labels)
+const SUBTLE: &str = "\x1b[38;5;240m"; // Zinc-700 (dots, borders, numbers)
+const BODY: &str = "\x1b[38;5;252m"; // Zinc-200 (readable body text)
+const EMERALD: &str = "\x1b[38;5;150m"; // Soft emerald green (checks, success)
+const AMBER: &str = "\x1b[38;5;216m"; // Soft amber (warnings, deletions)
 const RESET: &str = "\x1b[0m";
 
 pub fn print_get(val: &str) {
@@ -26,7 +26,9 @@ pub fn print_get(val: &str) {
 pub fn print_set(key: &str, anchor: Option<&str>) {
     if io::stdout().is_terminal() {
         match anchor {
-            Some(a) => println!("  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {ACCENT}{key}{RESET}  {SUBTLE}·{RESET}  {MUTED}{a}{RESET}"),
+            Some(a) => println!(
+                "  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {ACCENT}{key}{RESET}  {SUBTLE}·{RESET}  {MUTED}{a}{RESET}"
+            ),
             None => println!("  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {ACCENT}{key}{RESET}"),
         }
     } else {
@@ -55,7 +57,9 @@ pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let is_tty = io::stdout().is_terminal();
     if entries.is_empty() {
         if is_tty {
-            println!("  {SUBTLE}◇{RESET}  {MUTED}no memories recorded yet. Run 'agent-mem set <key> <val>' to add one.{RESET}");
+            println!(
+                "  {SUBTLE}◇{RESET}  {MUTED}no memories recorded yet. Run 'agent-mem set <key> <val>' to add one.{RESET}"
+            );
         }
         return;
     }
@@ -75,14 +79,19 @@ pub fn print_dump(entries: &[(String, String, Option<String>)]) {
                 let _ = writeln!(
                     out,
                     "  {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}  {MUTED}{}{RESET}",
-                    key, val, a, width = max_key_len
+                    key,
+                    val,
+                    a,
+                    width = max_key_len
                 );
             }
             (true, None) => {
                 let _ = writeln!(
                     out,
                     "  {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}",
-                    key, val, width = max_key_len
+                    key,
+                    val,
+                    width = max_key_len
                 );
             }
             (false, Some(a)) => {
@@ -99,7 +108,10 @@ pub fn print_dump(entries: &[(String, String, Option<String>)]) {
 pub fn print_find(query: &str, entries: &[(String, String, Option<String>)]) {
     if entries.is_empty() {
         if io::stdout().is_terminal() {
-            println!("  {SUBTLE}◇{RESET}  {MUTED}no memories found matching{RESET} '{}'", query);
+            println!(
+                "  {SUBTLE}◇{RESET}  {MUTED}no memories found matching{RESET} '{}'",
+                query
+            );
         }
         return;
     }
@@ -158,7 +170,10 @@ pub fn print_init(report: &InitReport) {
 
     if is_tty {
         println!();
-        println!("  {ACCENT}agent-mem{RESET} {MUTED}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}initialized{RESET}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "  {ACCENT}agent-mem{RESET} {MUTED}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}initialized{RESET}",
+            env!("CARGO_PKG_VERSION")
+        );
         println!("  {SUBTLE}{}{RESET}", report.root.display());
         println!();
         println!("  {MUTED}store{RESET}     .agent-mem/mem.db  {SUBTLE}(sqlite wal){RESET}");
@@ -166,23 +181,38 @@ pub fn print_init(report: &InitReport) {
             println!("  {MUTED}git{RESET}       .agent-mem/ added to .gitignore");
         }
         if report.gitattributes_updated {
-            println!("  {MUTED}git{RESET}       .agent-rules union merge configured in .gitattributes");
+            println!(
+                "  {MUTED}git{RESET}       .agent-rules union merge configured in .gitattributes"
+            );
         }
         if report.hook_configured {
-            println!("  {MUTED}hooks{RESET}     post-commit active  {SUBTLE}(auto-sessions){RESET}");
+            println!(
+                "  {MUTED}hooks{RESET}     post-commit active  {SUBTLE}(auto-sessions){RESET}"
+            );
         }
         if report.post_merge_configured {
             println!("  {MUTED}hooks{RESET}     post-merge active  {SUBTLE}(auto-sync){RESET}");
         }
         if report.rules_file_created {
-            println!("  {MUTED}sync{RESET}      created .agent-rules  {SUBTLE}(team git sync){RESET}");
+            println!(
+                "  {MUTED}sync{RESET}      created .agent-rules  {SUBTLE}(team git sync){RESET}"
+            );
         }
         if report.created_rule_file {
-            println!("  {MUTED}protocol{RESET}  created {}", report.trigger_target);
+            println!(
+                "  {MUTED}protocol{RESET}  created {}",
+                report.trigger_target
+            );
         } else if report.trigger_updated {
-            println!("  {MUTED}protocol{RESET}  updated {}", report.trigger_target);
+            println!(
+                "  {MUTED}protocol{RESET}  updated {}",
+                report.trigger_target
+            );
         } else {
-            println!("  {MUTED}protocol{RESET}  active in {}", report.trigger_target);
+            println!(
+                "  {MUTED}protocol{RESET}  active in {}",
+                report.trigger_target
+            );
         }
         println!();
     } else {
@@ -208,12 +238,22 @@ pub fn print_init(report: &InitReport) {
 
 pub fn print_sync(report: &crate::store::SyncReport) {
     let is_tty = io::stdout().is_terminal();
-    let file_name = report.path.file_name().and_then(|n| n.to_str()).unwrap_or(".agent-rules");
+    let file_name = report
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(".agent-rules");
     if is_tty {
         if report.file_created {
-            println!("  {EMERALD}✓{RESET}  {MUTED}created{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules exported{RESET}", report.total);
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}created{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules exported{RESET}",
+                report.total
+            );
         } else if report.file_updated {
-            println!("  {EMERALD}✓{RESET}  {MUTED}exported{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules written{RESET}", report.total);
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}exported{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules written{RESET}",
+                report.total
+            );
         } else {
             println!(
                 "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active{RESET}",
@@ -234,25 +274,48 @@ pub fn print_help() {
 
     if is_tty {
         println!();
-        println!("  {ACCENT}agent-mem{RESET} {MUTED}{}{RESET}", env!("CARGO_PKG_VERSION"));
-        println!("  {MUTED}Local-first, sub-millisecond memory engine for AI coding agents.{RESET}");
+        println!(
+            "  {ACCENT}agent-mem{RESET} {MUTED}{}{RESET}",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!(
+            "  {MUTED}Local-first, sub-millisecond memory engine for AI coding agents.{RESET}"
+        );
         println!();
         println!("  {MUTED}Usage{RESET}");
         println!("    {SUBTLE}${RESET} agent-mem {MUTED}<command> [arguments]{RESET}");
         println!();
         println!("  {MUTED}Commands{RESET}");
-        println!("    {ACCENT}init{RESET}                    Initialize isolated memory in repository");
-        println!("    {ACCENT}get{RESET}     {MUTED}<key>{RESET}           Retrieve raw value for key");
-        println!("    {ACCENT}set{RESET}     {MUTED}<key> <val>{RESET}     Record or update memory rule");
+        println!(
+            "    {ACCENT}init{RESET}                    Initialize isolated memory in repository"
+        );
+        println!(
+            "    {ACCENT}get{RESET}     {MUTED}<key>{RESET}           Retrieve raw value for key"
+        );
+        println!(
+            "    {ACCENT}set{RESET}     {MUTED}<key> <val>{RESET}     Record or update memory rule"
+        );
         println!("    {ACCENT}del{RESET}     {MUTED}<key>{RESET}           Delete a memory rule");
-        println!("    {ACCENT}find{RESET}    {MUTED}<query>{RESET}         Search rules via BM25 index");
+        println!(
+            "    {ACCENT}find{RESET}    {MUTED}<query>{RESET}         Search rules via BM25 index"
+        );
         println!("    {ACCENT}dump{RESET}                    List all active rules");
-        println!("    {ACCENT}sync{RESET}    {MUTED}[file] [--export]{RESET} Synchronize team rules (.agent-rules)");
+        println!(
+            "    {ACCENT}sync{RESET}    {MUTED}[file] [--export]{RESET} Synchronize team rules (.agent-rules)"
+        );
         println!("    {ACCENT}context{RESET}                 Export dense prompt block");
-        println!("    {ACCENT}session{RESET} {MUTED}add <msg>{RESET}       Record session checkpoint");
-        println!("    {ACCENT}session{RESET} {MUTED}list{RESET}            Display recent checkpoints");
-        println!("    {ACCENT}mcp{RESET}                     Start Model Context Protocol stdio server");
-        println!("    {ACCENT}mcp{RESET}     {MUTED}install [client]{RESET} Configure Claude Desktop, Cursor, or Antigravity");
+        println!(
+            "    {ACCENT}session{RESET} {MUTED}add <msg>{RESET}       Record session checkpoint"
+        );
+        println!(
+            "    {ACCENT}session{RESET} {MUTED}list{RESET}            Display recent checkpoints"
+        );
+        println!(
+            "    {ACCENT}mcp{RESET}                     Start Model Context Protocol stdio server"
+        );
+        println!(
+            "    {ACCENT}mcp{RESET}     {MUTED}install [client]{RESET} Configure Claude Desktop, Cursor, or Antigravity"
+        );
         println!();
     } else {
         println!(

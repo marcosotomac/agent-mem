@@ -2,8 +2,15 @@ use std::fs;
 use std::process::Command;
 
 fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
-    let bin_dir = std::env::current_dir().unwrap().join("target").join("debug");
-    let path_var = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
+    let bin_dir = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join("debug");
+    let path_var = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let output = Command::new("git")
         .current_dir(dir)
         .env("PATH", path_var)
@@ -78,11 +85,16 @@ fn test_git_multi_branch_workflow_and_zero_merge_conflicts() {
     run_git(&temp_dir, &["checkout", "main"]);
 
     // Sync main
-    let sync_main = agent_mem::cli::Command::Sync { file: None, export: false };
+    let sync_main = agent_mem::cli::Command::Sync {
+        file: None,
+        export: false,
+    };
     agent_mem::cli::execute_command(sync_main, &temp_dir).unwrap();
 
     // In main, auth/provider MUST NOT exist!
-    let get_auth_in_main = agent_mem::cli::Command::Get { key: "auth/provider".into() };
+    let get_auth_in_main = agent_mem::cli::Command::Get {
+        key: "auth/provider".into(),
+    };
     let get_res = agent_mem::cli::execute_command(get_auth_in_main, &temp_dir);
     assert!(matches!(get_res, Err(agent_mem::error::Error::NotFound(_))));
 
@@ -96,11 +108,23 @@ fn test_git_multi_branch_workflow_and_zero_merge_conflicts() {
     agent_mem::cli::execute_command(set_billing, &temp_dir).unwrap();
 
     run_git(&temp_dir, &["add", "."]);
-    run_git(&temp_dir, &["commit", "-m", "feat: add stripe billing rule"]);
+    run_git(
+        &temp_dir,
+        &["commit", "-m", "feat: add stripe billing rule"],
+    );
 
     // 6. Merge feature-auth into main
     run_git(&temp_dir, &["checkout", "main"]);
-    run_git(&temp_dir, &["merge", "--no-ff", "feature-auth", "-m", "merge: integrate feature-auth"]);
+    run_git(
+        &temp_dir,
+        &[
+            "merge",
+            "--no-ff",
+            "feature-auth",
+            "-m",
+            "merge: integrate feature-auth",
+        ],
+    );
 
     // Verify auth/provider is now in main
     let store_main = agent_mem::store::Store::open(&store_path, false).unwrap();
@@ -110,10 +134,22 @@ fn test_git_multi_branch_workflow_and_zero_merge_conflicts() {
     );
 
     // 7. Merge feature-billing into main (git merges .agent-rules cleanly without SQLite binary conflicts)
-    run_git(&temp_dir, &["merge", "--no-ff", "feature-billing", "-m", "merge: integrate feature-billing"]);
+    run_git(
+        &temp_dir,
+        &[
+            "merge",
+            "--no-ff",
+            "feature-billing",
+            "-m",
+            "merge: integrate feature-billing",
+        ],
+    );
 
     // Trigger sync on main
-    let sync_merged = agent_mem::cli::Command::Sync { file: None, export: false };
+    let sync_merged = agent_mem::cli::Command::Sync {
+        file: None,
+        export: false,
+    };
     agent_mem::cli::execute_command(sync_merged, &temp_dir).unwrap();
 
     let store_merged = agent_mem::store::Store::open(&store_path, false).unwrap();
@@ -128,18 +164,39 @@ fn test_git_multi_branch_workflow_and_zero_merge_conflicts() {
 
     // 8. Test Deletion across branches: Zero Zombie Memories
     run_git(&temp_dir, &["checkout", "-b", "feature-cleanup"]);
-    let del_cmd = agent_mem::cli::Command::Del { key: "auth/provider".into() };
+    let del_cmd = agent_mem::cli::Command::Del {
+        key: "auth/provider".into(),
+    };
     agent_mem::cli::execute_command(del_cmd, &temp_dir).unwrap();
 
     run_git(&temp_dir, &["add", "."]);
-    run_git(&temp_dir, &["commit", "-m", "chore: delete deprecated auth/provider rule"]);
+    run_git(
+        &temp_dir,
+        &[
+            "commit",
+            "-m",
+            "chore: delete deprecated auth/provider rule",
+        ],
+    );
 
     // Switch to main and merge cleanup
     run_git(&temp_dir, &["checkout", "main"]);
-    run_git(&temp_dir, &["merge", "--no-ff", "feature-cleanup", "-m", "merge: cleanup auth rule"]);
+    run_git(
+        &temp_dir,
+        &[
+            "merge",
+            "--no-ff",
+            "feature-cleanup",
+            "-m",
+            "merge: cleanup auth rule",
+        ],
+    );
 
     // Sync main
-    let sync_cleanup = agent_mem::cli::Command::Sync { file: None, export: false };
+    let sync_cleanup = agent_mem::cli::Command::Sync {
+        file: None,
+        export: false,
+    };
     agent_mem::cli::execute_command(sync_cleanup, &temp_dir).unwrap();
 
     let store_final = agent_mem::store::Store::open(&store_path, false).unwrap();

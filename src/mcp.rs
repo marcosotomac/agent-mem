@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::init::{find_project_root, global_db_path};
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -145,7 +145,11 @@ impl McpServer {
             }),
 
             "tools/call" => {
-                let name = req.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let name = req
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let args = req.params.get("arguments").cloned().unwrap_or(json!({}));
 
                 match self.dispatch_tool(name, &args) {
@@ -201,7 +205,10 @@ impl McpServer {
                     crate::error::Error::Usage("Missing required argument 'val'".into())
                 })?;
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
-                let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("project");
+                let scope = args
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("project");
 
                 let mut store = self.open_store(scope, true)?;
                 store.set_with_anchor(key, val, anchor)?;
@@ -228,25 +235,31 @@ impl McpServer {
 
                 if (scope == "all" || scope == "project")
                     && let Ok(store) = self.open_store("project", false)
-                        && let Ok(results) = store.find(query) {
-                            for (k, v, a) in results {
-                                match a {
-                                    Some(anchor) => lines.push(format!("[project] {}: {} ({})", k, v, anchor)),
-                                    None => lines.push(format!("[project] {}: {}", k, v)),
-                                }
+                    && let Ok(results) = store.find(query)
+                {
+                    for (k, v, a) in results {
+                        match a {
+                            Some(anchor) => {
+                                lines.push(format!("[project] {}: {} ({})", k, v, anchor))
                             }
+                            None => lines.push(format!("[project] {}: {}", k, v)),
                         }
+                    }
+                }
 
                 if (scope == "all" || scope == "global")
                     && let Ok(store) = self.open_store("global", false)
-                        && let Ok(results) = store.find(query) {
-                            for (k, v, a) in results {
-                                match a {
-                                    Some(anchor) => lines.push(format!("[global] {}: {} ({})", k, v, anchor)),
-                                    None => lines.push(format!("[global] {}: {}", k, v)),
-                                }
+                    && let Ok(results) = store.find(query)
+                {
+                    for (k, v, a) in results {
+                        match a {
+                            Some(anchor) => {
+                                lines.push(format!("[global] {}: {} ({})", k, v, anchor))
                             }
+                            None => lines.push(format!("[global] {}: {}", k, v)),
                         }
+                    }
+                }
 
                 if lines.is_empty() {
                     Ok(format!("No memories found for '{}'", query))
@@ -263,36 +276,38 @@ impl McpServer {
 
                 if (scope == "all" || scope == "project")
                     && let Ok(store) = self.open_store("project", false)
-                        && let Ok((rules, sessions)) = store.context() {
-                            if !rules.is_empty() {
-                                lines.push("== PROJECT RULES ==".to_string());
-                                for (k, v, a) in rules.into_iter().take(limit) {
-                                    match a {
-                                        Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
-                                        None => lines.push(format!("{}: {}", k, v)),
-                                    }
-                                }
-                            }
-                            if !sessions.is_empty() {
-                                lines.push("== SESSIONS ==".to_string());
-                                for (id, summary) in sessions {
-                                    lines.push(format!("[#{}] {}", id, summary));
-                                }
+                    && let Ok((rules, sessions)) = store.context()
+                {
+                    if !rules.is_empty() {
+                        lines.push("== PROJECT RULES ==".to_string());
+                        for (k, v, a) in rules.into_iter().take(limit) {
+                            match a {
+                                Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
+                                None => lines.push(format!("{}: {}", k, v)),
                             }
                         }
+                    }
+                    if !sessions.is_empty() {
+                        lines.push("== SESSIONS ==".to_string());
+                        for (id, summary) in sessions {
+                            lines.push(format!("[#{}] {}", id, summary));
+                        }
+                    }
+                }
 
                 if (scope == "all" || scope == "global")
                     && let Ok(store) = self.open_store("global", false)
-                        && let Ok(rules) = store.dump()
-                            && !rules.is_empty() {
-                                lines.push("== GLOBAL PREFERENCES ==".to_string());
-                                for (k, v, a) in rules.into_iter().take(limit) {
-                                    match a {
-                                        Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
-                                        None => lines.push(format!("{}: {}", k, v)),
-                                    }
-                                }
-                            }
+                    && let Ok(rules) = store.dump()
+                    && !rules.is_empty()
+                {
+                    lines.push("== GLOBAL PREFERENCES ==".to_string());
+                    for (k, v, a) in rules.into_iter().take(limit) {
+                        match a {
+                            Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
+                            None => lines.push(format!("{}: {}", k, v)),
+                        }
+                    }
+                }
 
                 if lines.is_empty() {
                     Ok("No active context recorded.".to_string())
@@ -301,7 +316,10 @@ impl McpServer {
                 }
             }
 
-            unknown => Err(crate::error::Error::Usage(format!("Unknown tool: {}", unknown))),
+            unknown => Err(crate::error::Error::Usage(format!(
+                "Unknown tool: {}",
+                unknown
+            ))),
         }
     }
 

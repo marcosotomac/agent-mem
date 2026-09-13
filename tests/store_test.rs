@@ -9,14 +9,24 @@ fn test_crud_lifecycle() {
 
     // Set rule
     store.set("arch", "Clean Architecture with Rust").unwrap();
-    assert_eq!(store.get("arch").unwrap().as_deref(), Some("Clean Architecture with Rust"));
+    assert_eq!(
+        store.get("arch").unwrap().as_deref(),
+        Some("Clean Architecture with Rust")
+    );
 
     // Upsert rule
-    store.set("arch", "Hexagonal Architecture with Rust").unwrap();
-    assert_eq!(store.get("arch").unwrap().as_deref(), Some("Hexagonal Architecture with Rust"));
+    store
+        .set("arch", "Hexagonal Architecture with Rust")
+        .unwrap();
+    assert_eq!(
+        store.get("arch").unwrap().as_deref(),
+        Some("Hexagonal Architecture with Rust")
+    );
 
     // Add another key
-    store.set("tests", "Always write unit and integration tests").unwrap();
+    store
+        .set("tests", "Always write unit and integration tests")
+        .unwrap();
 
     // Dump
     let dumped = store.dump().unwrap();
@@ -38,9 +48,18 @@ fn test_crud_lifecycle() {
 fn test_fts_and_fallback() {
     let mut store = Store::open_in_memory().expect("open in memory db");
 
-    store.set("db-rule", "Use SQLite in WAL mode for sub-millisecond reads").unwrap();
-    store.set("auth-rule", "JWT tokens must be verified with RS256").unwrap();
-    store.set("api-rule", "Prefer HTTP/2 streaming over polling").unwrap();
+    store
+        .set(
+            "db-rule",
+            "Use SQLite in WAL mode for sub-millisecond reads",
+        )
+        .unwrap();
+    store
+        .set("auth-rule", "JWT tokens must be verified with RS256")
+        .unwrap();
+    store
+        .set("api-rule", "Prefer HTTP/2 streaming over polling")
+        .unwrap();
 
     // Search keyword in value
     let results = store.find("SQLite WAL").unwrap();
@@ -53,7 +72,9 @@ fn test_fts_and_fallback() {
     assert_eq!(results_key[0].0, "auth-rule");
 
     // Search with special characters (must not crash FTS5 parser)
-    let safe_search = store.find("SQLite: \"WAL\" mode (sub-millisecond)").unwrap();
+    let safe_search = store
+        .find("SQLite: \"WAL\" mode (sub-millisecond)")
+        .unwrap();
     assert!(!safe_search.is_empty());
     assert_eq!(safe_search[0].0, "db-rule");
 
@@ -66,7 +87,9 @@ fn test_fts_and_fallback() {
 fn test_no_phantom_results_after_delete() {
     let mut store = Store::open_in_memory().expect("open in memory db");
 
-    store.set("ghost-key", "this should disappear completely").unwrap();
+    store
+        .set("ghost-key", "this should disappear completely")
+        .unwrap();
     let found = store.find("disappear").unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].0, "ghost-key");
@@ -103,7 +126,9 @@ fn test_session_lifecycle() {
 fn test_context_export() {
     let mut store = Store::open_in_memory().expect("open in memory db");
 
-    store.set("convention", "Conventional commits only").unwrap();
+    store
+        .set("convention", "Conventional commits only")
+        .unwrap();
     store.session_add("Setup project structure").unwrap();
 
     let (rules, sessions) = store.context().unwrap();
@@ -120,7 +145,9 @@ fn test_fts_porter_stemming_and_no_wildcard_pollution() {
     store
         .set("arch-rule", "Clean architectural design patterns")
         .unwrap();
-    store.set("wallet-rule", "Keep keys in your secure wallet").unwrap();
+    store
+        .set("wallet-rule", "Keep keys in your secure wallet")
+        .unwrap();
 
     // 1. Porter stemming: "architecture" should stem to match "architectural"
     let stemmed = store.find("architecture").unwrap();
@@ -155,11 +182,17 @@ fn test_zero_byte_database_resilience() {
 
     // 1. Read open on 0-byte database must return NotInitialized instead of panicking with "no such table"
     let read_res = Store::open(&db_path, false);
-    assert!(matches!(read_res, Err(agent_mem::error::Error::NotInitialized)));
+    assert!(matches!(
+        read_res,
+        Err(agent_mem::error::Error::NotInitialized)
+    ));
 
     // 2. Write open on 0-byte database must recover and initialize schema
-    let mut write_store = Store::open(&db_path, true).expect("write open should initialize 0-byte db");
-    write_store.set("recovered", "schema initialized successfully").unwrap();
+    let mut write_store =
+        Store::open(&db_path, true).expect("write open should initialize 0-byte db");
+    write_store
+        .set("recovered", "schema initialized successfully")
+        .unwrap();
     assert_eq!(
         write_store.get("recovered").unwrap().as_deref(),
         Some("schema initialized successfully")
@@ -226,15 +259,24 @@ fn test_empty_input_exceptions() {
 
     // 1. Empty key in set
     let res_empty_key = store.set("   ", "valid value");
-    assert!(matches!(res_empty_key, Err(agent_mem::error::Error::Usage(_))));
+    assert!(matches!(
+        res_empty_key,
+        Err(agent_mem::error::Error::Usage(_))
+    ));
 
     // 2. Empty val in set
     let res_empty_val = store.set("valid_key", "   ");
-    assert!(matches!(res_empty_val, Err(agent_mem::error::Error::Usage(_))));
+    assert!(matches!(
+        res_empty_val,
+        Err(agent_mem::error::Error::Usage(_))
+    ));
 
     // 3. Empty summary in session_add
     let res_empty_session = store.session_add("   ");
-    assert!(matches!(res_empty_session, Err(agent_mem::error::Error::Usage(_))));
+    assert!(matches!(
+        res_empty_session,
+        Err(agent_mem::error::Error::Usage(_))
+    ));
 
     // 4. Empty query in find returns empty list safely
     let res_empty_find = store.find("   ").unwrap();
@@ -265,11 +307,47 @@ api/streaming: Prefer HTTP/2 streaming (@ src/api.rs:10)
 
     let rules = Store::parse_rules_text(input);
     assert_eq!(rules.len(), 5);
-    assert_eq!(rules[0], ("architecture/db".into(), "Use SQLite WAL mode without rowid".into(), None));
-    assert_eq!(rules[1], ("auth/jwt".into(), "RS256 with 15-minute expiration".into(), Some("src/auth.rs:42".into())));
-    assert_eq!(rules[2], ("conventions/naming".into(), "Use snake_case for functions".into(), None));
-    assert_eq!(rules[3], ("comments/ignored".into(), "// this line should not be ignored as a rule if key=val, but comments start with //".into(), None));
-    assert_eq!(rules[4], ("api/streaming".into(), "Prefer HTTP/2 streaming".into(), Some("src/api.rs:10".into())));
+    assert_eq!(
+        rules[0],
+        (
+            "architecture/db".into(),
+            "Use SQLite WAL mode without rowid".into(),
+            None
+        )
+    );
+    assert_eq!(
+        rules[1],
+        (
+            "auth/jwt".into(),
+            "RS256 with 15-minute expiration".into(),
+            Some("src/auth.rs:42".into())
+        )
+    );
+    assert_eq!(
+        rules[2],
+        (
+            "conventions/naming".into(),
+            "Use snake_case for functions".into(),
+            None
+        )
+    );
+    assert_eq!(
+        rules[3],
+        (
+            "comments/ignored".into(),
+            "// this line should not be ignored as a rule if key=val, but comments start with //"
+                .into(),
+            None
+        )
+    );
+    assert_eq!(
+        rules[4],
+        (
+            "api/streaming".into(),
+            "Prefer HTTP/2 streaming".into(),
+            Some("src/api.rs:10".into())
+        )
+    );
 
     // Verify deterministic export from Store
     let mut store = Store::open_in_memory().unwrap();
@@ -297,7 +375,9 @@ fn test_sync_with_file_lifecycle() {
     let rules_path = temp_dir.join(".agent-rules");
 
     let mut store = Store::open(&db_path, true).unwrap();
-    store.set_with_anchor("arch/db", "SQLite WAL", Some("src/main.rs:1")).unwrap();
+    store
+        .set_with_anchor("arch/db", "SQLite WAL", Some("src/main.rs:1"))
+        .unwrap();
     store.set("auth/type", "OAuth2").unwrap();
 
     // 1. Sync when file doesn't exist -> creates file

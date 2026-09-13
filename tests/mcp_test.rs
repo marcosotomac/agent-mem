@@ -42,13 +42,17 @@ fn test_mcp_initialize_and_tools_list() {
         params: json!({}),
     };
     let list_resp = server.handle_request(&list_req).expect("response expected");
-    let tools = list_resp.result.unwrap()["tools"].as_array().unwrap().clone();
-    assert_eq!(tools.len(), 3, "must have exactly 3 surgical tools to preserve token budget");
+    let tools = list_resp.result.unwrap()["tools"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        tools.len(),
+        3,
+        "must have exactly 3 surgical tools to preserve token budget"
+    );
 
-    let tool_names: Vec<&str> = tools
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(tool_names, vec!["mem_set", "mem_find", "mem_context"]);
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -85,8 +89,14 @@ fn test_mcp_tool_execution_and_dual_scopes() {
         }),
     };
     let resp = server.handle_request(&set_proj_req).unwrap();
-    let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
-    assert_eq!(text, "saved [project] architecture/auth (src/auth/jwt.rs:42)");
+    let text = resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        text,
+        "saved [project] architecture/auth (src/auth/jwt.rs:42)"
+    );
 
     // 2. mem_set into global scope
     let set_glob_req = JsonRpcRequest {
@@ -103,7 +113,10 @@ fn test_mcp_tool_execution_and_dual_scopes() {
         }),
     };
     let resp = server.handle_request(&set_glob_req).unwrap();
-    let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let text = resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(text, "saved [global] personal/editor");
 
     // 3. mem_find across both scopes
@@ -120,7 +133,10 @@ fn test_mcp_tool_execution_and_dual_scopes() {
         }),
     };
     let resp = server.handle_request(&find_all_req).unwrap();
-    let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let text = resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(text.contains("[project] architecture/auth: JWT RS256 with key rotation"));
 
     // 4. mem_find restricted to global scope
@@ -137,7 +153,10 @@ fn test_mcp_tool_execution_and_dual_scopes() {
         }),
     };
     let resp = server.handle_request(&find_glob_req).unwrap();
-    let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let text = resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(text.contains("[global] personal/editor: Neovim with Zellij"));
 
     // 5. mem_context output
@@ -153,7 +172,10 @@ fn test_mcp_tool_execution_and_dual_scopes() {
         }),
     };
     let resp = server.handle_request(&context_req).unwrap();
-    let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let text = resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(text.contains("== PROJECT RULES =="));
     assert!(text.contains("architecture/auth: JWT RS256 with key rotation"));
     assert!(text.contains("== GLOBAL PREFERENCES =="));
@@ -200,7 +222,12 @@ fn test_mcp_exceptions_and_errors() {
     let resp = server.handle_request(&unknown_tool_req).unwrap();
     let res = resp.result.unwrap();
     assert_eq!(res["isError"], true);
-    assert!(res["content"][0]["text"].as_str().unwrap().contains("Unknown tool"));
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown tool")
+    );
 
     // 3. mem_set with missing arguments returns error with isError: true
     let missing_arg_req = JsonRpcRequest {
@@ -215,7 +242,12 @@ fn test_mcp_exceptions_and_errors() {
     let resp = server.handle_request(&missing_arg_req).unwrap();
     let res = resp.result.unwrap();
     assert_eq!(res["isError"], true);
-    assert!(res["content"][0]["text"].as_str().unwrap().contains("Missing required argument 'val'"));
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Missing required argument 'val'")
+    );
 
     // 4. mem_set with empty key returns error with isError: true
     let empty_key_req = JsonRpcRequest {
@@ -230,7 +262,12 @@ fn test_mcp_exceptions_and_errors() {
     let resp = server.handle_request(&empty_key_req).unwrap();
     let res = resp.result.unwrap();
     assert_eq!(res["isError"], true);
-    assert!(res["content"][0]["text"].as_str().unwrap().contains("Memory key cannot be empty"));
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Memory key cannot be empty")
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

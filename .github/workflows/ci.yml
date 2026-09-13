@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, dev, main ]
+  pull_request:
+    branches: [ master, dev, main ]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-format:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy linter
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run test suite
+        run: cargo test --all-targets
+
+      - name: Enforce Token Budget Ratchet (<160 tokens)
+        run: cargo test --test token_budget_test -- --nocapture
+
+  build-release-check:
+    name: Release Build & Size Ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build optimized release binary
+        run: cargo build --release
+
+      - name: Verify binary size budget (< 3.5 MB)
+        shell: bash
+        run: |
+          size=$(stat -c%s target/release/agent-mem)
+          echo "Release binary size: $size bytes"
+          if [ $size -gt 3670016 ]; then
+            echo "Error: Binary size exceeds 3.5 MB limit!"
+            exit 1
+          fi

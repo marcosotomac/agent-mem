@@ -1,5 +1,5 @@
-use agent_mem::installer::{install_to_path, TargetClient};
-use serde_json::{json, Value};
+use agent_mem::installer::{TargetClient, install_to_path};
+use serde_json::{Value, json};
 use std::fs;
 
 #[test]
@@ -31,7 +31,8 @@ fn test_installer_injects_and_preserves_servers() {
     fs::write(&res1.path, serde_json::to_string_pretty(&modified).unwrap()).unwrap();
 
     // 3. Re-run installer (idempotent update)
-    let res2 = install_to_path(&config_path, TargetClient::Cursor).expect("re-install should succeed");
+    let res2 =
+        install_to_path(&config_path, TargetClient::Cursor).expect("re-install should succeed");
     assert_eq!(res2.already_configured, true);
 
     let content2: Value = serde_json::from_str(&fs::read_to_string(&res2.path).unwrap()).unwrap();

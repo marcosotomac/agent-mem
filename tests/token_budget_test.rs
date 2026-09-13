@@ -27,7 +27,10 @@ fn test_mcp_schema_token_budget_ratchet() {
     let result_json = serde_json::to_string(&resp.result).expect("serialize");
 
     let char_count = result_json.len();
-    println!("agent-mem MCP tools/list payload length: {} characters", char_count);
+    println!(
+        "agent-mem MCP tools/list payload length: {} characters",
+        char_count
+    );
 
     assert!(
         char_count < 1050,

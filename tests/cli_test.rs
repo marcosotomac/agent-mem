@@ -1,4 +1,4 @@
-use agent_mem::cli::{parse_args, Command};
+use agent_mem::cli::{Command, parse_args};
 use agent_mem::init::find_project_root_from;
 use std::fs;
 
@@ -8,17 +8,33 @@ fn test_parse_args() {
     assert_eq!(parse_args(vec!["agent-mem".into()]).unwrap(), Command::Help);
 
     // Help
-    assert_eq!(parse_args(vec!["agent-mem".into(), "--help".into()]).unwrap(), Command::Help);
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "--help".into()]).unwrap(),
+        Command::Help
+    );
 
     // Version
-    assert_eq!(parse_args(vec!["agent-mem".into(), "-v".into()]).unwrap(), Command::Version);
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "-v".into()]).unwrap(),
+        Command::Version
+    );
 
     // Init
-    assert_eq!(parse_args(vec!["agent-mem".into(), "init".into()]).unwrap(), Command::Init);
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "init".into()]).unwrap(),
+        Command::Init
+    );
 
     // Set
     assert_eq!(
-        parse_args(vec!["agent-mem".into(), "set".into(), "k".into(), "v1".into(), "v2".into()]).unwrap(),
+        parse_args(vec![
+            "agent-mem".into(),
+            "set".into(),
+            "k".into(),
+            "v1".into(),
+            "v2".into()
+        ])
+        .unwrap(),
         Command::Set {
             key: "k".into(),
             val: "v1 v2".into(),
@@ -58,14 +74,30 @@ fn test_parse_args() {
 
     // Find
     assert_eq!(
-        parse_args(vec!["agent-mem".into(), "find".into(), "foo".into(), "bar".into()]).unwrap(),
-        Command::Find { query: "foo bar".into() }
+        parse_args(vec![
+            "agent-mem".into(),
+            "find".into(),
+            "foo".into(),
+            "bar".into()
+        ])
+        .unwrap(),
+        Command::Find {
+            query: "foo bar".into()
+        }
     );
 
     // Session add
     assert_eq!(
-        parse_args(vec!["agent-mem".into(), "session".into(), "add".into(), "checkpoint".into()]).unwrap(),
-        Command::SessionAdd { summary: "checkpoint".into() }
+        parse_args(vec![
+            "agent-mem".into(),
+            "session".into(),
+            "add".into(),
+            "checkpoint".into()
+        ])
+        .unwrap(),
+        Command::SessionAdd {
+            summary: "checkpoint".into()
+        }
     );
 
     // Session list
@@ -75,11 +107,20 @@ fn test_parse_args() {
     );
 
     // Context
-    assert_eq!(parse_args(vec!["agent-mem".into(), "context".into()]).unwrap(), Command::Context);
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "context".into()]).unwrap(),
+        Command::Context
+    );
 
     // Mcp
-    assert_eq!(parse_args(vec!["agent-mem".into(), "mcp".into()]).unwrap(), Command::Mcp);
-    assert_eq!(parse_args(vec!["agent-mem".into(), "--mcp".into()]).unwrap(), Command::Mcp);
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "mcp".into()]).unwrap(),
+        Command::Mcp
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "--mcp".into()]).unwrap(),
+        Command::Mcp
+    );
 
     // Mcp Install (auto)
     assert_eq!(
@@ -89,26 +130,52 @@ fn test_parse_args() {
 
     // Mcp Install (claude)
     assert_eq!(
-        parse_args(vec!["agent-mem".into(), "mcp".into(), "install".into(), "claude".into()]).unwrap(),
-        Command::McpInstall { client: Some("claude".into()) }
+        parse_args(vec![
+            "agent-mem".into(),
+            "mcp".into(),
+            "install".into(),
+            "claude".into()
+        ])
+        .unwrap(),
+        Command::McpInstall {
+            client: Some("claude".into())
+        }
     );
 
     // Sync
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "sync".into()]).unwrap(),
-        Command::Sync { file: None, export: false }
+        Command::Sync {
+            file: None,
+            export: false
+        }
     );
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "sync".into(), "--export".into()]).unwrap(),
-        Command::Sync { file: None, export: true }
+        Command::Sync {
+            file: None,
+            export: true
+        }
     );
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "sync".into(), "team.rules".into()]).unwrap(),
-        Command::Sync { file: Some("team.rules".into()), export: false }
+        Command::Sync {
+            file: Some("team.rules".into()),
+            export: false
+        }
     );
     assert_eq!(
-        parse_args(vec!["agent-mem".into(), "sync".into(), "team.rules".into(), "-e".into()]).unwrap(),
-        Command::Sync { file: Some("team.rules".into()), export: true }
+        parse_args(vec![
+            "agent-mem".into(),
+            "sync".into(),
+            "team.rules".into(),
+            "-e".into()
+        ])
+        .unwrap(),
+        Command::Sync {
+            file: Some("team.rules".into()),
+            export: true
+        }
     );
 
     // Missing required args return error
@@ -118,7 +185,13 @@ fn test_parse_args() {
 
 #[test]
 fn test_root_traversal() {
-    let temp_dir = std::env::temp_dir().join(format!("agent_mem_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let sub_dir = temp_dir.join("a").join("b").join("c");
     fs::create_dir_all(&sub_dir).unwrap();
 
@@ -155,7 +228,10 @@ fn test_read_does_not_mutate_uninitialized_directory() {
     // 2. Dump on uninitialized directory must also fail without creating .agent-mem
     let dump_cmd = Command::Dump;
     let dump_res = agent_mem::cli::execute_command(dump_cmd, &temp_dir);
-    assert!(matches!(dump_res, Err(agent_mem::error::Error::NotInitialized)));
+    assert!(matches!(
+        dump_res,
+        Err(agent_mem::error::Error::NotInitialized)
+    ));
     assert!(!temp_dir.join(".agent-mem").exists());
 
     let _ = fs::remove_dir_all(&temp_dir);

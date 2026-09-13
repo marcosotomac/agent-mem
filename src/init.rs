@@ -45,7 +45,10 @@ pub fn global_db_path() -> PathBuf {
         return PathBuf::from(dir).join("global.db");
     }
     if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home).join(".config").join("agent-mem").join("global.db")
+        PathBuf::from(home)
+            .join(".config")
+            .join("agent-mem")
+            .join("global.db")
     } else {
         PathBuf::from(".config").join("agent-mem").join("global.db")
     }
@@ -163,7 +166,7 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
         report.rules_file_created = true;
     }
 
-const TRIGGER_BLOCK: &str = "\
+    const TRIGGER_BLOCK: &str = "\
 <!-- agent-mem -->
 ## Persistent Memory Protocol
 - **On start:** Run `agent-mem context` (or MCP `mem_context`) to load project rules and recent sessions.
@@ -173,7 +176,10 @@ const TRIGGER_BLOCK: &str = "\
 
     // 5. Inject minimal AI trigger instruction idempotently into rules file
     let candidate_files = ["AGENTS.md", "CLAUDE.md", ".cursorrules", ".windsurfrules"];
-    let trigger_target = candidate_files.iter().map(|f| root.join(f)).find(|p| p.exists());
+    let trigger_target = candidate_files
+        .iter()
+        .map(|f| root.join(f))
+        .find(|p| p.exists());
 
     let (target_path, created) = match trigger_target {
         Some(path) => (path, false),
@@ -195,19 +201,20 @@ const TRIGGER_BLOCK: &str = "\
         let content = fs::read_to_string(&target_path).unwrap_or_default();
         if content.contains("<!-- agent-mem -->") {
             if let Some(start) = content.find("<!-- agent-mem -->")
-                && let Some(end) = content.find("<!-- /agent-mem -->") {
-                    let end_idx = end + "<!-- /agent-mem -->".len();
-                    let mut new_content = String::new();
-                    new_content.push_str(&content[..start]);
-                    new_content.push_str(TRIGGER_BLOCK.trim_end());
-                    if end_idx < content.len() {
-                        new_content.push_str(&content[end_idx..]);
-                    }
-                    if new_content != content {
-                        fs::write(&target_path, new_content)?;
-                        report.trigger_updated = true;
-                    }
+                && let Some(end) = content.find("<!-- /agent-mem -->")
+            {
+                let end_idx = end + "<!-- /agent-mem -->".len();
+                let mut new_content = String::new();
+                new_content.push_str(&content[..start]);
+                new_content.push_str(TRIGGER_BLOCK.trim_end());
+                if end_idx < content.len() {
+                    new_content.push_str(&content[end_idx..]);
                 }
+                if new_content != content {
+                    fs::write(&target_path, new_content)?;
+                    report.trigger_updated = true;
+                }
+            }
         } else if content.contains("Memory: run `agent-mem get") {
             let new_content = content.replace(
                 "Memory: run `agent-mem get <key>` to check rules, `agent-mem set <key> \"<rule>\"` to save.\n",

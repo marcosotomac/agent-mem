@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -34,7 +34,10 @@ impl TargetClient {
             Self::Claude => {
                 #[cfg(target_os = "macos")]
                 {
-                    Some(home_path.join("Library/Application Support/Claude/claude_desktop_config.json"))
+                    Some(
+                        home_path
+                            .join("Library/Application Support/Claude/claude_desktop_config.json"),
+                    )
                 }
                 #[cfg(target_os = "windows")]
                 {
@@ -49,9 +52,7 @@ impl TargetClient {
                     Some(home_path.join(".config/Claude/claude_desktop_config.json"))
                 }
             }
-            Self::Cursor => {
-                Some(home_path.join(".cursor/mcp.json"))
-            }
+            Self::Cursor => Some(home_path.join(".cursor/mcp.json")),
             Self::Antigravity => {
                 let gemini_path = home_path.join(".gemini/antigravity-cli/mcp_config.json");
                 if gemini_path.parent().map(|p| p.exists()).unwrap_or(false) {
@@ -79,22 +80,26 @@ pub struct InstallResult {
 fn resolve_binary_command() -> String {
     if let Ok(exe_path) = env::current_exe()
         && exe_path.exists()
-        && let Ok(canonical) = exe_path.canonicalize() {
-            // Check if agent-mem is in standard PATH
-            if let Ok(path_var) = env::var("PATH") {
-                for dir in env::split_paths(&path_var) {
-                    if dir.join("agent-mem").exists() || dir.join("agent-mem.exe").exists() {
-                        return "agent-mem".to_string();
-                    }
+        && let Ok(canonical) = exe_path.canonicalize()
+    {
+        // Check if agent-mem is in standard PATH
+        if let Ok(path_var) = env::var("PATH") {
+            for dir in env::split_paths(&path_var) {
+                if dir.join("agent-mem").exists() || dir.join("agent-mem.exe").exists() {
+                    return "agent-mem".to_string();
                 }
             }
-            return canonical.to_string_lossy().to_string();
         }
+        return canonical.to_string_lossy().to_string();
+    }
 
     "agent-mem".to_string()
 }
 
-pub fn install_to_path(config_path: &std::path::Path, client: TargetClient) -> Result<InstallResult> {
+pub fn install_to_path(
+    config_path: &std::path::Path,
+    client: TargetClient,
+) -> Result<InstallResult> {
     let binary_cmd = resolve_binary_command();
 
     let mut root_json: Value = if config_path.exists() {
@@ -145,9 +150,12 @@ pub fn install_to_path(config_path: &std::path::Path, client: TargetClient) -> R
 }
 
 pub fn install_client(client: TargetClient) -> Result<InstallResult> {
-    let config_path = client
-        .config_path()
-        .ok_or_else(|| Error::Usage(format!("Could not determine config path for {}", client.display_name())))?;
+    let config_path = client.config_path().ok_or_else(|| {
+        Error::Usage(format!(
+            "Could not determine config path for {}",
+            client.display_name()
+        ))
+    })?;
 
     install_to_path(&config_path, client)
 }
@@ -155,7 +163,11 @@ pub fn install_client(client: TargetClient) -> Result<InstallResult> {
 pub fn install_all_or_target(target: Option<&str>) -> Result<Vec<InstallResult>> {
     match target {
         Some("all") | None => {
-            let clients = [TargetClient::Claude, TargetClient::Cursor, TargetClient::Antigravity];
+            let clients = [
+                TargetClient::Claude,
+                TargetClient::Cursor,
+                TargetClient::Antigravity,
+            ];
             let mut results = Vec::new();
             let mut detected_any = false;
 

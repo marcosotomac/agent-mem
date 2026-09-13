@@ -1,6 +1,6 @@
 use agent_mem::store::Store;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Instant;
 
@@ -40,12 +40,19 @@ fn test_high_concurrency_wal_stress() {
             let mut store = Store::open(&db_path, true).expect("open writer store");
             for i in 0..ops_per_thread {
                 let key = format!("worker_{}/rule_{}", t_id, i);
-                let val = format!("Value for worker {} iteration {} with high concurrency payload", t_id, i);
+                let val = format!(
+                    "Value for worker {} iteration {} with high concurrency payload",
+                    t_id, i
+                );
                 let anchor = format!("src/worker_{}.rs:{}", t_id, i);
 
-                store.set_with_anchor(&key, &val, Some(&anchor)).expect("set memory");
+                store
+                    .set_with_anchor(&key, &val, Some(&anchor))
+                    .expect("set memory");
                 if i % 10 == 0 {
-                    store.session_add(&format!("Worker {} checkpoint {}", t_id, i)).expect("session add");
+                    store
+                        .session_add(&format!("Worker {} checkpoint {}", t_id, i))
+                        .expect("session add");
                 }
                 success.fetch_add(1, Ordering::SeqCst);
             }
@@ -73,8 +80,14 @@ fn test_high_concurrency_wal_stress() {
     }
 
     let elapsed = start_time.elapsed();
-    assert_eq!(successful_writes.load(Ordering::SeqCst), write_threads * ops_per_thread);
-    assert_eq!(successful_reads.load(Ordering::SeqCst), read_threads * ops_per_thread);
+    assert_eq!(
+        successful_writes.load(Ordering::SeqCst),
+        write_threads * ops_per_thread
+    );
+    assert_eq!(
+        successful_reads.load(Ordering::SeqCst),
+        read_threads * ops_per_thread
+    );
 
     // Verify consistency
     let store = Store::open(&db_path, false).unwrap();
@@ -122,7 +135,10 @@ fn test_bulk_volume_and_fts_bm25_speed() {
         store.set_with_anchor(&key, val, Some(&anchor)).unwrap();
     }
     let insert_duration = insert_start.elapsed();
-    println!("Inserted {} indexed records in {:?}", total_records, insert_duration);
+    println!(
+        "Inserted {} indexed records in {:?}",
+        total_records, insert_duration
+    );
 
     // Search needle via FTS5 BM25
     let search_start = Instant::now();
@@ -132,9 +148,15 @@ fn test_bulk_volume_and_fts_bm25_speed() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, "arch/service_77/component_7");
     assert!(results[0].1.contains("Quantum resilience token protocol"));
-    assert_eq!(results[0].2.as_deref(), Some("services/srv_77/src/lib.rs:777"));
+    assert_eq!(
+        results[0].2.as_deref(),
+        Some("services/srv_77/src/lib.rs:777")
+    );
 
-    println!("BM25 search across 1000 records completed in {:?}", search_duration);
+    println!(
+        "BM25 search across 1000 records completed in {:?}",
+        search_duration
+    );
     assert!(search_duration.as_millis() < 50);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -148,7 +170,9 @@ fn test_fuzz_unicode_and_extreme_inputs() {
     let emoji_val = "Usar JWT con clave asimétrica Ed25519 🛡️ y rotación cada 15m ⚡";
     let emoji_anchor = "src/seguridad/autenticación_v2.rs:120";
 
-    store.set_with_anchor(emoji_key, emoji_val, Some(emoji_anchor)).unwrap();
+    store
+        .set_with_anchor(emoji_key, emoji_val, Some(emoji_anchor))
+        .unwrap();
 
     assert_eq!(store.get(emoji_key).unwrap().as_deref(), Some(emoji_val));
     let search_emoji = store.find("Ed25519 🛡️").unwrap();
@@ -172,7 +196,13 @@ fn test_fuzz_unicode_and_extreme_inputs() {
     );
 
     let parsed = Store::parse_rules_text(&dirty_input);
-    assert!(parsed.iter().any(|r| r.0 == "key_with_equals" && r.1 == "value with = internal = signs = and symbols"));
+    assert!(
+        parsed
+            .iter()
+            .any(|r| r.0 == "key_with_equals"
+                && r.1 == "value with = internal = signs = and symbols")
+    );
     assert!(parsed.iter().any(|r| r.0 == emoji_key));
-    assert!(parsed.iter().any(|r| r.0 == "strange/anchor" && r.2.as_deref() == Some("nested (parenthesis) path/to/file.rs:99")));
+    assert!(parsed.iter().any(|r| r.0 == "strange/anchor"
+        && r.2.as_deref() == Some("nested (parenthesis) path/to/file.rs:99")));
 }

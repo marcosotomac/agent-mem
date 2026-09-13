@@ -1,5 +1,5 @@
+use agent_mem::cli::{Command, execute_command};
 use agent_mem::init::{find_project_root_from, init_project};
-use agent_mem::cli::{execute_command, Command};
 use std::fs;
 
 #[test]
@@ -22,7 +22,12 @@ fn test_monorepo_deep_nesting_and_subproject_isolation() {
     let root_git = base_dir.join(".git");
     fs::create_dir_all(&root_git).unwrap();
 
-    let deep_web_dir = base_dir.join("apps").join("web").join("src").join("pages").join("dashboard");
+    let deep_web_dir = base_dir
+        .join("apps")
+        .join("web")
+        .join("src")
+        .join("pages")
+        .join("dashboard");
     fs::create_dir_all(&deep_web_dir).unwrap();
 
     let deep_core_dir = base_dir.join("packages").join("core").join("src");
@@ -41,7 +46,12 @@ fn test_monorepo_deep_nesting_and_subproject_isolation() {
     // Initialize Isolated Subproject
     let sub_report = init_project(&isolated_subproject).unwrap();
     assert_eq!(sub_report.root, isolated_subproject);
-    assert!(isolated_subproject.join(".agent-mem").join("mem.db").exists());
+    assert!(
+        isolated_subproject
+            .join(".agent-mem")
+            .join("mem.db")
+            .exists()
+    );
     assert!(isolated_subproject.join(".agent-rules").exists());
 
     // 2. Test Deep Traversal from apps/web/... must resolve to Monorepo Root
@@ -73,7 +83,8 @@ fn test_monorepo_deep_nesting_and_subproject_isolation() {
     execute_command(sub_set, &found_from_isolated).unwrap();
 
     // Verify Monorepo Root has its rule and NOT the subproject rule
-    let root_store = agent_mem::store::Store::open(&base_dir.join(".agent-mem").join("mem.db"), false).unwrap();
+    let root_store =
+        agent_mem::store::Store::open(&base_dir.join(".agent-mem").join("mem.db"), false).unwrap();
     assert_eq!(
         root_store.get("monorepo/toolchain").unwrap().as_deref(),
         Some("Turborepo + Cargo Workspaces")
@@ -81,7 +92,11 @@ fn test_monorepo_deep_nesting_and_subproject_isolation() {
     assert_eq!(root_store.get("service/framework").unwrap(), None);
 
     // Verify Isolated Subproject has its rule and NOT the monorepo root rule
-    let sub_store = agent_mem::store::Store::open(&isolated_subproject.join(".agent-mem").join("mem.db"), false).unwrap();
+    let sub_store = agent_mem::store::Store::open(
+        &isolated_subproject.join(".agent-mem").join("mem.db"),
+        false,
+    )
+    .unwrap();
     assert_eq!(
         sub_store.get("service/framework").unwrap().as_deref(),
         Some("Actix Web 4.0")

@@ -16,7 +16,10 @@ impl fmt::Display for Error {
             Error::Io(e) => write!(f, "io error: {}", e),
             Error::Usage(msg) => write!(f, "{}", msg),
             Error::NotFound(key) => write!(f, "key not found: {}", key),
-            Error::NotInitialized => write!(f, "agent-mem is not initialized. Run 'agent-mem init' first."),
+            Error::NotInitialized => write!(
+                f,
+                "agent-mem is not initialized. Run 'agent-mem init' first."
+            ),
         }
     }
 }
