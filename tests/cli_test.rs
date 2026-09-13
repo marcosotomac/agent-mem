@@ -169,3 +169,44 @@ fn test_get_nonexistent_returns_not_found() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_init_creates_and_upgrades_trigger_block() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_init_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    // 1. Initial init creates AGENTS.md with Persistent Memory Protocol
+    let report = agent_mem::init::init_project(&temp_dir).unwrap();
+    assert!(report.created_rule_file);
+    let agents_md = temp_dir.join("AGENTS.md");
+    assert!(agents_md.exists());
+    let content = fs::read_to_string(&agents_md).unwrap();
+    assert!(content.contains("<!-- agent-mem -->"));
+    assert!(content.contains("Run `agent-mem context`"));
+    assert!(content.contains("<!-- /agent-mem -->"));
+
+    // 2. Second init is idempotent
+    let report2 = agent_mem::init::init_project(&temp_dir).unwrap();
+    assert!(!report2.created_rule_file);
+    assert!(!report2.trigger_updated);
+
+    // 3. Upgrades legacy one-liner
+    fs::write(
+        &agents_md,
+        "# Project\n\nMemory: run `agent-mem get <key>` to check rules, `agent-mem set <key> \"<rule>\"` to save.\n",
+    )
+    .unwrap();
+    let report3 = agent_mem::init::init_project(&temp_dir).unwrap();
+    assert!(report3.trigger_updated);
+    let upgraded = fs::read_to_string(&agents_md).unwrap();
+    assert!(upgraded.contains("Run `agent-mem context`"));
+    assert!(!upgraded.contains("Memory: run `agent-mem get"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

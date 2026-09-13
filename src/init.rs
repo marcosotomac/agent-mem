@@ -108,16 +108,23 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
         }
     }
 
+const TRIGGER_BLOCK: &str = "\
+<!-- agent-mem -->
+## Persistent Memory Protocol
+- **On start:** Run `agent-mem context` (or MCP `mem_context`) to load project rules and recent sessions.
+- **On decisions:** Run `agent-mem set <key> \"<rule>\"` (or MCP `mem_set`) to record conventions or architecture.
+- **On search:** Run `agent-mem find <query>` (or MCP `mem_find`) to look up specific memories.
+<!-- /agent-mem -->\n";
+
     // 3. Inject minimal AI trigger instruction idempotently into rules file
     let candidate_files = ["AGENTS.md", "CLAUDE.md", ".cursorrules", ".windsurfrules"];
-    let trigger_line = "Memory: run `agent-mem get <key>` to check rules, `agent-mem set <key> \"<rule>\"` to save.\n";
     let trigger_target = candidate_files.iter().map(|f| root.join(f)).find(|p| p.exists());
 
     let (target_path, created) = match trigger_target {
         Some(path) => (path, false),
         None => {
             let default_path = root.join("AGENTS.md");
-            fs::write(&default_path, trigger_line)?;
+            fs::write(&default_path, TRIGGER_BLOCK)?;
             (default_path, true)
         }
     };
@@ -131,12 +138,34 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
 
     if !created {
         let content = fs::read_to_string(&target_path).unwrap_or_default();
-        if !content.contains("agent-mem") {
+        if content.contains("<!-- agent-mem -->") {
+            if let Some(start) = content.find("<!-- agent-mem -->")
+                && let Some(end) = content.find("<!-- /agent-mem -->") {
+                    let end_idx = end + "<!-- /agent-mem -->".len();
+                    let mut new_content = String::new();
+                    new_content.push_str(&content[..start]);
+                    new_content.push_str(TRIGGER_BLOCK.trim_end());
+                    if end_idx < content.len() {
+                        new_content.push_str(&content[end_idx..]);
+                    }
+                    if new_content != content {
+                        fs::write(&target_path, new_content)?;
+                        report.trigger_updated = true;
+                    }
+                }
+        } else if content.contains("Memory: run `agent-mem get") {
+            let new_content = content.replace(
+                "Memory: run `agent-mem get <key>` to check rules, `agent-mem set <key> \"<rule>\"` to save.\n",
+                TRIGGER_BLOCK,
+            );
+            fs::write(&target_path, new_content)?;
+            report.trigger_updated = true;
+        } else if !content.contains("agent-mem") {
             let mut new_content = content;
             if !new_content.ends_with('\n') && !new_content.is_empty() {
                 new_content.push('\n');
             }
-            new_content.push_str(trigger_line);
+            new_content.push_str(TRIGGER_BLOCK);
             fs::write(&target_path, new_content)?;
             report.trigger_updated = true;
         }
