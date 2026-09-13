@@ -20,7 +20,7 @@ Ultra-fast, local-first, zero-daemon memory engine for AI coding agents.
 
 ### 1. One-line curl installer (macOS / Linux)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/marcosotomaceda/agent-mem/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/marcosotomac/agent-mem/main/install.sh | bash
 ```
 
 ### 2. Zero-install via NPX (All platforms)
@@ -31,7 +31,7 @@ npx agent-mem --help
 
 ### 3. Homebrew
 ```bash
-brew install marcosotomaceda/tap/agent-mem
+brew install marcosotomac/tap/agent-mem
 ```
 
 ### 4. From source via Cargo (Rust)

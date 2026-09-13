@@ -19,7 +19,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/marcosotomaceda/agent-mem"
+    "url": "https://github.com/marcosotomac/agent-mem"
   },
   "engines": {
     "node": ">=16.0.0"

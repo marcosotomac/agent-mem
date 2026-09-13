@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="marcosotomaceda/agent-mem"
+REPO="marcosotomac/agent-mem"
 INSTALL_DIR="${AGENT_MEM_INSTALL_DIR:-$HOME/.local/bin}"
 TAG="${1:-latest}"
 

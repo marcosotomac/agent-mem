@@ -8,7 +8,7 @@ const https = require('https');
 
 const PKG = require('../package.json');
 const VERSION = PKG.version;
-const REPO = 'marcosotomaceda/agent-mem';
+const REPO = 'marcosotomac/agent-mem';
 
 function getTargetAsset() {
   const platform = os.platform();
