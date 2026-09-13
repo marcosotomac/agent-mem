@@ -45,10 +45,11 @@ fn test_parse_args() {
             key: "k".into(),
             val: "v1 v2".into(),
             anchor: None,
+            kind: None,
         }
     );
 
-    // Set with anchor
+    // Set with anchor and kind
     assert_eq!(
         parse_args(vec![
             "agent-mem".into(),
@@ -56,13 +57,50 @@ fn test_parse_args() {
             "k".into(),
             "v1".into(),
             "--anchor".into(),
-            "src/lib.rs:42".into()
+            "src/lib.rs:42".into(),
+            "--kind".into(),
+            "decision".into(),
         ])
         .unwrap(),
         Command::Set {
             key: "k".into(),
             val: "v1".into(),
             anchor: Some("src/lib.rs:42".into()),
+            kind: Some("decision".into()),
+        }
+    );
+
+    // Relate
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "relate".into(),
+            "auth/jwt".into(),
+            "mitigates".into(),
+            "gotcha/replay".into(),
+        ])
+        .unwrap(),
+        Command::Relate {
+            source: "auth/jwt".into(),
+            rel_type: "mitigates".into(),
+            target: "gotcha/replay".into(),
+        }
+    );
+
+    // Unrelate
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "unrelate".into(),
+            "auth/jwt".into(),
+            "mitigates".into(),
+            "gotcha/replay".into(),
+        ])
+        .unwrap(),
+        Command::Unrelate {
+            source: "auth/jwt".into(),
+            rel_type: "mitigates".into(),
+            target: "gotcha/replay".into(),
         }
     );
 
@@ -115,7 +153,31 @@ fn test_parse_args() {
     // Context
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "context".into()]).unwrap(),
-        Command::Context
+        Command::Context {
+            anchor: None,
+            topic: None,
+            limit: 20,
+        }
+    );
+
+    // Context with filters
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "context".into(),
+            "--anchor".into(),
+            "src/auth.rs".into(),
+            "--topic".into(),
+            "auth/".into(),
+            "--limit".into(),
+            "5".into(),
+        ])
+        .unwrap(),
+        Command::Context {
+            anchor: Some("src/auth.rs".into()),
+            topic: Some("auth/".into()),
+            limit: 5,
+        }
     );
 
     // Mcp
@@ -400,6 +462,7 @@ fn test_cli_sync_and_auto_sync_lifecycle() {
         key: "arch/db".into(),
         val: "SQLite WAL".into(),
         anchor: Some("src/main.rs:10".into()),
+        kind: None,
     };
     agent_mem::cli::execute_command(set_cmd, &temp_dir).unwrap();
 

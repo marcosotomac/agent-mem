@@ -104,14 +104,16 @@ impl McpServer {
                     "tools": [
                         {
                             "name": "mem_set",
-                            "description": "Store rule or decision.",
+                            "description": "Store rule, decision, or gotcha.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "key": { "type": "string", "description": "Key (e.g. auth/jwt)" },
-                                    "val": { "type": "string", "description": "Rule content" },
-                                    "anchor": { "type": "string", "description": "Code anchor (e.g. src/auth.rs:40)" },
-                                    "scope": { "type": "string", "enum": ["project", "global"], "description": "Scope (default: project)" }
+                                    "key": { "type": "string" },
+                                    "val": { "type": "string" },
+                                    "anchor": { "type": "string", "description": "Code anchor" },
+                                    "kind": { "type": "string", "description": "rule|decision|gotcha|pattern" },
+                                    "rel": { "type": "string", "description": "rel_type:target" },
+                                    "scope": { "type": "string", "enum": ["project", "global"] }
                                 },
                                 "required": ["key", "val"]
                             }
@@ -122,8 +124,8 @@ impl McpServer {
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "query": { "type": "string", "description": "Keywords to search" },
-                                    "scope": { "type": "string", "enum": ["all", "project", "global"], "description": "Scope (default: all)" }
+                                    "query": { "type": "string" },
+                                    "scope": { "type": "string", "enum": ["all", "project", "global"] }
                                 },
                                 "required": ["query"]
                             }
@@ -134,8 +136,10 @@ impl McpServer {
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "limit": { "type": "integer", "description": "Max entries (default: 10)" },
-                                    "scope": { "type": "string", "enum": ["all", "project", "global"], "description": "Scope (default: all)" }
+                                    "anchor": { "type": "string", "description": "Code anchor filter" },
+                                    "topic": { "type": "string", "description": "Topic filter" },
+                                    "limit": { "type": "integer" },
+                                    "scope": { "type": "string", "enum": ["all", "project", "global"] }
                                 }
                             }
                         }
@@ -205,13 +209,20 @@ impl McpServer {
                     crate::error::Error::Usage("Missing required argument 'val'".into())
                 })?;
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
+                let kind = args.get("kind").and_then(|v| v.as_str());
+                let rel = args.get("rel").and_then(|v| v.as_str());
                 let scope = args
                     .get("scope")
                     .and_then(|v| v.as_str())
                     .unwrap_or("project");
 
                 let mut store = self.open_store(scope, true)?;
-                store.set_with_anchor(key, val, anchor)?;
+                store.set_entry(key, val, anchor, kind)?;
+                if let Some(r) = rel
+                    && let Some((rel_type, target)) = r.split_once(':')
+                {
+                    let _ = store.relate(key, rel_type, target);
+                }
                 if scope == "project" {
                     let root = crate::init::find_project_root();
                     let rules_file = root.join(".agent-rules");
@@ -219,9 +230,15 @@ impl McpServer {
                         let _ = store.export_to_file(&rules_file);
                     }
                 }
+                let effective_kind = kind.unwrap_or_else(|| crate::store::infer_kind(key));
+                let kind_tag = if effective_kind != "rule" {
+                    format!("[{}] ", effective_kind)
+                } else {
+                    String::new()
+                };
                 match anchor {
-                    Some(a) => Ok(format!("saved [{}] {} ({})", scope, key, a)),
-                    None => Ok(format!("saved [{}] {}", scope, key)),
+                    Some(a) => Ok(format!("saved [{}] {}{} ({})", scope, kind_tag, key, a)),
+                    None => Ok(format!("saved [{}] {}{}", scope, kind_tag, key)),
                 }
             }
 
@@ -238,6 +255,11 @@ impl McpServer {
                     && let Ok(results) = store.find(query)
                 {
                     for r in results {
+                        let kind_tag = if r.kind != "rule" {
+                            format!("[{}] ", r.kind)
+                        } else {
+                            String::new()
+                        };
                         let status_tag = if r.is_archived() {
                             r.archive_reason
                                 .as_deref()
@@ -248,12 +270,13 @@ impl McpServer {
                         };
                         match r.anchor {
                             Some(anchor) => lines.push(format!(
-                                "[project] {}: {}{} ({})",
-                                r.key, r.val, status_tag, anchor
+                                "[project] {}{}: {}{} ({})",
+                                kind_tag, r.key, r.val, status_tag, anchor
                             )),
-                            None => {
-                                lines.push(format!("[project] {}: {}{}", r.key, r.val, status_tag))
-                            }
+                            None => lines.push(format!(
+                                "[project] {}{}: {}{}",
+                                kind_tag, r.key, r.val, status_tag
+                            )),
                         }
                     }
                 }
@@ -263,6 +286,11 @@ impl McpServer {
                     && let Ok(results) = store.find(query)
                 {
                     for r in results {
+                        let kind_tag = if r.kind != "rule" {
+                            format!("[{}] ", r.kind)
+                        } else {
+                            String::new()
+                        };
                         let status_tag = if r.is_archived() {
                             r.archive_reason
                                 .as_deref()
@@ -273,12 +301,13 @@ impl McpServer {
                         };
                         match r.anchor {
                             Some(anchor) => lines.push(format!(
-                                "[global] {}: {}{} ({})",
-                                r.key, r.val, status_tag, anchor
+                                "[global] {}{}: {}{} ({})",
+                                kind_tag, r.key, r.val, status_tag, anchor
                             )),
-                            None => {
-                                lines.push(format!("[global] {}: {}{}", r.key, r.val, status_tag))
-                            }
+                            None => lines.push(format!(
+                                "[global] {}{}: {}{}",
+                                kind_tag, r.key, r.val, status_tag
+                            )),
                         }
                     }
                 }
@@ -293,20 +322,39 @@ impl McpServer {
             "mem_context" => {
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
+                let anchor = args.get("anchor").and_then(|v| v.as_str());
+                let topic = args.get("topic").and_then(|v| v.as_str());
 
                 let mut lines = Vec::new();
 
                 if (scope == "all" || scope == "project")
                     && let Ok(store) = self.open_store("project", false)
-                    && let Ok((rules, sessions)) = store.context()
                 {
+                    let (rules, rels, sessions) = store
+                        .context_filtered(anchor, topic, limit)
+                        .unwrap_or_default();
                     if !rules.is_empty() {
                         lines.push("== PROJECT RULES ==".to_string());
-                        for (k, v, a) in rules.into_iter().take(limit) {
-                            match a {
-                                Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
-                                None => lines.push(format!("{}: {}", k, v)),
+                        for r in rules {
+                            let kind_badge = if r.kind != "rule" {
+                                format!("[{}] ", r.kind)
+                            } else {
+                                String::new()
+                            };
+                            match r.anchor {
+                                Some(a) => lines
+                                    .push(format!("{}{}: {} ({})", kind_badge, r.key, r.val, a)),
+                                None => lines.push(format!("{}{}: {}", kind_badge, r.key, r.val)),
                             }
+                        }
+                    }
+                    if !rels.is_empty() {
+                        lines.push("== RELATIONS ==".to_string());
+                        for rel in rels {
+                            lines.push(format!(
+                                "{} -> {} -> {}",
+                                rel.source_key, rel.rel_type, rel.target_key
+                            ));
                         }
                     }
                     if !sessions.is_empty() {

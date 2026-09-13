@@ -1,7 +1,7 @@
 class AgentMem < Formula
-  desc "Ultra-fast, local-first memory engine for AI coding agents"
+  desc "Local-first, sub-millisecond memory engine for AI coding agents"
   homepage "https://github.com/marcosotomac/agent-mem"
-  version "0.1.7"
+  version "0.2.0"
   license "MIT"
 
   if OS.mac? && Hardware::CPU.arm?

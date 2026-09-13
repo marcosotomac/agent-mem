@@ -21,11 +21,48 @@ pub struct RuleRecord {
     pub anchor: Option<String>,
     pub archived_at: Option<i64>,
     pub archive_reason: Option<String>,
+    pub kind: String,
 }
 
 impl RuleRecord {
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationRecord {
+    pub source_key: String,
+    pub rel_type: String,
+    pub target_key: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ParsedRules {
+    pub rules: Vec<RuleRecord>,
+    pub relations: Vec<(String, String, String)>,
+}
+
+pub fn infer_kind(key: &str) -> &'static str {
+    let lower = key.to_lowercase();
+    if lower.starts_with("decision/")
+        || lower.starts_with("adr/")
+        || lower.starts_with("decision:")
+        || lower.starts_with("adr:")
+    {
+        "decision"
+    } else if lower.starts_with("gotcha/")
+        || lower.starts_with("bug/")
+        || lower.starts_with("gotcha:")
+        || lower.starts_with("trap/")
+        || lower.starts_with("postmortem/")
+    {
+        "gotcha"
+    } else if lower.starts_with("pattern/") || lower.starts_with("pattern:") {
+        "pattern"
+    } else {
+        "rule"
     }
 }
 
@@ -78,8 +115,8 @@ impl Store {
             .query_row("PRAGMA user_version;", [], |r| r.get(0))
             .unwrap_or(0);
 
-        if user_version >= 2 {
-            // Fast path: schema and migrations already initialized to v2. Bypasses DDL and table scans completely!
+        if user_version >= 3 {
+            // Fast path: schema and migrations already initialized to v3. Bypasses DDL and table scans completely!
             return Ok(());
         }
 
@@ -106,8 +143,30 @@ impl Store {
                     updated_at INTEGER NOT NULL,
                     anchor TEXT,
                     archived_at INTEGER,
-                    archive_reason TEXT
+                    archive_reason TEXT,
+                    kind TEXT NOT NULL DEFAULT 'rule'
                 ) WITHOUT ROWID;",
+                [],
+            )?;
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_anchor ON memories(anchor);",
+                [],
+            )?;
+
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS relations (
+                    source_key TEXT NOT NULL,
+                    rel_type TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (source_key, rel_type, target_key)
+                ) WITHOUT ROWID;",
+                [],
+            )?;
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_key, rel_type);",
                 [],
             )?;
 
@@ -122,14 +181,14 @@ impl Store {
 
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                    key, val, anchor, archive_reason, tokenize='porter unicode61'
+                    key, val, anchor, archive_reason, kind, tokenize='porter unicode61'
                 );",
                 [],
             )?;
 
-            conn.execute("PRAGMA user_version = 2;", [])?;
+            conn.execute("PRAGMA user_version = 3;", [])?;
         } else {
-            // Migrations check: ensure anchor, archived_at, and archive_reason columns exist
+            // Migrations check: ensure anchor, archived_at, archive_reason, and kind columns exist
             let has_anchor: bool = conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'anchor';",
@@ -169,25 +228,68 @@ impl Store {
                 let _ = conn.execute("ALTER TABLE memories ADD COLUMN archive_reason TEXT;", []);
             }
 
+            let has_kind: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'kind';",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0)
+                > 0;
+
+            if !has_kind {
+                let _ = conn.execute(
+                    "ALTER TABLE memories ADD COLUMN kind TEXT NOT NULL DEFAULT 'rule';",
+                    [],
+                );
+            }
+
+            let _ = conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_anchor ON memories(anchor);",
+                [],
+            );
+
+            let _ = conn.execute(
+                "CREATE TABLE IF NOT EXISTS relations (
+                    source_key TEXT NOT NULL,
+                    rel_type TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (source_key, rel_type, target_key)
+                ) WITHOUT ROWID;",
+                [],
+            );
+
+            let _ = conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_key, rel_type);",
+                [],
+            );
+
             let _ = conn.execute("DROP TABLE IF EXISTS memories_fts;", []);
             let _ = conn.execute(
                 "CREATE VIRTUAL TABLE memories_fts USING fts5(
-                    key, val, anchor, archive_reason, tokenize='porter unicode61'
+                    key, val, anchor, archive_reason, kind, tokenize='porter unicode61'
                 );",
                 [],
             );
             let _ = conn.execute(
-                "INSERT INTO memories_fts (key, val, anchor, archive_reason) SELECT key, val, anchor, archive_reason FROM memories;",
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) SELECT key, val, anchor, archive_reason, kind FROM memories;",
                 [],
             );
-            conn.execute("PRAGMA user_version = 2;", [])?;
+            conn.execute("PRAGMA user_version = 3;", [])?;
         }
 
         Ok(())
     }
 
-    /// Set or update a key-value memory rule with optional repo-relative code anchor.
-    pub fn set_with_anchor(&mut self, key: &str, val: &str, anchor: Option<&str>) -> Result<()> {
+    /// Set or update a key-value memory rule with optional repo-relative code anchor and entity kind.
+    pub fn set_entry(
+        &mut self,
+        key: &str,
+        val: &str,
+        anchor: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<()> {
         let trimmed_key = key.trim();
         let trimmed_val = val.trim();
         if trimmed_key.is_empty() {
@@ -202,31 +304,100 @@ impl Store {
         }
 
         let trimmed_anchor = anchor.map(|a| a.trim()).filter(|a| !a.is_empty());
+        let effective_kind = kind
+            .map(|k| k.trim())
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| infer_kind(trimmed_key));
+
         let now = now_epoch();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason) VALUES (?1, ?2, ?3, ?4, NULL, NULL)
-             ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor, archived_at = NULL, archive_reason = NULL;",
-            params![trimmed_key, trimmed_val, now, trimmed_anchor],
+            "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
+             ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor, archived_at = NULL, archive_reason = NULL, kind = excluded.kind;",
+            params![trimmed_key, trimmed_val, now, trimmed_anchor, effective_kind],
         )?;
         tx.execute(
             "DELETE FROM memories_fts WHERE key = ?1;",
             params![trimmed_key],
         )?;
         tx.execute(
-            "INSERT INTO memories_fts (key, val, anchor, archive_reason) VALUES (?1, ?2, ?3, NULL);",
-            params![trimmed_key, trimmed_val, trimmed_anchor],
+            "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
+            params![trimmed_key, trimmed_val, trimmed_anchor, effective_kind],
         )?;
         tx.commit()?;
 
         Ok(())
     }
 
+    /// Set or update a key-value memory rule with optional repo-relative code anchor.
+    pub fn set_with_anchor(&mut self, key: &str, val: &str, anchor: Option<&str>) -> Result<()> {
+        self.set_entry(key, val, anchor, None)
+    }
+
     /// Set or update a key-value memory rule.
     pub fn set(&mut self, key: &str, val: &str) -> Result<()> {
-        self.set_with_anchor(key, val, None)
+        self.set_entry(key, val, None, None)
+    }
+
+    /// Create a directed relation between two memories (e.g. source mitigates target, or source depends_on target).
+    pub fn relate(&mut self, source_key: &str, rel_type: &str, target_key: &str) -> Result<()> {
+        let s = source_key.trim();
+        let r = rel_type.trim();
+        let t = target_key.trim();
+        if s.is_empty() || r.is_empty() || t.is_empty() {
+            return Err(crate::error::Error::Usage(
+                "Relation source, type, and target cannot be empty".into(),
+            ));
+        }
+        let now = now_epoch();
+        self.conn.execute(
+            "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+            params![s, r, t, now],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a directed relation between two memories.
+    pub fn unrelate(&mut self, source_key: &str, rel_type: &str, target_key: &str) -> Result<bool> {
+        let changes = self.conn.execute(
+            "DELETE FROM relations WHERE source_key = ?1 AND rel_type = ?2 AND target_key = ?3;",
+            params![source_key.trim(), rel_type.trim(), target_key.trim()],
+        )?;
+        Ok(changes > 0)
+    }
+
+    /// Retrieve all direct relations originating from a source key.
+    pub fn get_relations(&self, key: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT rel_type, target_key FROM relations WHERE source_key = ?1 ORDER BY rel_type, target_key;",
+        )?;
+        let mut rows = stmt.query(params![key.trim()])?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next()? {
+            list.push((row.get(0)?, row.get(1)?));
+        }
+        Ok(list)
+    }
+
+    /// Retrieve all relations across the project.
+    pub fn get_all_relations(&self) -> Result<Vec<RelationRecord>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source_key, rel_type, target_key, created_at FROM relations ORDER BY source_key, rel_type, target_key;",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next()? {
+            list.push(RelationRecord {
+                source_key: row.get(0)?,
+                rel_type: row.get(1)?,
+                target_key: row.get(2)?,
+                created_at: row.get(3)?,
+            });
+        }
+        Ok(list)
     }
 
     /// Archive a key-value memory rule with an optional deprecation or migration reason.
@@ -254,8 +425,8 @@ impl Store {
                 params![trimmed_key],
             );
             tx.execute(
-                "INSERT INTO memories_fts (key, val, anchor, archive_reason) 
-                 SELECT key, val, anchor, archive_reason FROM memories WHERE key = ?1;",
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) 
+                 SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
                 params![trimmed_key],
             )?;
         }
@@ -287,8 +458,8 @@ impl Store {
                 params![trimmed_key],
             );
             tx.execute(
-                "INSERT INTO memories_fts (key, val, anchor, archive_reason) 
-                 SELECT key, val, anchor, archive_reason FROM memories WHERE key = ?1;",
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) 
+                 SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
                 params![trimmed_key],
             )?;
         }
@@ -297,14 +468,14 @@ impl Store {
         Ok(changes > 0)
     }
 
-    /// Retrieve a memory rule record with anchor and archival metadata.
+    /// Retrieve a memory rule record with anchor, archival metadata, and entity kind.
     pub fn get_entry(&self, key: &str) -> Result<Option<RuleRecord>> {
         if key.trim().is_empty() {
             return Ok(None);
         }
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT key, val, anchor, archived_at, archive_reason FROM memories WHERE key = ?1 LIMIT 1;")?;
+            .prepare_cached("SELECT key, val, anchor, archived_at, archive_reason, kind FROM memories WHERE key = ?1 LIMIT 1;")?;
         let mut rows = stmt.query(params![key.trim()])?;
 
         if let Some(row) = rows.next()? {
@@ -314,6 +485,7 @@ impl Store {
                 anchor: row.get(2)?,
                 archived_at: row.get(3)?,
                 archive_reason: row.get(4)?,
+                kind: row.get(5)?,
             }))
         } else {
             Ok(None)
@@ -338,7 +510,7 @@ impl Store {
         }
     }
 
-    /// Delete a key-value memory rule. Returns true if key was deleted.
+    /// Delete a key-value memory rule and any connected relations. Returns true if key was deleted.
     pub fn del(&mut self, key: &str) -> Result<bool> {
         if key.trim().is_empty() {
             return Ok(false);
@@ -350,6 +522,10 @@ impl Store {
         if changes > 0 {
             tx.execute(
                 "DELETE FROM memories_fts WHERE key = ?1;",
+                params![key.trim()],
+            )?;
+            tx.execute(
+                "DELETE FROM relations WHERE source_key = ?1 OR target_key = ?1;",
                 params![key.trim()],
             )?;
         }
@@ -374,7 +550,7 @@ impl Store {
     /// Dump all memories (including archived) ordered by key.
     pub fn dump_all(&self) -> Result<Vec<RuleRecord>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT key, val, anchor, archived_at, archive_reason FROM memories ORDER BY key ASC;",
+            "SELECT key, val, anchor, archived_at, archive_reason, kind FROM memories ORDER BY key ASC;",
         )?;
         let mut rows = stmt.query([])?;
         let mut list = Vec::new();
@@ -386,6 +562,7 @@ impl Store {
                 anchor: row.get(2)?,
                 archived_at: row.get(3)?,
                 archive_reason: row.get(4)?,
+                kind: row.get(5)?,
             });
         }
         Ok(list)
@@ -395,7 +572,7 @@ impl Store {
     pub fn dump_archived(&self) -> Result<Vec<RuleRecord>> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT key, val, anchor, archived_at, archive_reason FROM memories WHERE archived_at IS NOT NULL ORDER BY key ASC;")?;
+            .prepare_cached("SELECT key, val, anchor, archived_at, archive_reason, kind FROM memories WHERE archived_at IS NOT NULL ORDER BY key ASC;")?;
         let mut rows = stmt.query([])?;
         let mut list = Vec::new();
 
@@ -406,6 +583,7 @@ impl Store {
                 anchor: row.get(2)?,
                 archived_at: row.get(3)?,
                 archive_reason: row.get(4)?,
+                kind: row.get(5)?,
             });
         }
         Ok(list)
@@ -455,7 +633,7 @@ impl Store {
 
         let fts_query = Self::sanitize_fts_query(trimmed);
         let fts_res = self.conn.prepare(
-            "SELECT m.key, m.val, m.anchor, m.archived_at, m.archive_reason 
+            "SELECT m.key, m.val, m.anchor, m.archived_at, m.archive_reason, m.kind 
              FROM memories_fts 
              JOIN memories m ON m.key = memories_fts.key 
              WHERE memories_fts MATCH ?1 
@@ -472,6 +650,7 @@ impl Store {
                     anchor: row.get(2)?,
                     archived_at: row.get(3)?,
                     archive_reason: row.get(4)?,
+                    kind: row.get(5)?,
                 });
             }
             Ok::<_, rusqlite::Error>(results)
@@ -486,12 +665,13 @@ impl Store {
             .replace('_', "\\_");
         let like_pattern = format!("%{}%", escaped);
         let mut stmt = self.conn.prepare(
-            "SELECT key, val, anchor, archived_at, archive_reason 
+            "SELECT key, val, anchor, archived_at, archive_reason, kind 
              FROM memories 
              WHERE key LIKE ?1 ESCAPE '\\' 
                 OR val LIKE ?1 ESCAPE '\\' 
                 OR anchor LIKE ?1 ESCAPE '\\' 
                 OR archive_reason LIKE ?1 ESCAPE '\\' 
+                OR kind LIKE ?1 ESCAPE '\\' 
              ORDER BY key ASC LIMIT 10;",
         )?;
         let mut rows = stmt.query(params![like_pattern])?;
@@ -504,6 +684,7 @@ impl Store {
                 anchor: row.get(2)?,
                 archived_at: row.get(3)?,
                 archive_reason: row.get(4)?,
+                kind: row.get(5)?,
             });
         }
 
@@ -558,9 +739,116 @@ impl Store {
         Ok((rules, sessions))
     }
 
-    /// Parse plain-text rules (e.g. from .agent-rules). Supports active and [archived] rules.
-    pub fn parse_rules_text(content: &str) -> Vec<RuleRecord> {
+    /// Retrieve context filtered by code anchor or topic prefix, expanding connected graph relations.
+    pub fn context_filtered(
+        &self,
+        anchor: Option<&str>,
+        topic: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<RuleRecord>, Vec<RelationRecord>, Vec<SessionEntry>)> {
+        let max_limit = if limit == 0 { 20 } else { limit };
+
+        let rules = if let Some(a) = anchor.filter(|s| !s.trim().is_empty()) {
+            let clean_a = a.trim();
+            // Match memories directly anchored to this path and 1-hop related memories
+            let mut stmt = self.conn.prepare_cached(
+                "WITH direct_anchors AS (
+                    SELECT key, val, anchor, archived_at, archive_reason, kind
+                    FROM memories
+                    WHERE (anchor = ?1 OR anchor LIKE ?2 OR ?1 LIKE anchor || '%')
+                      AND archived_at IS NULL
+                ),
+                related AS (
+                    SELECT m.key, m.val, m.anchor, m.archived_at, m.archive_reason, m.kind
+                    FROM relations r
+                    JOIN memories m ON r.target_key = m.key
+                    WHERE r.source_key IN (SELECT key FROM direct_anchors)
+                      AND m.archived_at IS NULL
+                )
+                SELECT key, val, anchor, archived_at, archive_reason, kind FROM direct_anchors
+                UNION
+                SELECT key, val, anchor, archived_at, archive_reason, kind FROM related
+                LIMIT ?3;",
+            )?;
+            let like_pattern = format!("{}%", clean_a);
+            let mut rows = stmt.query(params![clean_a, like_pattern, max_limit as i64])?;
+            let mut list = Vec::new();
+            while let Some(row) = rows.next()? {
+                list.push(RuleRecord {
+                    key: row.get(0)?,
+                    val: row.get(1)?,
+                    anchor: row.get(2)?,
+                    archived_at: row.get(3)?,
+                    archive_reason: row.get(4)?,
+                    kind: row.get(5)?,
+                });
+            }
+            list
+        } else if let Some(t) = topic.filter(|s| !s.trim().is_empty()) {
+            let clean_t = t.trim();
+            let pattern = format!("{}%", clean_t);
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT key, val, anchor, archived_at, archive_reason, kind
+                 FROM memories
+                 WHERE (key LIKE ?1 OR key = ?2) AND archived_at IS NULL
+                 ORDER BY key ASC LIMIT ?3;",
+            )?;
+            let mut rows = stmt.query(params![pattern, clean_t, max_limit as i64])?;
+            let mut list = Vec::new();
+            while let Some(row) = rows.next()? {
+                list.push(RuleRecord {
+                    key: row.get(0)?,
+                    val: row.get(1)?,
+                    anchor: row.get(2)?,
+                    archived_at: row.get(3)?,
+                    archive_reason: row.get(4)?,
+                    kind: row.get(5)?,
+                });
+            }
+            list
+        } else {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT key, val, anchor, archived_at, archive_reason, kind
+                 FROM memories
+                 WHERE archived_at IS NULL
+                 ORDER BY key ASC LIMIT ?1;",
+            )?;
+            let mut rows = stmt.query(params![max_limit as i64])?;
+            let mut list = Vec::new();
+            while let Some(row) = rows.next()? {
+                list.push(RuleRecord {
+                    key: row.get(0)?,
+                    val: row.get(1)?,
+                    anchor: row.get(2)?,
+                    archived_at: row.get(3)?,
+                    archive_reason: row.get(4)?,
+                    kind: row.get(5)?,
+                });
+            }
+            list
+        };
+
+        // Fetch relations relevant to the retrieved rules
+        let mut rels = Vec::new();
+        if !rules.is_empty() {
+            let keys: Vec<&str> = rules.iter().map(|r| r.key.as_str()).collect();
+            let all_rels = self.get_all_relations().unwrap_or_default();
+            for r in all_rels {
+                if keys.contains(&r.source_key.as_str()) || keys.contains(&r.target_key.as_str()) {
+                    rels.push(r);
+                }
+            }
+        }
+
+        let sessions = self.session_list(3)?;
+        Ok((rules, rels, sessions))
+    }
+
+    /// Parse plain-text rules and graph relations (from .agent-rules).
+    pub fn parse_rules_and_relations(content: &str) -> ParsedRules {
         let mut rules = Vec::new();
+        let mut relations = Vec::new();
+
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty()
@@ -574,7 +862,24 @@ impl Store {
                 continue;
             }
 
-            let (is_archived, line_to_parse) =
+            // Check for relation: [rel] source -> rel_type -> target
+            if let Some(rel_str) = trimmed.strip_prefix("[rel]") {
+                let parts: Vec<&str> = rel_str.split("->").map(|s| s.trim()).collect();
+                if parts.len() == 3
+                    && !parts[0].is_empty()
+                    && !parts[1].is_empty()
+                    && !parts[2].is_empty()
+                {
+                    relations.push((
+                        parts[0].to_string(),
+                        parts[1].to_string(),
+                        parts[2].to_string(),
+                    ));
+                    continue;
+                }
+            }
+
+            let (is_archived, mut line_to_parse) =
                 if let Some(stripped) = trimmed.strip_prefix("[archived]") {
                     (true, stripped.trim())
                 } else if let Some(stripped) = trimmed.strip_prefix("[deprecated]") {
@@ -582,6 +887,18 @@ impl Store {
                 } else {
                     (false, trimmed)
                 };
+
+            // Check for kind prefix: [decision], [gotcha], [pattern], [rule], etc.
+            let mut explicit_kind = None;
+            if line_to_parse.starts_with('[')
+                && let Some(end_bracket) = line_to_parse.find(']')
+            {
+                let k = line_to_parse[1..end_bracket].trim();
+                if !k.is_empty() {
+                    explicit_kind = Some(k.to_lowercase());
+                    line_to_parse = line_to_parse[end_bracket + 1..].trim();
+                }
+            }
 
             let (key, rest) = if let Some((k, r)) = line_to_parse.split_once('=') {
                 (k.trim(), r.trim())
@@ -594,6 +911,8 @@ impl Store {
             if key.is_empty() {
                 continue;
             }
+
+            let kind = explicit_kind.unwrap_or_else(|| infer_kind(key).to_string());
 
             // Check for reason: " --reason: <reason>" or " --reason <reason>"
             let (rest_without_reason, archive_reason) = if let Some(idx) = rest.rfind(" --reason:")
@@ -655,14 +974,22 @@ impl Store {
                 anchor,
                 archived_at: if is_archived { Some(1) } else { None },
                 archive_reason,
+                kind,
             });
         }
-        rules
+
+        ParsedRules { rules, relations }
     }
 
-    /// Export all rules formatted as deterministic plain text sorted by key (active first, then archived).
+    /// Parse plain-text rules (e.g. from .agent-rules). Supports active and [archived] rules.
+    pub fn parse_rules_text(content: &str) -> Vec<RuleRecord> {
+        Self::parse_rules_and_relations(content).rules
+    }
+
+    /// Export all rules and relations formatted as deterministic plain text sorted by key.
     pub fn export_rules_text(&self) -> Result<String> {
         let all_rules = self.dump_all()?;
+        let all_relations = self.get_all_relations().unwrap_or_default();
         let mut out = String::new();
         out.push_str("# .agent-rules - agent-mem shared team memory\n");
         out.push_str("# Track this file in git to share rules across your team without SQLite binary conflicts.\n\n");
@@ -679,17 +1006,40 @@ impl Store {
         }
 
         for r in active {
-            if let Some(anchor) = &r.anchor {
-                out.push_str(&format!("{} = {} (@ {})\n", r.key, r.val, anchor));
+            let kind_prefix = if r.kind != "rule" {
+                format!("[{}] ", r.kind)
             } else {
-                out.push_str(&format!("{} = {}\n", r.key, r.val));
+                String::new()
+            };
+            if let Some(anchor) = &r.anchor {
+                out.push_str(&format!(
+                    "{}{} = {} (@ {})\n",
+                    kind_prefix, r.key, r.val, anchor
+                ));
+            } else {
+                out.push_str(&format!("{}{} = {}\n", kind_prefix, r.key, r.val));
+            }
+        }
+
+        if !all_relations.is_empty() {
+            out.push_str("\n# Relations\n");
+            for rel in all_relations {
+                out.push_str(&format!(
+                    "[rel] {} -> {} -> {}\n",
+                    rel.source_key, rel.rel_type, rel.target_key
+                ));
             }
         }
 
         if !archived.is_empty() {
             out.push_str("\n# Archived Rules\n");
             for r in archived {
-                let mut line = format!("[archived] {} = {}", r.key, r.val);
+                let kind_tag = if r.kind != "rule" {
+                    format!(" [{}]", r.kind)
+                } else {
+                    String::new()
+                };
+                let mut line = format!("[archived]{} {} = {}", kind_tag, r.key, r.val);
                 if let Some(anchor) = &r.anchor {
                     line.push_str(&format!(" (@ {})", anchor));
                 }
@@ -732,19 +1082,20 @@ impl Store {
         }
 
         let content = fs::read_to_string(path)?;
-        let rules = Self::parse_rules_text(&content);
+        let parsed = Self::parse_rules_and_relations(&content);
 
         struct ParsedEntry<'a> {
             val: &'a str,
             anchor: Option<&'a str>,
             archived_at: Option<i64>,
             archive_reason: Option<&'a str>,
+            kind: &'a str,
         }
 
         // Deduplicate in memory: if multiple conflict markers or duplicate lines exist, last one wins
         let mut unique_rules: std::collections::BTreeMap<&str, ParsedEntry> =
             std::collections::BTreeMap::new();
-        for r in &rules {
+        for r in &parsed.rules {
             unique_rules.insert(
                 r.key.as_str(),
                 ParsedEntry {
@@ -752,6 +1103,7 @@ impl Store {
                     anchor: r.anchor.as_deref(),
                     archived_at: r.archived_at,
                     archive_reason: r.archive_reason.as_deref(),
+                    kind: r.kind.as_str(),
                 },
             );
         }
@@ -761,14 +1113,18 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM memories;", [])?;
         tx.execute("DELETE FROM memories_fts;", [])?;
+        tx.execute("DELETE FROM relations;", [])?;
 
         let now = now_epoch();
         {
             let mut insert_mem = tx.prepare_cached(
-                "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+                "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
             )?;
             let mut insert_fts = tx.prepare_cached(
-                "INSERT INTO memories_fts (key, val, anchor, archive_reason) VALUES (?1, ?2, ?3, ?4);",
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, ?5);",
+            )?;
+            let mut insert_rel = tx.prepare_cached(
+                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4);",
             )?;
 
             for (key, entry) in unique_rules {
@@ -779,9 +1135,20 @@ impl Store {
                     now,
                     entry.anchor,
                     arc_at,
-                    entry.archive_reason
+                    entry.archive_reason,
+                    entry.kind,
                 ])?;
-                insert_fts.execute(params![key, entry.val, entry.anchor, entry.archive_reason])?;
+                insert_fts.execute(params![
+                    key,
+                    entry.val,
+                    entry.anchor,
+                    entry.archive_reason,
+                    entry.kind,
+                ])?;
+            }
+
+            for (source, rel_type, target) in &parsed.relations {
+                insert_rel.execute(params![source, rel_type, target, now])?;
             }
         }
         tx.commit()?;

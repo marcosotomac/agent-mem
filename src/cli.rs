@@ -17,6 +17,17 @@ pub enum Command {
         key: String,
         val: String,
         anchor: Option<String>,
+        kind: Option<String>,
+    },
+    Relate {
+        source: String,
+        rel_type: String,
+        target: String,
+    },
+    Unrelate {
+        source: String,
+        rel_type: String,
+        target: String,
     },
     Del {
         key: String,
@@ -32,7 +43,11 @@ pub enum Command {
         query: String,
     },
     Dump,
-    Context,
+    Context {
+        anchor: Option<String>,
+        topic: Option<String>,
+        limit: usize,
+    },
     SessionAdd {
         summary: String,
     },
@@ -59,6 +74,8 @@ impl Command {
         matches!(
             self,
             Command::Set { .. }
+                | Command::Relate { .. }
+                | Command::Unrelate { .. }
                 | Command::Del { .. }
                 | Command::Archive { .. }
                 | Command::Unarchive { .. }
@@ -93,16 +110,21 @@ where
         "set" => {
             if args.len() < 4 {
                 return Err(Error::Usage(
-                    "Usage: agent-mem set <key> <value> [--anchor <path:line>]".to_string(),
+                    "Usage: agent-mem set <key> <value> [--anchor <path:line>] [--kind <kind>]"
+                        .to_string(),
                 ));
             }
             let key = args[2].clone();
             let mut val_parts = Vec::new();
             let mut anchor = None;
+            let mut kind = None;
             let mut i = 3;
             while i < args.len() {
                 if (args[i] == "--anchor" || args[i] == "-a") && i + 1 < args.len() {
                     anchor = Some(args[i + 1].clone());
+                    i += 2;
+                } else if (args[i] == "--kind" || args[i] == "-k") && i + 1 < args.len() {
+                    kind = Some(args[i + 1].clone());
                     i += 2;
                 } else {
                     val_parts.push(args[i].clone());
@@ -110,7 +132,36 @@ where
                 }
             }
             let val = val_parts.join(" ");
-            Ok(Command::Set { key, val, anchor })
+            Ok(Command::Set {
+                key,
+                val,
+                anchor,
+                kind,
+            })
+        }
+        "relate" | "link" => {
+            if args.len() < 5 {
+                return Err(Error::Usage(
+                    "Usage: agent-mem relate <source_key> <rel_type> <target_key>".to_string(),
+                ));
+            }
+            Ok(Command::Relate {
+                source: args[2].clone(),
+                rel_type: args[3].clone(),
+                target: args[4].clone(),
+            })
+        }
+        "unrelate" | "unlink" => {
+            if args.len() < 5 {
+                return Err(Error::Usage(
+                    "Usage: agent-mem unrelate <source_key> <rel_type> <target_key>".to_string(),
+                ));
+            }
+            Ok(Command::Unrelate {
+                source: args[2].clone(),
+                rel_type: args[3].clone(),
+                target: args[4].clone(),
+            })
         }
         "del" | "rm" => {
             if args.len() < 3 {
@@ -183,7 +234,35 @@ where
                 ))),
             }
         }
-        "context" => Ok(Command::Context),
+        "context" => {
+            let mut anchor = None;
+            let mut topic = None;
+            let mut limit = 20;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--anchor" || args[i] == "-a") && i + 1 < args.len() {
+                    anchor = Some(args[i + 1].clone());
+                    i += 2;
+                } else if (args[i] == "--topic" || args[i] == "-t") && i + 1 < args.len() {
+                    topic = Some(args[i + 1].clone());
+                    i += 2;
+                } else if (args[i] == "--limit" || args[i] == "-l" || args[i] == "-n")
+                    && i + 1 < args.len()
+                {
+                    if let Ok(num) = args[i + 1].parse::<usize>() {
+                        limit = num;
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            Ok(Command::Context {
+                anchor,
+                topic,
+                limit,
+            })
+        }
         "sync" => {
             let mut file = None;
             let mut export = false;
@@ -335,13 +414,42 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                         return Err(crate::error::Error::NotFound(key));
                     }
                 }
-                Command::Set { key, val, anchor } => {
-                    store.set_with_anchor(&key, &val, anchor.as_deref())?;
+                Command::Set {
+                    key,
+                    val,
+                    anchor,
+                    kind,
+                } => {
+                    store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())?;
                     let rules_file = root.join(".agent-rules");
                     if rules_file.exists() {
                         let _ = store.export_to_file(&rules_file);
                     }
-                    print_set(&key, anchor.as_deref());
+                    print_set(&key, anchor.as_deref(), kind.as_deref());
+                }
+                Command::Relate {
+                    source,
+                    rel_type,
+                    target,
+                } => {
+                    store.relate(&source, &rel_type, &target)?;
+                    let rules_file = root.join(".agent-rules");
+                    if rules_file.exists() {
+                        let _ = store.export_to_file(&rules_file);
+                    }
+                    print_relate(&source, &rel_type, &target);
+                }
+                Command::Unrelate {
+                    source,
+                    rel_type,
+                    target,
+                } => {
+                    let unlinked = store.unrelate(&source, &rel_type, &target)?;
+                    let rules_file = root.join(".agent-rules");
+                    if rules_file.exists() {
+                        let _ = store.export_to_file(&rules_file);
+                    }
+                    print_unrelate(&source, &rel_type, &target, unlinked);
                 }
                 Command::Del { key } => {
                     let deleted = store.del(&key)?;
@@ -389,9 +497,14 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     let list = store.session_list(5)?;
                     print_session_list(&list);
                 }
-                Command::Context => {
-                    let (rules, sessions) = store.context()?;
-                    print_context(&rules, &sessions);
+                Command::Context {
+                    anchor,
+                    topic,
+                    limit,
+                } => {
+                    let (rules, rels, sessions) =
+                        store.context_filtered(anchor.as_deref(), topic.as_deref(), limit)?;
+                    print_context_filtered(&rules, &rels, &sessions);
                 }
                 Command::Sync { file, export } => {
                     let target_file = file.as_deref().unwrap_or(".agent-rules");

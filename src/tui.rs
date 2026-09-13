@@ -67,6 +67,7 @@ pub struct App {
     pub rules: Vec<RuleRecord>,
     pub filtered_indices: Vec<usize>,
     pub selected_rule_idx: usize,
+    pub relations: Vec<crate::store::RelationRecord>,
     pub sessions: Vec<SessionEntry>,
     pub selected_session_idx: usize,
     pub projects: Vec<crate::registry::ProjectRecord>,
@@ -93,6 +94,7 @@ impl App {
             rules: Vec::new(),
             filtered_indices: Vec::new(),
             selected_rule_idx: 0,
+            relations: Vec::new(),
             sessions: Vec::new(),
             selected_session_idx: 0,
             projects: Vec::new(),
@@ -111,9 +113,11 @@ impl App {
         if self.db_path.exists() {
             let store = Store::open(&self.db_path, false)?;
             self.rules = store.dump_all().unwrap_or_default();
+            self.relations = store.get_all_relations().unwrap_or_default();
             self.sessions = store.session_list(100).unwrap_or_default();
         } else {
             self.rules.clear();
+            self.relations.clear();
             self.sessions.clear();
         }
         if let Ok(mut reg) = crate::registry::ProjectRegistry::load() {
@@ -839,9 +843,17 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
             let prefix = if is_selected { "▶ " } else { "  " };
 
+            let kind_badge = match rule.kind.as_str() {
+                "decision" => Span::styled("[dec] ", Style::default().fg(Color::Cyan)),
+                "gotcha" => Span::styled("[gotcha] ", Style::default().fg(AMBER)),
+                "pattern" => Span::styled("[pat] ", Style::default().fg(Color::Magenta)),
+                _ => Span::styled("[rule] ", Style::default().fg(MUTED)),
+            };
+
             let content = Line::from(vec![
                 Span::styled(prefix, Style::default().fg(EMERALD)),
                 Span::styled(format!("{} ", icon), icon_style),
+                kind_badge,
                 Span::styled(&rule.key, key_style),
             ]);
 
@@ -891,11 +903,19 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::styled(" [ACTIVE] ", Style::default().fg(EMERALD).bold())
         };
 
+        let kind_badge = match rule.kind.as_str() {
+            "decision" => Span::styled(" [DECISION] ", Style::default().fg(Color::Cyan).bold()),
+            "gotcha" => Span::styled(" [GOTCHA] ", Style::default().fg(AMBER).bold()),
+            "pattern" => Span::styled(" [PATTERN] ", Style::default().fg(Color::Magenta).bold()),
+            _ => Span::styled(" [RULE] ", Style::default().fg(MUTED).bold()),
+        };
+
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("Key: ", Style::default().fg(MUTED)),
                 Span::styled(&rule.key, Style::default().fg(ACCENT).bold()),
                 status_badge,
+                kind_badge,
             ]),
             Line::from(""),
             Line::from(Span::styled(
@@ -911,6 +931,38 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Span::styled("Source Anchor: ", Style::default().fg(MUTED)),
                 Span::styled(format!("📍 {}", anchor), Style::default().fg(EMERALD)),
             ]));
+            lines.push(Line::from(""));
+        }
+
+        // Graph relations attached to this rule
+        let connected_rels: Vec<&crate::store::RelationRecord> = app
+            .relations
+            .iter()
+            .filter(|r| r.source_key == rule.key || r.target_key == rule.key)
+            .collect();
+
+        if !connected_rels.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Knowledge Graph Relations:",
+                Style::default().fg(MUTED).underlined(),
+            )));
+            for rel in connected_rels {
+                if rel.source_key == rule.key {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ➜ ", Style::default().fg(EMERALD)),
+                        Span::styled(&rel.rel_type, Style::default().fg(Color::Cyan)),
+                        Span::styled(" ➜ ", Style::default().fg(SUBTLE)),
+                        Span::styled(&rel.target_key, Style::default().fg(ACCENT)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ⬅ ", Style::default().fg(AMBER)),
+                        Span::styled(&rel.rel_type, Style::default().fg(Color::Cyan)),
+                        Span::styled(" by ", Style::default().fg(SUBTLE)),
+                        Span::styled(&rel.source_key, Style::default().fg(ACCENT)),
+                    ]));
+                }
+            }
             lines.push(Line::from(""));
         }
 

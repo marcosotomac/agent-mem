@@ -1,6 +1,6 @@
 {
   "name": "agent-mem",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Ultra-fast, local-first memory engine for AI coding agents",
   "main": "bin/agent-mem.js",
   "bin": {

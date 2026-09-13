@@ -71,6 +71,7 @@ fn test_monorepo_deep_nesting_and_subproject_isolation() {
         key: "monorepo/toolchain".into(),
         val: "Turborepo + Cargo Workspaces".into(),
         anchor: Some("Cargo.toml:1".into()),
+        kind: None,
     };
     execute_command(root_set, &found_from_web).unwrap();
 
@@ -79,6 +80,7 @@ fn test_monorepo_deep_nesting_and_subproject_isolation() {
         key: "service/framework".into(),
         val: "Actix Web 4.0".into(),
         anchor: Some("src/main.rs:5".into()),
+        kind: None,
     };
     execute_command(sub_set, &found_from_isolated).unwrap();
 

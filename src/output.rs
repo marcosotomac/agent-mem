@@ -23,19 +23,58 @@ pub fn print_get(val: &str) {
     }
 }
 
-pub fn print_set(key: &str, anchor: Option<&str>) {
+pub fn print_set(key: &str, anchor: Option<&str>, kind: Option<&str>) {
+    let effective_kind = kind.unwrap_or_else(|| crate::store::infer_kind(key));
+    let kind_badge = if effective_kind != "rule" {
+        format!("[{}] ", effective_kind)
+    } else {
+        String::new()
+    };
     if io::stdout().is_terminal() {
         match anchor {
             Some(a) => println!(
-                "  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {ACCENT}{key}{RESET}  {SUBTLE}·{RESET}  {MUTED}{a}{RESET}"
+                "  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {MUTED}{kind_badge}{RESET}{ACCENT}{key}{RESET}  {SUBTLE}·{RESET}  {MUTED}{a}{RESET}"
             ),
-            None => println!("  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {ACCENT}{key}{RESET}"),
+            None => println!(
+                "  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {MUTED}{kind_badge}{RESET}{ACCENT}{key}{RESET}"
+            ),
         }
     } else {
         match anchor {
-            Some(a) => println!("saved {} ({})", key, a),
-            None => println!("saved {}", key),
+            Some(a) => println!("saved {}{key} ({a})", kind_badge),
+            None => println!("saved {}{key}", kind_badge),
         }
+    }
+}
+
+pub fn print_relate(source: &str, rel_type: &str, target: &str) {
+    if io::stdout().is_terminal() {
+        println!(
+            "  {EMERALD}✓{RESET}  {MUTED}linked{RESET}  {ACCENT}{source}{RESET} {SUBTLE}-> {rel_type} ->{RESET} {ACCENT}{target}{RESET}"
+        );
+    } else {
+        println!("linked {} -> {} -> {}", source, rel_type, target);
+    }
+}
+
+pub fn print_unrelate(source: &str, rel_type: &str, target: &str, unlinked: bool) {
+    if io::stdout().is_terminal() {
+        if unlinked {
+            println!(
+                "  {AMBER}-{RESET}  {MUTED}unlinked{RESET}  {ACCENT}{source}{RESET} {SUBTLE}-> {rel_type} ->{RESET} {ACCENT}{target}{RESET}"
+            );
+        } else {
+            println!(
+                "  {SUBTLE}·{RESET}  {MUTED}not found{RESET}  {ACCENT}{source}{RESET} {SUBTLE}-> {rel_type} ->{RESET} {ACCENT}{target}{RESET}"
+            );
+        }
+    } else if unlinked {
+        println!("unlinked {} -> {} -> {}", source, rel_type, target);
+    } else {
+        println!(
+            "relation not found {} -> {} -> {}",
+            source, rel_type, target
+        );
     }
 }
 
@@ -178,6 +217,12 @@ pub fn print_find(query: &str, entries: &[crate::store::RuleRecord]) {
         .clamp(12, 36);
 
     for record in entries {
+        let kind_tag = if record.kind != "rule" {
+            format!("[{}] ", record.kind)
+        } else {
+            String::new()
+        };
+
         if record.is_archived() {
             let reason = record
                 .archive_reason
@@ -187,21 +232,27 @@ pub fn print_find(query: &str, entries: &[crate::store::RuleRecord]) {
             if is_tty {
                 let _ = writeln!(
                     out,
-                    "  {AMBER}⊘ [archived]{RESET} {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}  {AMBER}{}{RESET}",
+                    "  {AMBER}⊘ [archived]{RESET} {MUTED}{}{RESET}{ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}  {AMBER}{}{RESET}",
+                    kind_tag,
                     record.key,
                     record.val,
                     reason,
                     width = max_key_len
                 );
             } else {
-                let _ = writeln!(out, "[archived] {}: {}{}", record.key, record.val, reason);
+                let _ = writeln!(
+                    out,
+                    "[archived] {}{}: {}{}",
+                    kind_tag, record.key, record.val, reason
+                );
             }
         } else {
             match (is_tty, record.anchor.as_deref()) {
                 (true, Some(a)) => {
                     let _ = writeln!(
                         out,
-                        "  {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}  {MUTED}{}{RESET}",
+                        "  {MUTED}{}{RESET}{ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}  {MUTED}{}{RESET}",
+                        kind_tag,
                         record.key,
                         record.val,
                         a,
@@ -211,17 +262,18 @@ pub fn print_find(query: &str, entries: &[crate::store::RuleRecord]) {
                 (true, None) => {
                     let _ = writeln!(
                         out,
-                        "  {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}",
+                        "  {MUTED}{}{RESET}{ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}",
+                        kind_tag,
                         record.key,
                         record.val,
                         width = max_key_len
                     );
                 }
                 (false, Some(a)) => {
-                    let _ = writeln!(out, "{}: {} ({})", record.key, record.val, a);
+                    let _ = writeln!(out, "{}{}: {} ({})", kind_tag, record.key, record.val, a);
                 }
                 (false, None) => {
-                    let _ = writeln!(out, "{}: {}", record.key, record.val);
+                    let _ = writeln!(out, "{}{}: {}", kind_tag, record.key, record.val);
                 }
             }
         }
@@ -246,6 +298,50 @@ pub fn print_session_list(sessions: &[(i64, String)]) {
         if is_tty {
             let _ = writeln!(out, "  {SUBTLE}#{:<3}{RESET}  {BODY}{}{RESET}", id, summary);
         } else {
+            let _ = writeln!(out, "[#{}] {}", id, summary);
+        }
+    }
+    let _ = out.flush();
+}
+
+pub fn print_context_filtered(
+    rules: &[crate::store::RuleRecord],
+    relations: &[crate::store::RelationRecord],
+    sessions: &[(i64, String)],
+) {
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+
+    if !rules.is_empty() {
+        let _ = writeln!(out, "== RULES ==");
+        for r in rules {
+            let kind_badge = if r.kind != "rule" {
+                format!("[{}] ", r.kind)
+            } else {
+                String::new()
+            };
+            if let Some(anchor) = &r.anchor {
+                let _ = writeln!(out, "{}{}: {} ({})", kind_badge, r.key, r.val, anchor);
+            } else {
+                let _ = writeln!(out, "{}{}: {}", kind_badge, r.key, r.val);
+            }
+        }
+    }
+
+    if !relations.is_empty() {
+        let _ = writeln!(out, "== RELATIONS ==");
+        for rel in relations {
+            let _ = writeln!(
+                out,
+                "{} -> {} -> {}",
+                rel.source_key, rel.rel_type, rel.target_key
+            );
+        }
+    }
+
+    if !sessions.is_empty() {
+        let _ = writeln!(out, "== SESSIONS ==");
+        for (id, summary) in sessions {
             let _ = writeln!(out, "[#{}] {}", id, summary);
         }
     }
@@ -349,9 +445,7 @@ pub fn print_init(report: &InitReport) {
         if report.rules_file_created {
             println!("- Sync: created .agent-rules (team git sync)");
         }
-        if report.trigger_updated || report.created_rule_file {
-            println!("- Trigger: updated {}", report.trigger_target);
-        }
+        println!("- Protocol: updated {}", report.trigger_target);
     }
 }
 
@@ -398,7 +492,7 @@ pub fn print_help() {
             env!("CARGO_PKG_VERSION")
         );
         println!(
-            "  {MUTED}Local-first, sub-millisecond memory engine for AI coding agents.{RESET}"
+            "  {MUTED}Local-first, sub-millisecond knowledge hypergraph for AI coding agents.{RESET}"
         );
         println!();
         println!("  {MUTED}Usage{RESET}");
@@ -412,7 +506,13 @@ pub fn print_help() {
             "    {ACCENT}get{RESET}     {MUTED}<key>{RESET}           Retrieve raw value for key"
         );
         println!(
-            "    {ACCENT}set{RESET}     {MUTED}<key> <val>{RESET}     Record or update memory rule"
+            "    {ACCENT}set{RESET}     {MUTED}<key> <val> [--anchor <f:l>] [--kind <k>]{RESET} Record memory"
+        );
+        println!(
+            "    {ACCENT}relate{RESET}  {MUTED}<src> <rel> <tgt>{RESET} Link memories in hypergraph"
+        );
+        println!(
+            "    {ACCENT}unrelate{RESET} {MUTED}<src> <rel> <tgt>{RESET} Remove hypergraph relation"
         );
         println!("    {ACCENT}del{RESET}     {MUTED}<key>{RESET}           Delete a memory rule");
         println!(
@@ -428,7 +528,9 @@ pub fn print_help() {
         println!(
             "    {ACCENT}sync{RESET}    {MUTED}[file] [--export]{RESET} Synchronize team rules (.agent-rules)"
         );
-        println!("    {ACCENT}context{RESET}                 Export dense prompt block");
+        println!(
+            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>]{RESET} Export dense context"
+        );
         println!(
             "    {ACCENT}session{RESET} {MUTED}add <msg>{RESET}       Record session checkpoint"
         );
@@ -451,7 +553,7 @@ pub fn print_help() {
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, archive, unarchive, find, dump, context, session add, session list, sync, mcp, mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, find, dump, context, session add, session list, sync, mcp, mcp install, doctor, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }

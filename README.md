@@ -5,15 +5,16 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/marcosotomac/agent-mem?include_prereleases)](https://github.com/marcosotomac/agent-mem/releases)
 
-Ultra-fast, local-first, zero-daemon memory engine for AI coding agents.
+Ultra-fast, local-first, zero-daemon knowledge hypergraph and memory engine for AI coding agents.
 
 ## Design Principles
-- **Sub-millisecond latency**: Embedded SQLite in WAL mode with clustered B-tree index (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`).
-- **Minimal token footprint**: Surgical 3-tool MCP schema consuming <160 tokens (vs ~3,000+ tokens in other memory tools). Raw plain text output with zero Markdown overhead.
+- **Sub-millisecond latency**: Embedded SQLite in WAL mode with clustered B-tree index (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`). Sub-60µs point reads, <15µs relation traversal.
+- **Clustered Knowledge Hypergraph**: Evolve beyond flat key-value pairs into engineering entities (`rule`, `decision`, `gotcha`, `pattern`) linked with typed directed edges (`mitigates`, `supersedes`, `depends_on`, `relates_to`).
+- **Anchor-Aware Context Filtering**: Surgical prompt retrieval by repository anchor (`context --anchor src/auth.rs:10`) with 1-hop graph expansion, slashing token waste by >95% (from ~1,500 tokens down to <60 tokens).
+- **Minimal token footprint**: Surgical 3-tool MCP schema consuming <150 tokens (982 characters vs ~3,000+ tokens in other memory tools). Raw plain text output with zero Markdown overhead.
 - **Zero background daemons**: Direct stdio communication without background HTTP processes or port collisions.
-- **Code anchors**: Link decisions and rules to repository-relative files and lines (`--anchor src/auth.rs:40`).
 - **Dual scopes**: Seamless access to isolated `project` memory (`.agent-mem/mem.db`) and user-level `global` preferences (`~/.config/agent-mem/global.db`).
-- **BM25 search**: Full-text search powered by SQLite FTS5 with Porter stemming.
+- **BM25 search**: Full-text search powered by SQLite FTS5 with Porter stemming indexing keys, values, anchors, reasons, and entity kinds.
 - **Session ring buffer**: Automatic atomic pruning preserving the latest 20 session checkpoints.
 
 ## Installation
@@ -44,13 +45,20 @@ cargo install --path .
 # Initialize isolated project memory (SQLite WAL, .gitignore, git hook)
 agent-mem init
 
-# Store or update a memory rule (with optional code anchor)
-agent-mem set <key> <value> [--anchor <path:line>]
+# Store or update a memory rule, decision, gotcha, or pattern
+agent-mem set <key> <value> [--anchor <path:line>] [--kind <rule|decision|gotcha|pattern>]
+
+# Link memories in the knowledge hypergraph
+agent-mem relate <source_key> <rel_type> <target_key>
+# Example: agent-mem relate auth/jwt mitigates gotcha/token-leak
+
+# Remove a hypergraph relation
+agent-mem unrelate <source_key> <rel_type> <target_key>
 
 # Read a rule value in raw text (<0.2ms)
 agent-mem get <key>
 
-# Delete a rule
+# Delete a rule and all its connected relations
 agent-mem del <key>
 
 # Archive an obsolete rule with migration reason (zero prompt token waste, discoverable via search)
@@ -62,20 +70,20 @@ agent-mem unarchive <key>
 # List all active rules
 agent-mem dump
 
-# Fast BM25 keyword search
+# Fast BM25 keyword search across rules, decisions, gotchas, and patterns
 agent-mem find <query>
 
 # Session checkpoints (auto-pruned to latest 20)
 agent-mem session add <summary>
 agent-mem session list
 
-# Dense context block for prompt injection
-agent-mem context
+# Dense context block for prompt injection (with optional code anchor or topic filter)
+agent-mem context [--anchor <path:line>] [--topic <prefix>] [--limit <n>]
 
 # Synchronize team rules (.agent-rules) without SQLite binary conflicts
 agent-mem sync [file] [--export]
 
-# Launch interactive Terminal UI (Rules manager, Sessions, Project switcher, Doctor)
+# Launch interactive Terminal UI (Hypergraph inspector, Rules, Sessions, Project switcher, Doctor)
 agent-mem tui
 
 # List all registered repositories across your machine with rules & session stats
@@ -91,13 +99,38 @@ agent-mem mcp
 agent-mem mcp install [all|<client>]
 ```
 
+## Knowledge Hypergraph & Multi-Entity Storage
+
+Engineering memory is not flat. `agent-mem` supports 4 first-class entities and typed relationships:
+
+| Entity | Purpose | Example Key |
+|---|---|---|
+| `rule` | Architectural constraints, conventions, guidelines (default) | `arch/db`, `style/rust` |
+| `decision` | Architecture Decision Records (ADRs), rationale, tradeoffs | `decision/auth`, `adr/001` |
+| `gotcha` | Production bugs, performance traps, unexpected library quirks | `gotcha/sqlite-wal-locking` |
+| `pattern` | Reusable design patterns, idioms, template structures | `pattern/repository` |
+
+Auto-inference detects key prefixes like `decision/*`, `adr/*`, `gotcha/*`, `bug/*`, `trap/*`, `pattern/*` automatically.
+
+### Anchor-Aware Retrieval (Token Ratchet)
+Dumping 50+ rules into every agent prompt wastes 1,500+ tokens. With code anchors:
+```bash
+agent-mem context --anchor src/auth/jwt.rs
+```
+`agent-mem` retrieves only memories directly anchored to that file path plus their 1-hop hypergraph neighbors (e.g. connected gotchas and ADRs), cutting prompt bloat down to **<60 tokens (>95% reduction)**.
+
 ## Team Git Sync (No Binary Conflicts)
 
 Unlike legacy memory engines that commit binary SQLite databases into Git (causing unresolvable merge conflicts) or require proprietary cloud sync, `agent-mem` uses a deterministic text sync protocol:
 
 - Local `.agent-mem/mem.db` stays in `.gitignore` as an ultra-fast sub-millisecond local cache.
-- Project conventions are version-controlled in `.agent-rules` as clean, PR-reviewable plain text.
-- `agent-mem set`, `del`, `archive`, and `unarchive` automatically update `.agent-rules` in real time.
+- Project conventions and graph relations are version-controlled in `.agent-rules` as clean, PR-reviewable plain text:
+  ```text
+  [decision] auth/jwt = Use RS256 with key rotation (@ src/auth/jwt.rs:42)
+  [gotcha] gotcha/token-leak = Avoid passing tokens in query strings
+  [rel] auth/jwt -> mitigates -> gotcha/token-leak
+  ```
+- `agent-mem set`, `relate`, `unrelate`, `del`, `archive`, and `unarchive` automatically update `.agent-rules` in real time.
 - Obsolete conventions are soft-deprecated into an `# Archived Rules` block with migration reasons, preventing AI agents from repeating dead patterns while sparing prompt tokens.
 - `agent-mem init` installs Git hooks (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) that automatically keep `.agent-rules` and local SQLite in sync across rebases and branch switches. Zero binary conflicts, 100% PR visibility!
 
@@ -129,7 +162,7 @@ Add `agent-mem` to your agent's MCP configuration (e.g., Claude Desktop, Cursor,
 }
 ```
 
-### Surgical MCP Tools (<160 tokens total schema)
-- `mem_set`: Store or update rules with optional repo-relative code anchor and scope (`project` or `global`).
+### Surgical MCP Tools (<150 tokens total schema)
+- `mem_set`: Store rules, decisions, or gotchas with optional code anchor, kind, relation, and scope (`project` or `global`).
 - `mem_find`: Search memories via BM25 keywords across `project`, `global`, or `all` scopes.
-- `mem_context`: Retrieve dense context block formatted for immediate LLM injection.
+- `mem_context`: Retrieve dense context block with optional `anchor` or `topic` filter for surgical LLM prompt injection.

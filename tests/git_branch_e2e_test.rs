@@ -71,6 +71,7 @@ fn test_git_multi_branch_workflow_and_zero_merge_conflicts() {
         key: "auth/provider".into(),
         val: "Clerk Authentication".into(),
         anchor: Some("src/auth.rs:10".into()),
+        kind: None,
     };
     agent_mem::cli::execute_command(set_auth, &temp_dir).unwrap();
 
@@ -104,6 +105,7 @@ fn test_git_multi_branch_workflow_and_zero_merge_conflicts() {
         key: "billing/gateway".into(),
         val: "Stripe Subscriptions API v3".into(),
         anchor: Some("src/billing.rs:25".into()),
+        kind: None,
     };
     agent_mem::cli::execute_command(set_billing, &temp_dir).unwrap();
 
