@@ -426,3 +426,42 @@ lint/clippy = Run cargo clippy with -D warnings
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_sync_with_duplicate_keys_and_conflict_markers() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_conflict_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db_path = temp_dir.join("mem.db");
+    let rules_path = temp_dir.join(".agent-rules");
+
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    // Simulate git union merge conflict with duplicate keys and markers
+    let conflict_content = r#"
+# Git union merge output
+arch/db = SQLite WAL
+<<<<<<< HEAD
+feature/auth = Use OAuth2 PKCE (@ src/auth.rs:10)
+=======
+feature/auth = Use Passkeys WebAuthn (@ src/webauthn.rs:20)
+>>>>>>> branch-b
+"#;
+    std::fs::write(&rules_path, conflict_content).unwrap();
+
+    // Sync must not crash with UNIQUE constraint error
+    let report = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report.total, 2); // arch/db and feature/auth (last one wins)
+    assert_eq!(
+        store.get("feature/auth").unwrap().as_deref(),
+        Some("Use Passkeys WebAuthn")
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+

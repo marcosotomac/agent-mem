@@ -490,24 +490,28 @@ impl Store {
         tx.execute("DELETE FROM memories_fts;", [])?;
 
         let now = now_epoch();
-        let mut count = 0;
         for (key, val, anchor) in &rules {
             tx.execute(
-                "INSERT INTO memories (key, val, updated_at, anchor) VALUES (?1, ?2, ?3, ?4);",
+                "INSERT INTO memories (key, val, updated_at, anchor) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor;",
                 params![key, val, now, anchor],
             )?;
+            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![key])?;
             tx.execute(
                 "INSERT INTO memories_fts (key, val, anchor) VALUES (?1, ?2, ?3);",
                 params![key, val, anchor],
             )?;
-            count += 1;
         }
         tx.commit()?;
 
+        let total: usize = self
+            .conn
+            .query_row("SELECT count(*) FROM memories;", [], |r| r.get(0))?;
+
         Ok(SyncReport {
             path: path.to_path_buf(),
-            imported: count,
-            total: count,
+            imported: total,
+            total,
             file_created: false,
             file_updated: false,
         })
