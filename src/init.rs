@@ -52,7 +52,7 @@ pub fn global_db_path() -> PathBuf {
 pub fn init_project(root: &Path) -> Result<InitReport> {
     let mem_dir = root.join(".agent-mem");
     if !mem_dir.exists() {
-        let _ = fs::create_dir_all(&mem_dir);
+        fs::create_dir_all(&mem_dir)?;
     }
     let db_path = mem_dir.join("mem.db");
     let _ = Store::open(&db_path, true)?;

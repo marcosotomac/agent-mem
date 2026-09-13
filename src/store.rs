@@ -27,7 +27,7 @@ impl Store {
                 return Err(crate::error::Error::NotInitialized);
             }
             if let Some(parent) = db_path.parent() {
-                let _ = fs::create_dir_all(parent);
+                fs::create_dir_all(parent)?;
             }
         }
 
@@ -125,17 +125,26 @@ impl Store {
 
     /// Set or update a key-value memory rule with optional repo-relative code anchor.
     pub fn set_with_anchor(&mut self, key: &str, val: &str, anchor: Option<&str>) -> Result<()> {
+        let trimmed_key = key.trim();
+        let trimmed_val = val.trim();
+        if trimmed_key.is_empty() {
+            return Err(crate::error::Error::Usage("Memory key cannot be empty".into()));
+        }
+        if trimmed_val.is_empty() {
+            return Err(crate::error::Error::Usage("Memory value cannot be empty".into()));
+        }
+
         let now = now_epoch();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO memories (key, val, updated_at, anchor) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor;",
-            params![key, val, now, anchor],
+            params![trimmed_key, trimmed_val, now, anchor],
         )?;
-        tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![key])?;
+        tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![trimmed_key])?;
         tx.execute(
             "INSERT INTO memories_fts (key, val, anchor) VALUES (?1, ?2, ?3);",
-            params![key, val, anchor],
+            params![trimmed_key, trimmed_val, anchor],
         )?;
         tx.commit()?;
 
@@ -149,8 +158,11 @@ impl Store {
 
     /// Retrieve a key-value memory rule with anchor.
     pub fn get_entry(&self, key: &str) -> Result<Option<(String, Option<String>)>> {
+        if key.trim().is_empty() {
+            return Ok(None);
+        }
         let mut stmt = self.conn.prepare("SELECT val, anchor FROM memories WHERE key = ?1 LIMIT 1;")?;
-        let mut rows = stmt.query(params![key])?;
+        let mut rows = stmt.query(params![key.trim()])?;
 
         if let Some(row) = rows.next()? {
             let val: String = row.get(0)?;
@@ -163,8 +175,11 @@ impl Store {
 
     /// Retrieve a key-value memory rule.
     pub fn get(&self, key: &str) -> Result<Option<String>> {
+        if key.trim().is_empty() {
+            return Ok(None);
+        }
         let mut stmt = self.conn.prepare("SELECT val FROM memories WHERE key = ?1 LIMIT 1;")?;
-        let mut rows = stmt.query(params![key])?;
+        let mut rows = stmt.query(params![key.trim()])?;
 
         if let Some(row) = rows.next()? {
             let val: String = row.get(0)?;
@@ -176,10 +191,13 @@ impl Store {
 
     /// Delete a key-value memory rule. Returns true if key was deleted.
     pub fn del(&mut self, key: &str) -> Result<bool> {
+        if key.trim().is_empty() {
+            return Ok(false);
+        }
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changes = tx.execute("DELETE FROM memories WHERE key = ?1;", params![key])?;
+        let changes = tx.execute("DELETE FROM memories WHERE key = ?1;", params![key.trim()])?;
         if changes > 0 {
-            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![key])?;
+            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![key.trim()])?;
         }
         tx.commit()?;
         Ok(changes > 0)
@@ -232,7 +250,12 @@ impl Store {
 
     /// Search rules via BM25 full-text search with fallback to LIKE pattern if FTS fails.
     pub fn find(&self, query: &str) -> Result<Vec<RuleEntry>> {
-        let fts_query = Self::sanitize_fts_query(query);
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let fts_query = Self::sanitize_fts_query(trimmed);
         let fts_res = self.conn.prepare(
             "SELECT m.key, m.val, m.anchor FROM memories_fts JOIN memories m ON m.key = memories_fts.key WHERE memories_fts MATCH ?1 ORDER BY rank LIMIT 10;",
         );
@@ -252,7 +275,7 @@ impl Store {
         }
 
         // Fallback to substring matching only if FTS query failed to execute
-        let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = trimmed.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let like_pattern = format!("%{}%", escaped);
         let mut stmt = self.conn.prepare(
             "SELECT key, val, anchor FROM memories WHERE key LIKE ?1 ESCAPE '\\' OR val LIKE ?1 ESCAPE '\\' OR anchor LIKE ?1 ESCAPE '\\' ORDER BY key ASC LIMIT 10;",
@@ -269,11 +292,16 @@ impl Store {
 
     /// Record a session checkpoint with automatic ring-buffer pruning (keeps latest 20).
     pub fn session_add(&mut self, summary: &str) -> Result<i64> {
+        let trimmed = summary.trim();
+        if trimmed.is_empty() {
+            return Err(crate::error::Error::Usage("Session summary cannot be empty".into()));
+        }
+
         let now = now_epoch();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);",
-            params![summary, now],
+            params![trimmed, now],
         )?;
         let id = tx.last_insert_rowid();
         // Ring buffer: keep only the 20 most recent sessions to prevent unbounded storage bloat

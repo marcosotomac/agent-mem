@@ -161,3 +161,76 @@ fn test_mcp_tool_execution_and_dual_scopes() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_mcp_exceptions_and_errors() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_err_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let global_dir = temp_dir.join("global");
+    fs::create_dir_all(&global_dir).unwrap();
+
+    let server = McpServer::with_paths(temp_dir.clone(), global_dir.join("global.db"));
+
+    // 1. Unknown method returns -32601 Method not found
+    let unknown_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(99)),
+        method: "nonexistent_method".into(),
+        params: json!({}),
+    };
+    let resp = server.handle_request(&unknown_req).unwrap();
+    assert_eq!(resp.error.as_ref().unwrap().code, -32601);
+
+    // 2. Unknown tool returns error response with isError: true
+    let unknown_tool_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(100)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "unknown_tool",
+            "arguments": {}
+        }),
+    };
+    let resp = server.handle_request(&unknown_tool_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(res["content"][0]["text"].as_str().unwrap().contains("Unknown tool"));
+
+    // 3. mem_set with missing arguments returns error with isError: true
+    let missing_arg_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(101)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "foo" }
+        }),
+    };
+    let resp = server.handle_request(&missing_arg_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(res["content"][0]["text"].as_str().unwrap().contains("Missing required argument 'val'"));
+
+    // 4. mem_set with empty key returns error with isError: true
+    let empty_key_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(102)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "  ", "val": "bar" }
+        }),
+    };
+    let resp = server.handle_request(&empty_key_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(res["content"][0]["text"].as_str().unwrap().contains("Memory key cannot be empty"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

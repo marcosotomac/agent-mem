@@ -309,15 +309,27 @@ impl McpServer {
                 continue;
             }
 
-            if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(&line)
-                && let Some(resp) = self.handle_request(&req) {
-                    let mut serialized = serde_json::to_string(&resp).map_err(|e| {
-                        crate::error::Error::Usage(format!("JSON serialization error: {}", e))
-                    })?;
-                    serialized.push('\n');
-                    stdout.write_all(serialized.as_bytes())?;
-                    stdout.flush()?;
-                }
+            let resp = match serde_json::from_str::<JsonRpcRequest>(&line) {
+                Ok(req) => self.handle_request(&req),
+                Err(err) => Some(JsonRpcResponse {
+                    jsonrpc: "2.0",
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32700,
+                        message: format!("Parse error: {}", err),
+                    }),
+                }),
+            };
+
+            if let Some(resp) = resp {
+                let mut serialized = serde_json::to_string(&resp).map_err(|e| {
+                    crate::error::Error::Usage(format!("JSON serialization error: {}", e))
+                })?;
+                serialized.push('\n');
+                stdout.write_all(serialized.as_bytes())?;
+                stdout.flush()?;
+            }
         }
 
         Ok(())

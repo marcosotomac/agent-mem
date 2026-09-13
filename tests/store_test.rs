@@ -219,3 +219,30 @@ fn test_session_ring_buffer_pruning() {
     assert_eq!(list[0].1, "Session step 25");
     assert_eq!(list[19].1, "Session step 6");
 }
+
+#[test]
+fn test_empty_input_exceptions() {
+    let mut store = Store::open_in_memory().expect("open in memory db");
+
+    // 1. Empty key in set
+    let res_empty_key = store.set("   ", "valid value");
+    assert!(matches!(res_empty_key, Err(agent_mem::error::Error::Usage(_))));
+
+    // 2. Empty val in set
+    let res_empty_val = store.set("valid_key", "   ");
+    assert!(matches!(res_empty_val, Err(agent_mem::error::Error::Usage(_))));
+
+    // 3. Empty summary in session_add
+    let res_empty_session = store.session_add("   ");
+    assert!(matches!(res_empty_session, Err(agent_mem::error::Error::Usage(_))));
+
+    // 4. Empty query in find returns empty list safely
+    let res_empty_find = store.find("   ").unwrap();
+    assert!(res_empty_find.is_empty());
+
+    // 5. Empty key in get returns None safely
+    assert_eq!(store.get("  ").unwrap(), None);
+
+    // 6. Empty key in del returns false safely
+    assert_eq!(store.del("  ").unwrap(), false);
+}
