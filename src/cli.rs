@@ -46,6 +46,7 @@ pub enum Command {
         client: Option<String>,
     },
     Doctor,
+    Tui,
     Help,
     Version,
 }
@@ -205,6 +206,7 @@ where
             }
         }
         "--mcp" => Ok(Command::Mcp),
+        "tui" | "ui" => Ok(Command::Tui),
         "doctor" => Ok(Command::Doctor),
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
@@ -267,6 +269,18 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 }
             }
             Ok(())
+        }
+        Command::Tui => {
+            #[cfg(feature = "tui")]
+            {
+                crate::tui::run(root)
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                Err(Error::Usage(
+                    "TUI support is not compiled into this build of agent-mem. Reinstall with '--features tui'.".to_string(),
+                ))
+            }
         }
         Command::Doctor => {
             let db_path = root.join(".agent-mem").join("mem.db");
@@ -370,6 +384,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 | Command::Help
                 | Command::Version
                 | Command::Doctor
+                | Command::Tui
                 | Command::Mcp
                 | Command::McpInstall { .. } => unreachable!(),
             }

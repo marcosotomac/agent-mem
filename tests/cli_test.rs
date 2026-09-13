@@ -134,6 +134,16 @@ fn test_parse_args() {
         Command::Doctor
     );
 
+    // Tui / Ui
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "tui".into()]).unwrap(),
+        Command::Tui
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "ui".into()]).unwrap(),
+        Command::Tui
+    );
+
     // Mcp Install (auto)
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "mcp".into(), "install".into()]).unwrap(),

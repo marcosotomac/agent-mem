@@ -444,10 +444,11 @@ pub fn print_help() {
         println!(
             "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
         );
+        println!("    {ACCENT}tui{RESET}                     Launch interactive terminal explorer");
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, archive, unarchive, find, dump, context, session add, session list, sync, mcp, mcp install, doctor",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, archive, unarchive, find, dump, context, session add, session list, sync, mcp, mcp install, doctor, tui",
             env!("CARGO_PKG_VERSION")
         );
     }
