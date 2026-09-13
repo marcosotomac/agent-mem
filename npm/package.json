@@ -1,0 +1,27 @@
+{
+  "name": "agent-mem",
+  "version": "0.1.0",
+  "description": "Ultra-fast, local-first memory engine for AI coding agents",
+  "main": "bin/agent-mem.js",
+  "bin": {
+    "agent-mem": "./bin/agent-mem.js"
+  },
+  "keywords": [
+    "ai",
+    "mcp",
+    "memory",
+    "agent",
+    "sqlite",
+    "claude",
+    "cursor"
+  ],
+  "author": "Marco Soto Maceda",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marcosotomaceda/agent-mem"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

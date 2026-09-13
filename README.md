@@ -11,6 +11,29 @@ Ultra-fast, local-first, zero-daemon memory engine for AI coding agents.
 - **BM25 search**: Full-text search powered by SQLite FTS5 with Porter stemming.
 - **Session ring buffer**: Automatic atomic pruning preserving the latest 20 session checkpoints.
 
+## Installation
+
+### 1. One-line curl installer (macOS / Linux)
+```bash
+curl -fsSL https://raw.githubusercontent.com/marcosotomaceda/agent-mem/main/install.sh | bash
+```
+
+### 2. Zero-install via NPX (All platforms)
+Run directly without installing any toolchain:
+```bash
+npx agent-mem --help
+```
+
+### 3. Homebrew
+```bash
+brew install marcosotomaceda/tap/agent-mem
+```
+
+### 4. From source via Cargo (Rust)
+```bash
+cargo install --path .
+```
+
 ## CLI Usage
 ```bash
 # Initialize isolated project memory (SQLite WAL, .gitignore, git hook)
@@ -44,14 +67,27 @@ agent-mem mcp
 
 ## Model Context Protocol (MCP) Setup
 
-Add `agent-mem` to your agent's MCP settings (e.g., Claude Desktop, Cursor, Antigravity, or Cline):
+Add `agent-mem` to your agent's MCP configuration (e.g., Claude Desktop, Cursor, Antigravity, or Cline):
 
+### Option A: Native binary (recommended for maximum speed)
 ```json
 {
   "mcpServers": {
     "agent-mem": {
       "command": "agent-mem",
       "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Option B: Zero-install via NPX (no setup needed)
+```json
+{
+  "mcpServers": {
+    "agent-mem": {
+      "command": "npx",
+      "args": ["-y", "agent-mem", "mcp"]
     }
   }
 }
