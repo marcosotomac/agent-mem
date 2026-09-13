@@ -239,7 +239,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             let results = crate::installer::install_all_or_target(client.as_deref())?;
             if results.is_empty() {
                 println!(
-                    "No supported clients detected. Run 'agent-mem mcp install [claude|cursor|antigravity]'."
+                    "No supported clients detected. Run 'agent-mem mcp install [windsurf|cursor|vscode|zed|claude|opencode]'."
                 );
             } else {
                 let is_tty = std::io::stdout().is_terminal();

@@ -439,7 +439,7 @@ pub fn print_help() {
             "    {ACCENT}mcp{RESET}                     Start Model Context Protocol stdio server"
         );
         println!(
-            "    {ACCENT}mcp{RESET}     {MUTED}install [client]{RESET} Configure Claude Desktop, Cursor, or Antigravity"
+            "    {ACCENT}mcp{RESET}     {MUTED}install [client]{RESET} Configure AI editors (Windsurf, Cursor, VS Code, Zed, etc.)"
         );
         println!(
             "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
@@ -551,7 +551,12 @@ pub fn print_doctor(
 
         // MCP Clients
         println!("  {MUTED}MCP Clients{RESET}");
+        let mut shown_any = false;
         for client in clients {
+            if !client.installed && !client.configured {
+                continue;
+            }
+            shown_any = true;
             let c_name = client.client.display_name();
             if client.configured {
                 let p_str = client
@@ -563,15 +568,16 @@ pub fn print_doctor(
                     "    {EMERALD}✓{RESET}  {ACCENT}{c_name:<18}{RESET}  {MUTED}configured{RESET}  {SUBTLE}·{RESET}  {MUTED}{p_str}{RESET}"
                 );
             } else {
-                let name = match client.client {
-                    crate::installer::TargetClient::Claude => "claude",
-                    crate::installer::TargetClient::Cursor => "cursor",
-                    crate::installer::TargetClient::Antigravity => "antigravity",
-                };
+                let name = client.client.cli_id();
                 println!(
-                    "    {SUBTLE}·{RESET}  {MUTED}{c_name:<18}{RESET}  {SUBTLE}not configured  ·  run 'agent-mem mcp install {name}'{RESET}"
+                    "    {AMBER}!{RESET}  {ACCENT}{c_name:<18}{RESET}  {AMBER}detected (not configured){RESET}  {SUBTLE}·{RESET}  {MUTED}run 'agent-mem mcp install {name}'{RESET}"
                 );
             }
+        }
+        if !shown_any {
+            println!(
+                "    {SUBTLE}·{RESET}  {MUTED}no supported AI clients detected on system{RESET}"
+            );
         }
         println!();
     } else {
@@ -600,11 +606,13 @@ pub fn print_doctor(
             git_stats.rules_count
         );
         for client in clients {
-            println!(
-                "Client {}: configured={}",
-                client.client.display_name(),
-                client.configured
-            );
+            if client.installed || client.configured {
+                println!(
+                    "Client {}: configured={}",
+                    client.client.display_name(),
+                    client.configured
+                );
+            }
         }
     }
 }
