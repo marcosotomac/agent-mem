@@ -31,6 +31,7 @@ const BG_SELECT: Color = Color::Indexed(236); // Subtle selection gray
 pub enum ActiveTab {
     Rules,
     Sessions,
+    Projects,
     Doctor,
     Help,
 }
@@ -68,6 +69,8 @@ pub struct App {
     pub selected_rule_idx: usize,
     pub sessions: Vec<SessionEntry>,
     pub selected_session_idx: usize,
+    pub projects: Vec<crate::registry::ProjectRecord>,
+    pub selected_project_idx: usize,
     pub git_doctor: GitDoctorReport,
     pub client_statuses: Vec<ClientStatus>,
     pub selected_client_idx: usize,
@@ -92,6 +95,8 @@ impl App {
             selected_rule_idx: 0,
             sessions: Vec::new(),
             selected_session_idx: 0,
+            projects: Vec::new(),
+            selected_project_idx: 0,
             git_doctor,
             client_statuses,
             selected_client_idx: 0,
@@ -110,6 +115,12 @@ impl App {
         } else {
             self.rules.clear();
             self.sessions.clear();
+        }
+        if let Ok(mut reg) = crate::registry::ProjectRegistry::load() {
+            if self.db_path.exists() {
+                let _ = reg.register(&self.root);
+            }
+            self.projects = reg.projects;
         }
         self.git_doctor = crate::init::inspect_git_health(&self.root);
         self.client_statuses = check_all_clients();
@@ -274,6 +285,39 @@ impl App {
         Ok(())
     }
 
+    pub fn switch_project(&mut self, idx: usize) -> Result<()> {
+        if let Some(p) = self.projects.get(idx).cloned() {
+            let new_root = PathBuf::from(&p.canonical_path);
+            if new_root.exists() {
+                self.root = new_root;
+                self.db_path = self.root.join(".agent-mem").join("mem.db");
+                self.git_doctor = crate::init::inspect_git_health(&self.root);
+                self.reload_data()?;
+                self.active_tab = ActiveTab::Rules;
+                self.set_toast(format!("Switched to project: {}", p.name));
+            } else {
+                self.set_toast(format!("Directory no longer exists: {}", p.name));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn deregister_selected_project(&mut self) -> Result<()> {
+        if let Some(p) = self.projects.get(self.selected_project_idx) {
+            let id = p.id.clone();
+            let name = p.name.clone();
+            if let Ok(mut reg) = crate::registry::ProjectRegistry::load() {
+                let _ = reg.deregister(&id);
+                self.projects = reg.projects;
+                if self.selected_project_idx >= self.projects.len() && !self.projects.is_empty() {
+                    self.selected_project_idx = self.projects.len() - 1;
+                }
+                self.set_toast(format!("Deregistered project: {}", name));
+            }
+        }
+        Ok(())
+    }
+
     pub fn next_item(&mut self) {
         match self.active_tab {
             ActiveTab::Rules => {
@@ -286,6 +330,12 @@ impl App {
                 if !self.sessions.is_empty() {
                     self.selected_session_idx =
                         (self.selected_session_idx + 1).min(self.sessions.len() - 1);
+                }
+            }
+            ActiveTab::Projects => {
+                if !self.projects.is_empty() {
+                    self.selected_project_idx =
+                        (self.selected_project_idx + 1).min(self.projects.len() - 1);
                 }
             }
             ActiveTab::Doctor => {
@@ -311,6 +361,9 @@ impl App {
             ActiveTab::Sessions => {
                 self.selected_session_idx = self.selected_session_idx.saturating_sub(1);
             }
+            ActiveTab::Projects => {
+                self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
+            }
             ActiveTab::Doctor => {
                 self.selected_client_idx = self.selected_client_idx.saturating_sub(1);
             }
@@ -321,7 +374,8 @@ impl App {
     pub fn switch_tab(&mut self) {
         self.active_tab = match self.active_tab {
             ActiveTab::Rules => ActiveTab::Sessions,
-            ActiveTab::Sessions => ActiveTab::Doctor,
+            ActiveTab::Sessions => ActiveTab::Projects,
+            ActiveTab::Projects => ActiveTab::Doctor,
             ActiveTab::Doctor => ActiveTab::Help,
             ActiveTab::Help => ActiveTab::Rules,
         };
@@ -337,8 +391,17 @@ impl App {
                 KeyCode::Tab => self.switch_tab(),
                 KeyCode::Char('1') => self.active_tab = ActiveTab::Rules,
                 KeyCode::Char('2') => self.active_tab = ActiveTab::Sessions,
-                KeyCode::Char('3') => self.active_tab = ActiveTab::Doctor,
-                KeyCode::Char('?') | KeyCode::Char('4') => self.active_tab = ActiveTab::Help,
+                KeyCode::Char('3') | KeyCode::Char('p') => self.active_tab = ActiveTab::Projects,
+                KeyCode::Char('4') => self.active_tab = ActiveTab::Doctor,
+                KeyCode::Char('?') | KeyCode::Char('5') => self.active_tab = ActiveTab::Help,
+                KeyCode::Enter if self.active_tab == ActiveTab::Projects => {
+                    self.switch_project(self.selected_project_idx)?;
+                }
+                KeyCode::Char('x') | KeyCode::Char('d')
+                    if self.active_tab == ActiveTab::Projects =>
+                {
+                    self.deregister_selected_project()?;
+                }
                 KeyCode::Char('/') if self.active_tab == ActiveTab::Rules => {
                     self.input_mode = InputMode::Filter;
                 }
@@ -604,6 +667,7 @@ fn render_ui(f: &mut ratatui::Frame, app: &App) {
     match app.active_tab {
         ActiveTab::Rules => render_rules_tab(f, app, chunks[1]),
         ActiveTab::Sessions => render_sessions_tab(f, app, chunks[1]),
+        ActiveTab::Projects => render_projects_tab(f, app, chunks[1]),
         ActiveTab::Doctor => render_doctor_tab(f, app, chunks[1]),
         ActiveTab::Help => render_help_tab(f, chunks[1]),
     }
@@ -655,20 +719,23 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
     // Tabs
     let rules_label = format!(" 1 Rules ({}) ", app.rules.len());
     let sessions_label = format!(" 2 Sessions ({}) ", app.sessions.len());
-    let doctor_label = " 3 Doctor & AIs ";
+    let projects_label = format!(" 3 Projects ({}) ", app.projects.len());
+    let doctor_label = " 4 Doctor & AIs ";
     let help_label = " ? Help ";
 
     let titles = vec![
         rules_label,
         sessions_label,
+        projects_label,
         doctor_label.to_string(),
         help_label.to_string(),
     ];
     let active_index = match app.active_tab {
         ActiveTab::Rules => 0,
         ActiveTab::Sessions => 1,
-        ActiveTab::Doctor => 2,
-        ActiveTab::Help => 3,
+        ActiveTab::Projects => 2,
+        ActiveTab::Doctor => 3,
+        ActiveTab::Help => 4,
     };
 
     let tabs = Tabs::new(titles)
@@ -944,6 +1011,156 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
 }
 
+fn render_projects_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .split(area);
+
+    let project_items: Vec<ListItem> = app
+        .projects
+        .iter()
+        .enumerate()
+        .map(|(idx, p)| {
+            let is_selected = idx == app.selected_project_idx;
+            let is_current = Path::new(&p.canonical_path) == app.root;
+            let prefix = if is_selected { "▶ " } else { "  " };
+            let current_badge = if is_current { " [ACTIVE]" } else { "" };
+            let style = if is_selected {
+                Style::default().bg(BG_SELECT).fg(ACCENT).bold()
+            } else {
+                Style::default().fg(MUTED)
+            };
+
+            let line = Line::from(vec![
+                Span::styled(prefix, Style::default().fg(EMERALD)),
+                Span::styled(
+                    format!("{:<18} ", p.name),
+                    Style::default()
+                        .fg(if is_current { EMERALD } else { ACCENT })
+                        .bold(),
+                ),
+                Span::styled(
+                    format!("{:>2} rules", p.rules_count),
+                    Style::default().fg(MUTED),
+                ),
+                Span::styled(current_badge, Style::default().fg(EMERALD).bold()),
+            ]);
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let list = List::new(project_items).block(
+        Block::default()
+            .title(format!(
+                " Registered Repositories ({}) ",
+                app.projects.len()
+            ))
+            .title_style(Style::default().fg(MUTED))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBTLE)),
+    );
+    f.render_widget(list, chunks[0]);
+
+    let detail_block = Block::default()
+        .title(" Repository Overview & Cockpit ")
+        .title_style(Style::default().fg(MUTED))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBTLE));
+
+    if let Some(p) = app.projects.get(app.selected_project_idx) {
+        let is_current = Path::new(&p.canonical_path) == app.root;
+        let exists = Path::new(&p.canonical_path).exists();
+        let status_span = if !exists {
+            Span::styled("Missing from disk ✗", Style::default().fg(AMBER).bold())
+        } else if is_current {
+            Span::styled("Active Session Repo ✓", Style::default().fg(EMERALD).bold())
+        } else {
+            Span::styled(
+                "Available (press Enter to switch) ✓",
+                Style::default().fg(ACCENT),
+            )
+        };
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Project: ", Style::default().fg(MUTED)),
+                Span::styled(&p.name, Style::default().fg(ACCENT).bold()),
+                Span::styled("  ·  ID: ", Style::default().fg(SUBTLE)),
+                Span::styled(&p.id, Style::default().fg(EMERALD)),
+            ]),
+            Line::from(vec![
+                Span::styled("Status:  ", Style::default().fg(MUTED)),
+                status_span,
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Path: ", Style::default().fg(MUTED)),
+                Span::styled(&p.canonical_path, Style::default().fg(ACCENT)),
+            ]),
+            Line::from(vec![
+                Span::styled("Git:  ", Style::default().fg(MUTED)),
+                Span::styled(
+                    p.git_remote
+                        .as_deref()
+                        .unwrap_or("No git remote origin configured"),
+                    Style::default().fg(if p.git_remote.is_some() {
+                        EMERALD
+                    } else {
+                        MUTED
+                    }),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Active Rules:   ", Style::default().fg(MUTED)),
+                Span::styled(
+                    p.rules_count.to_string(),
+                    Style::default().fg(ACCENT).bold(),
+                ),
+                Span::styled(" active (", Style::default().fg(SUBTLE)),
+                Span::styled(p.archived_count.to_string(), Style::default().fg(MUTED)),
+                Span::styled(" archived)", Style::default().fg(SUBTLE)),
+            ]),
+            Line::from(vec![
+                Span::styled("Checkpoints:    ", Style::default().fg(MUTED)),
+                Span::styled(
+                    p.sessions_count.to_string(),
+                    Style::default().fg(ACCENT).bold(),
+                ),
+                Span::styled(" session checkpoints", Style::default().fg(SUBTLE)),
+            ]),
+            Line::from(vec![
+                Span::styled("Database Size:  ", Style::default().fg(MUTED)),
+                Span::styled(
+                    format!("{:.1} KB", (p.db_size_bytes as f64) / 1024.0),
+                    Style::default().fg(ACCENT),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Controls: ", Style::default().fg(MUTED).underlined()),
+                Span::styled("[Enter] ", Style::default().fg(EMERALD).bold()),
+                Span::styled("Switch to project  ·  ", Style::default().fg(MUTED)),
+                Span::styled("[x] ", Style::default().fg(AMBER).bold()),
+                Span::styled("Deregister from list", Style::default().fg(MUTED)),
+            ]),
+        ];
+        let p_widget = Paragraph::new(lines)
+            .block(detail_block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(p_widget, chunks[1]);
+    } else {
+        let empty = Paragraph::new("No projects registered. Run 'agent-mem init' in repositories.")
+            .style(Style::default().fg(MUTED))
+            .alignment(Alignment::Center)
+            .block(detail_block);
+        f.render_widget(empty, chunks[1]);
+    }
+}
+
 fn render_doctor_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let top_bottom = Layout::default()
         .direction(Direction::Vertical)
@@ -1150,14 +1367,14 @@ fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
         Line::from(vec![
             Span::styled("    Tab           ", Style::default().fg(ACCENT)),
             Span::styled(
-                "Cycle between Rules, Sessions, Doctor, and Help tabs",
+                "Cycle between Rules, Sessions, Projects, Doctor, and Help tabs",
                 Style::default().fg(MUTED),
             ),
         ]),
         Line::from(vec![
-            Span::styled("    1, 2, 3, ?    ", Style::default().fg(ACCENT)),
+            Span::styled("    1, 2, 3, 4, ? ", Style::default().fg(ACCENT)),
             Span::styled(
-                "Jump directly to Rules, Sessions, Doctor, or Help",
+                "Jump directly to Rules, Sessions, Projects, Doctor, or Help",
                 Style::default().fg(MUTED),
             ),
         ]),
@@ -1222,7 +1439,26 @@ fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "  Doctor & AI Integration (Tab 3):",
+            "  Canonical Projects Explorer (Tab 3):",
+            Style::default().fg(EMERALD).bold(),
+        )]),
+        Line::from(vec![
+            Span::styled("    Enter         ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Switch active working repository immediately to selected project",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("    x / d         ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Deregister selected project from canonical registry",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "  Doctor & AI Integration (Tab 4):",
             Style::default().fg(EMERALD).bold(),
         )]),
         Line::from(vec![
@@ -1299,6 +1535,18 @@ fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Span::styled("Tab  ", Style::default().fg(MUTED)),
                 Span::styled("[c] ", Style::default().fg(ACCENT).bold()),
                 Span::styled("New Checkpoint  ", Style::default().fg(MUTED)),
+                Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Reload  ", Style::default().fg(MUTED)),
+                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Quit", Style::default().fg(MUTED)),
+            ],
+            ActiveTab::Projects => vec![
+                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Tab  ", Style::default().fg(MUTED)),
+                Span::styled("[Enter] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Switch Project  ", Style::default().fg(MUTED)),
+                Span::styled("[x] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Deregister  ", Style::default().fg(MUTED)),
                 Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Reload  ", Style::default().fg(MUTED)),
                 Span::styled("[q] ", Style::default().fg(ACCENT).bold()),

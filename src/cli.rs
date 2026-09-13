@@ -46,6 +46,9 @@ pub enum Command {
         client: Option<String>,
     },
     Doctor,
+    Projects {
+        prune: bool,
+    },
     Tui,
     Help,
     Version,
@@ -208,6 +211,13 @@ where
         "--mcp" => Ok(Command::Mcp),
         "tui" | "ui" => Ok(Command::Tui),
         "doctor" => Ok(Command::Doctor),
+        "projects" => {
+            let prune = args
+                .get(2)
+                .map(|s| s.as_str())
+                .is_some_and(|s| s == "prune" || s == "--prune" || s == "-p");
+            Ok(Command::Projects { prune })
+        }
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
         unknown => Err(Error::Usage(format!(
@@ -273,6 +283,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
         Command::Tui => {
             #[cfg(feature = "tui")]
             {
+                if root.join(".agent-mem").join("mem.db").exists() {
+                    let _ =
+                        crate::registry::ProjectRegistry::load().and_then(|mut r| r.register(root));
+                }
                 crate::tui::run(root)
             }
             #[cfg(not(feature = "tui"))]
@@ -294,6 +308,19 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             let git_stats = crate::init::inspect_git_health(root);
             let clients = crate::installer::check_all_clients();
             print_doctor(store_stats.as_ref(), &git_stats, &clients);
+            Ok(())
+        }
+        Command::Projects { prune } => {
+            let mut reg = crate::registry::ProjectRegistry::load()?;
+            if root.join(".agent-mem").join("mem.db").exists() {
+                let _ = reg.register(root);
+            }
+            if prune {
+                let pruned = reg.prune()?;
+                println!("Pruned {} dead project(s)", pruned);
+            } else {
+                crate::output::print_projects(&reg.projects);
+            }
             Ok(())
         }
         _ => {
@@ -384,6 +411,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 | Command::Help
                 | Command::Version
                 | Command::Doctor
+                | Command::Projects { .. }
                 | Command::Tui
                 | Command::Mcp
                 | Command::McpInstall { .. } => unreachable!(),

@@ -75,11 +75,20 @@ agent-mem context
 # Synchronize team rules (.agent-rules) without SQLite binary conflicts
 agent-mem sync [file] [--export]
 
+# Launch interactive Terminal UI (Rules manager, Sessions, Project switcher, Doctor)
+agent-mem tui
+
+# List all registered repositories across your machine with rules & session stats
+agent-mem projects [--prune]
+
+# Inspect git health and detect AI IDE/CLI configurations (17 supported clients)
+agent-mem doctor
+
 # Start native Model Context Protocol (MCP) stdio server
 agent-mem mcp
 
-# Automatically configure Claude Desktop, Cursor, or Antigravity
-agent-mem mcp install [claude|cursor|antigravity]
+# Automatically configure AI clients (Claude, Cursor, Antigravity, Codex, Zed, Windsurf, Trae, etc.)
+agent-mem mcp install [all|<client>]
 ```
 
 ## Team Git Sync (No Binary Conflicts)

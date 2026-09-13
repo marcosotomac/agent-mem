@@ -4,6 +4,7 @@ pub mod init;
 pub mod installer;
 pub mod mcp;
 pub mod output;
+pub mod registry;
 pub mod store;
 #[cfg(feature = "tui")]
 pub mod tui;

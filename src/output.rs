@@ -444,11 +444,14 @@ pub fn print_help() {
         println!(
             "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
         );
+        println!(
+            "    {ACCENT}projects{RESET} {MUTED}[prune]{RESET}        List canonical project registry & anti-collision status"
+        );
         println!("    {ACCENT}tui{RESET}                     Launch interactive terminal explorer");
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, archive, unarchive, find, dump, context, session add, session list, sync, mcp, mcp install, doctor, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, archive, unarchive, find, dump, context, session add, session list, sync, mcp, mcp install, doctor, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }
@@ -614,6 +617,81 @@ pub fn print_doctor(
                     client.configured
                 );
             }
+        }
+    }
+}
+
+fn format_relative_time(epoch_secs: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let diff = now.saturating_sub(epoch_secs);
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
+}
+
+pub fn print_projects(projects: &[crate::registry::ProjectRecord]) {
+    let is_tty = io::stdout().is_terminal();
+
+    if is_tty {
+        println!();
+        println!(
+            "  {ACCENT}agent-mem projects{RESET}  {SUBTLE}·{RESET}  {MUTED}canonical registry ({} registered){RESET}",
+            projects.len()
+        );
+        println!();
+
+        if projects.is_empty() {
+            println!(
+                "    {SUBTLE}·{RESET}  {MUTED}no projects registered yet  ·  run 'agent-mem init' in any repository{RESET}"
+            );
+            println!();
+            return;
+        }
+
+        for p in projects {
+            let last_str = format_relative_time(p.last_accessed);
+            let git_info = p
+                .git_remote
+                .as_deref()
+                .map(|r| format!("  {SUBTLE}({}){RESET}", r))
+                .unwrap_or_default();
+
+            println!(
+                "    {EMERALD}▶{RESET}  {ACCENT}{:<20}{RESET}  {MUTED}{:>2} active{RESET}  {SUBTLE}·{RESET}  {MUTED}{:>2} sessions{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                p.name, p.rules_count, p.sessions_count, last_str
+            );
+            println!(
+                "       {SUBTLE}path:{RESET} {MUTED}{}{}{RESET}",
+                p.canonical_path, git_info
+            );
+        }
+
+        println!();
+        println!(
+            "  {MUTED}Use 'agent-mem projects prune' to clean up moved or deleted repositories.{RESET}"
+        );
+        println!();
+    } else {
+        println!("ID\tNAME\tRULES\tSESSIONS\tPATH\tREMOTE");
+        for p in projects {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                p.id,
+                p.name,
+                p.rules_count,
+                p.sessions_count,
+                p.canonical_path,
+                p.git_remote.as_deref().unwrap_or("-")
+            );
         }
     }
 }

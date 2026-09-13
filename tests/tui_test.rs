@@ -9,8 +9,11 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+static TUI_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn test_tui_app_state_and_navigation() {
+    let _lock = TUI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_tui_test_{}",
         std::time::SystemTime::now()
@@ -38,9 +41,12 @@ fn test_tui_app_state_and_navigation() {
     assert_eq!(app.active_tab, ActiveTab::Rules);
     assert_eq!(app.input_mode, InputMode::Normal);
 
-    // Tab switching (Rules -> Sessions -> Doctor -> Help -> Rules)
+    // Tab switching (Rules -> Sessions -> Projects -> Doctor -> Help -> Rules)
     app.handle_key(key(KeyCode::Tab)).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Sessions);
+
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    assert_eq!(app.active_tab, ActiveTab::Projects);
 
     app.handle_key(key(KeyCode::Tab)).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Doctor);
@@ -55,7 +61,11 @@ fn test_tui_app_state_and_navigation() {
     app.handle_key(key(KeyCode::Char('2'))).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Sessions);
     app.handle_key(key(KeyCode::Char('3'))).unwrap();
+    assert_eq!(app.active_tab, ActiveTab::Projects);
+    app.handle_key(key(KeyCode::Char('4'))).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Doctor);
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.active_tab, ActiveTab::Help);
     app.handle_key(key(KeyCode::Char('1'))).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Rules);
 
@@ -71,6 +81,7 @@ fn test_tui_app_state_and_navigation() {
 
 #[test]
 fn test_tui_filtering_and_search() {
+    let _lock = TUI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_tui_search_test_{}",
         std::time::SystemTime::now()
@@ -122,6 +133,7 @@ fn test_tui_filtering_and_search() {
 
 #[test]
 fn test_tui_archive_and_delete_actions() {
+    let _lock = TUI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_tui_actions_test_{}",
         std::time::SystemTime::now()
@@ -170,6 +182,7 @@ fn test_tui_archive_and_delete_actions() {
 
 #[test]
 fn test_tui_new_rule_and_edit_modals() {
+    let _lock = TUI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_tui_form_test_{}",
         std::time::SystemTime::now()
@@ -232,6 +245,7 @@ fn test_tui_new_rule_and_edit_modals() {
 
 #[test]
 fn test_tui_new_session_modal_and_git_sync() {
+    let _lock = TUI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_tui_session_sync_test_{}",
         std::time::SystemTime::now()
@@ -264,4 +278,86 @@ fn test_tui_new_session_modal_and_git_sync() {
     assert!(app.toast.is_some());
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_tui_projects_navigation_and_switch() {
+    let _lock = TUI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let global_dir = std::env::temp_dir().join(format!(
+        "agent_mem_tui_projects_global_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&global_dir).unwrap();
+    unsafe {
+        std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir);
+    }
+
+    let dir_a = std::env::temp_dir().join(format!(
+        "agent_mem_tui_proj_a_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dir_b = std::env::temp_dir().join(format!(
+        "agent_mem_tui_proj_b_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir_a).unwrap();
+    fs::create_dir_all(&dir_b).unwrap();
+
+    let db_a = dir_a.join(".agent-mem").join("mem.db");
+    let db_b = dir_b.join(".agent-mem").join("mem.db");
+
+    {
+        let mut store_a = Store::open(&db_a, true).unwrap();
+        store_a.set("rule/a", "Value A").unwrap();
+
+        let mut store_b = Store::open(&db_b, true).unwrap();
+        store_b.set("rule/b", "Value B").unwrap();
+    }
+
+    // Register both projects
+    let mut reg = agent_mem::registry::ProjectRegistry::load().unwrap();
+    reg.register(&dir_a).unwrap();
+    reg.register(&dir_b).unwrap();
+
+    // Start App in dir_a
+    let mut app = App::new(dir_a.clone()).unwrap();
+    assert_eq!(app.rules.len(), 1);
+    assert_eq!(app.rules[0].key, "rule/a");
+
+    // Switch to Projects tab
+    app.handle_key(key(KeyCode::Char('3'))).unwrap();
+    assert_eq!(app.active_tab, ActiveTab::Projects);
+    assert!(app.projects.len() >= 2);
+
+    // Find index of dir_b and switch
+    let canonical_b = dir_b.canonicalize().unwrap();
+    let target_idx = app
+        .projects
+        .iter()
+        .position(|p| p.canonical_path == canonical_b.to_string_lossy())
+        .unwrap();
+    app.selected_project_idx = target_idx;
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+
+    // Verify project switched to dir_b
+    assert_eq!(app.root, canonical_b);
+    assert_eq!(app.rules.len(), 1);
+    assert_eq!(app.rules[0].key, "rule/b");
+
+    // Clean up
+    unsafe {
+        std::env::remove_var("AGENT_MEM_GLOBAL_DIR");
+    }
+    let _ = fs::remove_dir_all(&dir_a);
+    let _ = fs::remove_dir_all(&dir_b);
+    let _ = fs::remove_dir_all(&global_dir);
 }

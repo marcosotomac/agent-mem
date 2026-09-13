@@ -200,6 +200,25 @@ fn test_parse_args() {
         }
     );
 
+    // Projects
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "projects".into()]).unwrap(),
+        Command::Projects { prune: false }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "projects".into(), "prune".into()]).unwrap(),
+        Command::Projects { prune: true }
+    );
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "projects".into(),
+            "--prune".into()
+        ])
+        .unwrap(),
+        Command::Projects { prune: true }
+    );
+
     // Missing required args return error
     assert!(parse_args(vec!["agent-mem".into(), "get".into()]).is_err());
     assert!(parse_args(vec!["agent-mem".into(), "unknown-cmd".into()]).is_err());

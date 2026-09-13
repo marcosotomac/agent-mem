@@ -222,6 +222,9 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
         }
     }
 
+    // Auto-register project in the global canonical registry
+    let _ = crate::registry::ProjectRegistry::load().and_then(|mut reg| reg.register(root));
+
     Ok(report)
 }
 
