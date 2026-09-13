@@ -1,0 +1,60 @@
+name: "🐛 Bug Report"
+description: "Report an issue or unexpected behavior in agent-mem"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug report! Please provide as much detail as possible to help reproduce the issue quickly.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+      placeholder: "A clear and concise description of what the bug is."
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: Agent / MCP Client
+      description: Which coding agent or client were you using when the issue occurred?
+      options:
+        - "CLI (agent-mem terminal command)"
+        - "Google Antigravity"
+        - "Cursor"
+        - "Claude Desktop / Claude Code"
+        - "Custom MCP Client"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - "macOS (Apple Silicon)"
+        - "macOS (Intel)"
+        - "Linux (x86_64)"
+        - "Linux (ARM64)"
+        - "Windows"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Exact commands executed or prompts used.
+      placeholder: |
+        1. Run `agent-mem ...`
+        2. Execute `git ...`
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `agent-mem doctor`
+      description: Please run `agent-mem doctor` and paste the output here.
+      render: shell
+    validations:
+      required: false

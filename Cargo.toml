@@ -2,6 +2,14 @@
 name = "agent-mem"
 version = "0.1.0"
 edition = "2024"
+authors = ["Marco Soto Maceda <158858927+marcosotomac@users.noreply.github.com>"]
+description = "Local-first, sub-millisecond memory engine for AI coding agents"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/marcosotomac/agent-mem"
+homepage = "https://github.com/marcosotomac/agent-mem"
+keywords = ["ai", "mcp", "memory", "sqlite", "agent"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -1,0 +1,27 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: '0 0 * * 1' # Runs weekly on Mondays
+  pull_request:
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run security audit on dependencies
+        run: cargo audit

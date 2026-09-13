@@ -1,0 +1,31 @@
+name: "🚀 Feature Request"
+description: "Suggest an idea or enhancement for agent-mem"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We are building `agent-mem` to be the fastest, lowest-token persistent memory engine for coding agents.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is your feature request related to a problem?
+      description: A clear and concise description of the problem or limitation you're encountering.
+      placeholder: "I'm always frustrated when..."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe what you would like agent-mem to do.
+      placeholder: "Add support for..."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or workarounds you have evaluated.
+    validations:
+      required: false
