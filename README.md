@@ -1,23 +1,25 @@
 # agent-mem
 
-Ultra-fast, local-first, zero-markdown key-value memory engine for AI coding agents.
+Ultra-fast, local-first, zero-daemon memory engine for AI coding agents.
 
 ## Design Principles
-- **Sub-millisecond latency**: SQLite embedded in WAL mode with clustered B-tree index (`WITHOUT ROWID`).
-- **Memory-Mapped I/O**: Direct virtual page reads from kernel page cache (`PRAGMA mmap_size`).
-- **Zero DDL overhead on read**: Bypasses schema checks when the database already exists.
-- **Minimal token footprint**: Raw plain text output with zero markdown formatting tokens.
-- **Universal Project Root Traversal**: Automatically ascends directory tree to find `.git` or `.agent-mem`.
+- **Sub-millisecond latency**: Embedded SQLite in WAL mode with clustered B-tree index (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`).
+- **Minimal token footprint**: Surgical 3-tool MCP schema consuming <160 tokens (vs ~3,000+ tokens in other memory tools). Raw plain text output with zero Markdown overhead.
+- **Zero background daemons**: Direct stdio communication without background HTTP processes or port collisions.
+- **Code anchors**: Link decisions and rules to repository-relative files and lines (`--anchor src/auth.rs:40`).
+- **Dual scopes**: Seamless access to isolated `project` memory (`.agent-mem/mem.db`) and user-level `global` preferences (`~/.config/agent-mem/global.db`).
+- **BM25 search**: Full-text search powered by SQLite FTS5 with Porter stemming.
+- **Session ring buffer**: Automatic atomic pruning preserving the latest 20 session checkpoints.
 
-## Commands
+## CLI Usage
 ```bash
 # Initialize isolated project memory (SQLite WAL, .gitignore, git hook)
 agent-mem init
 
-# Store or update an architectural rule
-agent-mem set <key> <value>
+# Store or update a memory rule (with optional code anchor)
+agent-mem set <key> <value> [--anchor <path:line>]
 
-# Read a rule value in raw text (<0.2ms query)
+# Read a rule value in raw text (<0.2ms)
 agent-mem get <key>
 
 # Delete a rule
@@ -26,13 +28,36 @@ agent-mem del <key>
 # List all rules
 agent-mem dump
 
-# Fast keyword / BM25 search
+# Fast BM25 keyword search
 agent-mem find <query>
 
-# Session handoff for next agents
+# Session checkpoints (auto-pruned to latest 20)
 agent-mem session add <summary>
 agent-mem session list
 
-# Ultra-dense context block for prompt injection
+# Dense context block for prompt injection
 agent-mem context
+
+# Start native Model Context Protocol (MCP) stdio server
+agent-mem mcp
 ```
+
+## Model Context Protocol (MCP) Setup
+
+Add `agent-mem` to your agent's MCP settings (e.g., Claude Desktop, Cursor, Antigravity, or Cline):
+
+```json
+{
+  "mcpServers": {
+    "agent-mem": {
+      "command": "agent-mem",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Surgical MCP Tools (<160 tokens total schema)
+- `mem_set`: Store or update rules with optional repo-relative code anchor and scope (`project` or `global`).
+- `mem_find`: Search memories via BM25 keywords across `project`, `global`, or `all` scopes.
+- `mem_context`: Retrieve dense context block formatted for immediate LLM injection.

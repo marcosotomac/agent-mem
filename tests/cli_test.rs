@@ -21,7 +21,26 @@ fn test_parse_args() {
         parse_args(vec!["agent-mem".into(), "set".into(), "k".into(), "v1".into(), "v2".into()]).unwrap(),
         Command::Set {
             key: "k".into(),
-            val: "v1 v2".into()
+            val: "v1 v2".into(),
+            anchor: None,
+        }
+    );
+
+    // Set with anchor
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "set".into(),
+            "k".into(),
+            "v1".into(),
+            "--anchor".into(),
+            "src/lib.rs:42".into()
+        ])
+        .unwrap(),
+        Command::Set {
+            key: "k".into(),
+            val: "v1".into(),
+            anchor: Some("src/lib.rs:42".into()),
         }
     );
 
@@ -77,5 +96,60 @@ fn test_root_traversal() {
     assert_eq!(found, temp_dir);
 
     // Cleanup
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_read_does_not_mutate_uninitialized_directory() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_uninit_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    // 1. Get on uninitialized directory must fail without creating .agent-mem
+    let cmd = Command::Get {
+        key: "some_key".into(),
+    };
+    let res = agent_mem::cli::execute_command(cmd, &temp_dir);
+    assert!(matches!(res, Err(agent_mem::error::Error::NotInitialized)));
+    assert!(!temp_dir.join(".agent-mem").exists());
+
+    // 2. Dump on uninitialized directory must also fail without creating .agent-mem
+    let dump_cmd = Command::Dump;
+    let dump_res = agent_mem::cli::execute_command(dump_cmd, &temp_dir);
+    assert!(matches!(dump_res, Err(agent_mem::error::Error::NotInitialized)));
+    assert!(!temp_dir.join(".agent-mem").exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_get_nonexistent_returns_not_found() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_cli_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    // Initialize first so store exists
+    agent_mem::init::init_project(&temp_dir).unwrap();
+
+    let cmd = Command::Get {
+        key: "nonexistent_rule".into(),
+    };
+    let res = agent_mem::cli::execute_command(cmd, &temp_dir);
+
+    match res {
+        Err(agent_mem::error::Error::NotFound(k)) => assert_eq!(k, "nonexistent_rule"),
+        other => panic!("expected NotFound error, got {:?}", other),
+    }
+
     let _ = fs::remove_dir_all(&temp_dir);
 }

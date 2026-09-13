@@ -2,13 +2,23 @@ use crate::init::InitReport;
 use std::io::{self, BufWriter, IsTerminal, Write};
 
 pub fn print_get(val: &str) {
-    print!("{}", val);
-    let _ = io::stdout().flush();
+    if io::stdout().is_terminal() {
+        if val.ends_with('\n') {
+            print!("{}", val);
+        } else {
+            println!("{}", val);
+        }
+    } else {
+        print!("{}", val);
+        let _ = io::stdout().flush();
+    }
 }
 
 pub fn print_set(key: &str) {
     if io::stdout().is_terminal() {
         println!("  \x1b[2msaved\x1b[0m    {}", key);
+    } else {
+        println!("saved {}", key);
     }
 }
 
@@ -19,31 +29,50 @@ pub fn print_del(key: &str, deleted: bool) {
         } else {
             println!("  \x1b[2mnot found\x1b[0m {}", key);
         }
+    } else if deleted {
+        println!("deleted {}", key);
+    } else {
+        println!("not found {}", key);
     }
 }
 
-pub fn print_dump(entries: &[(String, String)]) {
+pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let is_tty = io::stdout().is_terminal();
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
 
-    for (key, val) in entries {
-        if is_tty {
-            let _ = writeln!(out, "  \x1b[1m{:<16}\x1b[0m \x1b[38;5;250m{}\x1b[0m", key, val);
-        } else {
-            let _ = writeln!(out, "{}: {}", key, val);
+    for (key, val, anchor) in entries {
+        match (is_tty, anchor) {
+            (true, Some(a)) => {
+                let _ = writeln!(
+                    out,
+                    "  \x1b[1m{:<16}\x1b[0m \x1b[38;5;250m{}\x1b[0m \x1b[2m({})\x1b[0m",
+                    key, val, a
+                );
+            }
+            (true, None) => {
+                let _ = writeln!(out, "  \x1b[1m{:<16}\x1b[0m \x1b[38;5;250m{}\x1b[0m", key, val);
+            }
+            (false, Some(a)) => {
+                let _ = writeln!(out, "{}: {} ({})", key, val, a);
+            }
+            (false, None) => {
+                let _ = writeln!(out, "{}: {}", key, val);
+            }
         }
     }
     let _ = out.flush();
 }
 
-pub fn print_find(entries: &[(String, String)]) {
+pub fn print_find(entries: &[(String, String, Option<String>)]) {
     print_dump(entries);
 }
 
-pub fn print_session_add() {
+pub fn print_session_add(id: i64) {
     if io::stdout().is_terminal() {
-        println!("  \x1b[2mrecorded\x1b[0m session checkpoint");
+        println!("  \x1b[2mrecorded\x1b[0m session checkpoint #{}", id);
+    } else {
+        println!("recorded #{}", id);
     }
 }
 
@@ -62,14 +91,18 @@ pub fn print_session_list(sessions: &[(i64, String)]) {
     let _ = out.flush();
 }
 
-pub fn print_context(rules: &[(String, String)], sessions: &[(i64, String)]) {
+pub fn print_context(rules: &[(String, String, Option<String>)], sessions: &[(i64, String)]) {
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
 
     if !rules.is_empty() {
         let _ = writeln!(out, "== RULES ==");
-        for (k, v) in rules {
-            let _ = writeln!(out, "{}: {}", k, v);
+        for (k, v, a) in rules {
+            if let Some(anchor) = a {
+                let _ = writeln!(out, "{}: {} ({})", k, v, anchor);
+            } else {
+                let _ = writeln!(out, "{}: {}", k, v);
+            }
         }
     }
 
@@ -142,10 +175,11 @@ pub fn print_help() {
         println!("    \x1b[1mcontext\x1b[0m              Export dense prompt block");
         println!("    \x1b[1msession add\x1b[0m  <msg>   Record session checkpoint");
         println!("    \x1b[1msession list\x1b[0m         Display recent checkpoints");
+        println!("    \x1b[1mmcp\x1b[0m                  Start native Model Context Protocol stdio server");
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list, mcp",
             env!("CARGO_PKG_VERSION")
         );
     }

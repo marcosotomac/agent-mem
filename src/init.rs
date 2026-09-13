@@ -37,6 +37,17 @@ pub fn find_project_root() -> PathBuf {
     find_project_root_from(&cwd)
 }
 
+pub fn global_db_path() -> PathBuf {
+    if let Ok(dir) = env::var("AGENT_MEM_GLOBAL_DIR") {
+        return PathBuf::from(dir).join("global.db");
+    }
+    if let Ok(home) = env::var("HOME") {
+        PathBuf::from(home).join(".config").join("agent-mem").join("global.db")
+    } else {
+        PathBuf::from(".config").join("agent-mem").join("global.db")
+    }
+}
+
 /// Initialize isolated project memory (.agent-mem/, gitignore, git post-commit hook, rules file).
 pub fn init_project(root: &Path) -> Result<InitReport> {
     let mem_dir = root.join(".agent-mem");

@@ -9,13 +9,18 @@ use std::path::Path;
 pub enum Command {
     Init,
     Get { key: String },
-    Set { key: String, val: String },
+    Set {
+        key: String,
+        val: String,
+        anchor: Option<String>,
+    },
     Del { key: String },
     Find { query: String },
     Dump,
     Context,
     SessionAdd { summary: String },
     SessionList,
+    Mcp,
     Help,
     Version,
 }
@@ -48,11 +53,23 @@ where
         }
         "set" => {
             if args.len() < 4 {
-                return Err(Error::Usage("Usage: agent-mem set <key> <value>".to_string()));
+                return Err(Error::Usage("Usage: agent-mem set <key> <value> [--anchor <path:line>]".to_string()));
             }
             let key = args[2].clone();
-            let val = args[3..].join(" ");
-            Ok(Command::Set { key, val })
+            let mut val_parts = Vec::new();
+            let mut anchor = None;
+            let mut i = 3;
+            while i < args.len() {
+                if (args[i] == "--anchor" || args[i] == "-a") && i + 1 < args.len() {
+                    anchor = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    val_parts.push(args[i].clone());
+                    i += 1;
+                }
+            }
+            let val = val_parts.join(" ");
+            Ok(Command::Set { key, val, anchor })
         }
         "del" | "rm" => {
             if args.len() < 3 {
@@ -91,6 +108,7 @@ where
             }
         }
         "context" => Ok(Command::Context),
+        "mcp" | "--mcp" => Ok(Command::Mcp),
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
         unknown => Err(Error::Usage(format!("Unknown command '{}'. Run 'agent-mem --help' for usage.", unknown))),
@@ -112,18 +130,24 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             print_init(&report);
             Ok(())
         }
+        Command::Mcp => {
+            let server = crate::mcp::McpServer::new();
+            server.run_stdio()
+        }
         _ => {
             let db_path = root.join(".agent-mem").join("mem.db");
-            let store = Store::open(&db_path, cmd.is_write())?;
+            let mut store = Store::open(&db_path, cmd.is_write())?;
 
             match cmd {
                 Command::Get { key } => {
                     if let Some(val) = store.get(&key)? {
                         print_get(&val);
+                    } else {
+                        return Err(crate::error::Error::NotFound(key));
                     }
                 }
-                Command::Set { key, val } => {
-                    store.set(&key, &val)?;
+                Command::Set { key, val, anchor } => {
+                    store.set_with_anchor(&key, &val, anchor.as_deref())?;
                     print_set(&key);
                 }
                 Command::Del { key } => {
@@ -139,8 +163,8 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     print_find(&entries);
                 }
                 Command::SessionAdd { summary } => {
-                    let _ = store.session_add(&summary)?;
-                    print_session_add();
+                    let id = store.session_add(&summary)?;
+                    print_session_add(id);
                 }
                 Command::SessionList => {
                     let list = store.session_list(5)?;
@@ -150,7 +174,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     let (rules, sessions) = store.context()?;
                     print_context(&rules, &sessions);
                 }
-                Command::Init | Command::Help | Command::Version => unreachable!(),
+                Command::Init | Command::Help | Command::Version | Command::Mcp => unreachable!(),
             }
             Ok(())
         }
