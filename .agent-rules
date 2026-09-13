@@ -1,0 +1,4 @@
+# .agent-rules - agent-mem shared team memory
+# Track this file in git to share rules across your team without SQLite binary conflicts.
+
+architecture/mcp = Native stdio JSON-RPC 2.0 with <160 tokens schema (@ src/mcp.rs:10)
