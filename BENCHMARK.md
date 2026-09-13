@@ -1,6 +1,6 @@
 # agent-mem Benchmark & Competitor Comparison
 
-> Automated reproducible benchmark executed on v1.0.0
+> Automated reproducible benchmark executed on v1.1.0
 
 ## Executive Summary
 
