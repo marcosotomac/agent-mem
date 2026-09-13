@@ -61,9 +61,24 @@ agent-mem session list
 # Dense context block for prompt injection
 agent-mem context
 
+# Synchronize team rules (.agent-rules) without SQLite binary conflicts
+agent-mem sync [file] [--export]
+
 # Start native Model Context Protocol (MCP) stdio server
 agent-mem mcp
+
+# Automatically configure Claude Desktop, Cursor, or Antigravity
+agent-mem mcp install [claude|cursor|antigravity]
 ```
+
+## Team Git Sync (No Binary Conflicts)
+
+Unlike legacy memory engines that commit binary SQLite databases into Git (causing unresolvable merge conflicts) or require proprietary cloud sync, `agent-mem` uses a deterministic text sync protocol:
+
+- Local `.agent-mem/mem.db` stays in `.gitignore` as an ultra-fast sub-millisecond local cache.
+- Project conventions are version-controlled in `.agent-rules` as clean, PR-reviewable plain text.
+- `agent-mem set` and `del` automatically update `.agent-rules` in real time.
+- `agent-mem init` installs a `.git/hooks/post-merge` hook that automatically runs `agent-mem sync` when you `git pull` or switch branches. Zero binary conflicts, 100% PR visibility!
 
 ## Model Context Protocol (MCP) Setup
 

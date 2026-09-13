@@ -1,7 +1,7 @@
 use crate::error::Result;
 use rusqlite::{params, Connection, TransactionBehavior};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_epoch() -> i64 {
@@ -13,6 +13,15 @@ fn now_epoch() -> i64 {
 
 pub type RuleEntry = (String, String, Option<String>);
 pub type SessionEntry = (i64, String);
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SyncReport {
+    pub path: PathBuf,
+    pub imported: usize,
+    pub total: usize,
+    pub file_created: bool,
+    pub file_updated: bool,
+}
 
 pub struct Store {
     conn: Connection,
@@ -330,5 +339,141 @@ impl Store {
         let rules = self.dump()?;
         let sessions = self.session_list(3)?;
         Ok((rules, sessions))
+    }
+
+    /// Parse plain-text rules (e.g. from .agent-rules).
+    pub fn parse_rules_text(content: &str) -> Vec<RuleEntry> {
+        let mut rules = Vec::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with('#')
+                || trimmed.starts_with("//")
+                || trimmed.starts_with(';')
+            {
+                continue;
+            }
+
+            let (key, rest) = if let Some((k, r)) = trimmed.split_once('=') {
+                (k.trim(), r.trim())
+            } else if let Some((k, r)) = trimmed.split_once(": ") {
+                (k.trim(), r.trim())
+            } else {
+                continue;
+            };
+
+            if key.is_empty() {
+                continue;
+            }
+
+            // Check for anchor: "val (@ path:line)" or "val @ path:line"
+            let (val, anchor) = if rest.ends_with(')') && rest.contains(" (@ ") {
+                if let Some(idx) = rest.rfind(" (@ ") {
+                    let v = rest[..idx].trim();
+                    let a = rest[idx + 4..rest.len() - 1].trim();
+                    (v.to_string(), if a.is_empty() { None } else { Some(a.to_string()) })
+                } else {
+                    (rest.to_string(), None)
+                }
+            } else if let Some(idx) = rest.rfind(" @ ") {
+                let v = rest[..idx].trim();
+                let a = rest[idx + 3..].trim();
+                (v.to_string(), if a.is_empty() { None } else { Some(a.to_string()) })
+            } else {
+                (rest.to_string(), None)
+            };
+
+            rules.push((key.to_string(), val, anchor));
+        }
+        rules
+    }
+
+    /// Export all rules formatted as deterministic plain text sorted by key.
+    pub fn export_rules_text(&self) -> Result<String> {
+        let rules = self.dump()?;
+        let mut out = String::new();
+        out.push_str("# .agent-rules - agent-mem shared team memory\n");
+        out.push_str("# Track this file in git to share rules across your team without SQLite binary conflicts.\n\n");
+
+        for (k, v, a) in rules {
+            if let Some(anchor) = a {
+                out.push_str(&format!("{} = {} (@ {})\n", k, v, anchor));
+            } else {
+                out.push_str(&format!("{} = {}\n", k, v));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Export current rules to a file on disk.
+    pub fn export_to_file(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        let content = self.export_rules_text()?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Reconcile SQLite database with a plain-text rules file (.agent-rules).
+    pub fn sync_with_file(&mut self, path: &Path) -> Result<SyncReport> {
+        if !path.exists() {
+            self.export_to_file(path)?;
+            let total = self.dump()?.len();
+            return Ok(SyncReport {
+                path: path.to_path_buf(),
+                imported: 0,
+                total,
+                file_created: true,
+                file_updated: false,
+            });
+        }
+
+        let content = fs::read_to_string(path)?;
+        let rules = Self::parse_rules_text(&content);
+
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM memories;", [])?;
+        tx.execute("DELETE FROM memories_fts;", [])?;
+
+        let now = now_epoch();
+        let mut count = 0;
+        for (key, val, anchor) in &rules {
+            tx.execute(
+                "INSERT INTO memories (key, val, updated_at, anchor) VALUES (?1, ?2, ?3, ?4);",
+                params![key, val, now, anchor],
+            )?;
+            tx.execute(
+                "INSERT INTO memories_fts (key, val, anchor) VALUES (?1, ?2, ?3);",
+                params![key, val, anchor],
+            )?;
+            count += 1;
+        }
+        tx.commit()?;
+
+        Ok(SyncReport {
+            path: path.to_path_buf(),
+            imported: count,
+            total: count,
+            file_created: false,
+            file_updated: false,
+        })
+    }
+
+    /// Explicitly export SQLite memories to a file.
+    pub fn sync_export(&self, path: &Path) -> Result<SyncReport> {
+        let exists = path.exists();
+        self.export_to_file(path)?;
+        let total = self.dump()?.len();
+        Ok(SyncReport {
+            path: path.to_path_buf(),
+            imported: 0,
+            total,
+            file_created: !exists,
+            file_updated: exists,
+        })
     }
 }

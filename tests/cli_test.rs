@@ -93,6 +93,24 @@ fn test_parse_args() {
         Command::McpInstall { client: Some("claude".into()) }
     );
 
+    // Sync
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "sync".into()]).unwrap(),
+        Command::Sync { file: None, export: false }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "sync".into(), "--export".into()]).unwrap(),
+        Command::Sync { file: None, export: true }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "sync".into(), "team.rules".into()]).unwrap(),
+        Command::Sync { file: Some("team.rules".into()), export: false }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "sync".into(), "team.rules".into(), "-e".into()]).unwrap(),
+        Command::Sync { file: Some("team.rules".into()), export: true }
+    );
+
     // Missing required args return error
     assert!(parse_args(vec!["agent-mem".into(), "get".into()]).is_err());
     assert!(parse_args(vec!["agent-mem".into(), "unknown-cmd".into()]).is_err());
@@ -207,6 +225,97 @@ fn test_init_creates_and_upgrades_trigger_block() {
     let upgraded = fs::read_to_string(&agents_md).unwrap();
     assert!(upgraded.contains("Run `agent-mem context`"));
     assert!(!upgraded.contains("Memory: run `agent-mem get"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_init_creates_rules_file_and_git_hooks() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_init_sync_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    // Simulate git repo
+    fs::create_dir_all(temp_dir.join(".git").join("hooks")).unwrap();
+
+    let report = agent_mem::init::init_project(&temp_dir).unwrap();
+    assert!(report.rules_file_created);
+    assert!(report.hook_configured);
+    assert!(report.post_merge_configured);
+
+    // Verify .agent-rules was created
+    let rules_file = temp_dir.join(".agent-rules");
+    assert!(rules_file.exists());
+    let rules_content = fs::read_to_string(&rules_file).unwrap();
+    assert!(rules_content.contains("# .agent-rules"));
+
+    // Verify .git/hooks/post-merge was created
+    let post_merge = temp_dir.join(".git").join("hooks").join("post-merge");
+    assert!(post_merge.exists());
+    let hook_content = fs::read_to_string(&post_merge).unwrap();
+    assert!(hook_content.contains("agent-mem sync"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cli_sync_and_auto_sync_lifecycle() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_cli_sync_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    // 1. Initialize project
+    agent_mem::init::init_project(&temp_dir).unwrap();
+    let rules_file = temp_dir.join(".agent-rules");
+    assert!(rules_file.exists());
+
+    // 2. Setting a rule in CLI automatically updates .agent-rules
+    let set_cmd = Command::Set {
+        key: "arch/db".into(),
+        val: "SQLite WAL".into(),
+        anchor: Some("src/main.rs:10".into()),
+    };
+    agent_mem::cli::execute_command(set_cmd, &temp_dir).unwrap();
+
+    let content_after_set = fs::read_to_string(&rules_file).unwrap();
+    assert!(content_after_set.contains("arch/db = SQLite WAL (@ src/main.rs:10)"));
+
+    // 3. Deleting a rule in CLI automatically updates .agent-rules
+    let del_cmd = Command::Del {
+        key: "arch/db".into(),
+    };
+    agent_mem::cli::execute_command(del_cmd, &temp_dir).unwrap();
+
+    let content_after_del = fs::read_to_string(&rules_file).unwrap();
+    assert!(!content_after_del.contains("arch/db"));
+
+    // 4. Manual sync from updated file into SQLite
+    fs::write(
+        &rules_file,
+        "# Teammate added rules in Git\nteam/convention = Standard Rust 2024 (@ Cargo.toml:5)\n",
+    )
+    .unwrap();
+
+    let sync_cmd = Command::Sync {
+        file: None,
+        export: false,
+    };
+    agent_mem::cli::execute_command(sync_cmd, &temp_dir).unwrap();
+
+    // Verify rule is active in SQLite
+    let get_cmd = Command::Get {
+        key: "team/convention".into(),
+    };
+    assert!(agent_mem::cli::execute_command(get_cmd, &temp_dir).is_ok());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

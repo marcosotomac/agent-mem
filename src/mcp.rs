@@ -205,6 +205,13 @@ impl McpServer {
 
                 let mut store = self.open_store(scope, true)?;
                 store.set_with_anchor(key, val, anchor)?;
+                if scope == "project" {
+                    let root = crate::init::find_project_root();
+                    let rules_file = root.join(".agent-rules");
+                    if rules_file.exists() {
+                        let _ = store.export_to_file(&rules_file);
+                    }
+                }
                 match anchor {
                     Some(a) => Ok(format!("saved [{}] {} ({})", scope, key, a)),
                     None => Ok(format!("saved [{}] {}", scope, key)),

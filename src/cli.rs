@@ -20,6 +20,7 @@ pub enum Command {
     Context,
     SessionAdd { summary: String },
     SessionList,
+    Sync { file: Option<String>, export: bool },
     Mcp,
     McpInstall { client: Option<String> },
     Help,
@@ -28,7 +29,13 @@ pub enum Command {
 
 impl Command {
     pub fn is_write(&self) -> bool {
-        matches!(self, Command::Set { .. } | Command::Del { .. } | Command::SessionAdd { .. })
+        matches!(
+            self,
+            Command::Set { .. }
+                | Command::Del { .. }
+                | Command::SessionAdd { .. }
+                | Command::Sync { export: false, .. }
+        )
     }
 }
 
@@ -109,6 +116,18 @@ where
             }
         }
         "context" => Ok(Command::Context),
+        "sync" => {
+            let mut file = None;
+            let mut export = false;
+            for arg in &args[2..] {
+                if arg == "--export" || arg == "-e" {
+                    export = true;
+                } else if !arg.starts_with('-') && file.is_none() {
+                    file = Some(arg.clone());
+                }
+            }
+            Ok(Command::Sync { file, export })
+        }
         "mcp" => {
             if args.len() >= 3 && args[2] == "install" {
                 let client = if args.len() >= 4 {
@@ -179,10 +198,18 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 }
                 Command::Set { key, val, anchor } => {
                     store.set_with_anchor(&key, &val, anchor.as_deref())?;
+                    let rules_file = root.join(".agent-rules");
+                    if rules_file.exists() {
+                        let _ = store.export_to_file(&rules_file);
+                    }
                     print_set(&key, anchor.as_deref());
                 }
                 Command::Del { key } => {
                     let deleted = store.del(&key)?;
+                    let rules_file = root.join(".agent-rules");
+                    if rules_file.exists() {
+                        let _ = store.export_to_file(&rules_file);
+                    }
                     print_del(&key, deleted);
                 }
                 Command::Dump => {
@@ -204,6 +231,20 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 Command::Context => {
                     let (rules, sessions) = store.context()?;
                     print_context(&rules, &sessions);
+                }
+                Command::Sync { file, export } => {
+                    let target_file = file.as_deref().unwrap_or(".agent-rules");
+                    let file_path = if Path::new(target_file).is_absolute() {
+                        Path::new(target_file).to_path_buf()
+                    } else {
+                        root.join(target_file)
+                    };
+                    let report = if export {
+                        store.sync_export(&file_path)?
+                    } else {
+                        store.sync_with_file(&file_path)?
+                    };
+                    print_sync(&report);
                 }
                 Command::Init
                 | Command::Help

@@ -160,6 +160,12 @@ pub fn print_init(report: &InitReport) {
         if report.hook_configured {
             println!("  \x1b[2mhook\x1b[0m     .git/hooks/post-commit active");
         }
+        if report.post_merge_configured {
+            println!("  \x1b[2mhook\x1b[0m     .git/hooks/post-merge active (auto-sync)");
+        }
+        if report.rules_file_created {
+            println!("  \x1b[2msync\x1b[0m     created .agent-rules (team git sync)");
+        }
         if report.created_rule_file {
             println!("  \x1b[2mtrigger\x1b[0m  created {}", report.trigger_target);
         } else if report.trigger_updated {
@@ -177,9 +183,38 @@ pub fn print_init(report: &InitReport) {
         if report.hook_configured {
             println!("- Hook: .git/hooks/post-commit active");
         }
+        if report.post_merge_configured {
+            println!("- Hook: .git/hooks/post-merge active (auto-sync)");
+        }
+        if report.rules_file_created {
+            println!("- Sync: created .agent-rules (team git sync)");
+        }
         if report.trigger_updated || report.created_rule_file {
             println!("- Trigger: updated {}", report.trigger_target);
         }
+    }
+}
+
+pub fn print_sync(report: &crate::store::SyncReport) {
+    let is_tty = io::stdout().is_terminal();
+    let file_name = report.path.file_name().and_then(|n| n.to_str()).unwrap_or(".agent-rules");
+    if is_tty {
+        if report.file_created {
+            println!("  \x1b[32m✔\x1b[0m \x1b[1mcreated\x1b[0m {} \x1b[2m({} rules exported)\x1b[0m", file_name, report.total);
+        } else if report.file_updated {
+            println!("  \x1b[32m✔\x1b[0m \x1b[1mexported\x1b[0m {} \x1b[2m({} rules written)\x1b[0m", file_name, report.total);
+        } else {
+            println!(
+                "  \x1b[32m✔\x1b[0m \x1b[1msynchronized\x1b[0m {} \x1b[2m({} rules active)\x1b[0m",
+                file_name, report.total
+            );
+        }
+    } else if report.file_created {
+        println!("created {} ({} rules)", file_name, report.total);
+    } else if report.file_updated {
+        println!("exported {} ({} rules)", file_name, report.total);
+    } else {
+        println!("sync: {} rules in {}", report.total, file_name);
     }
 }
 
@@ -204,12 +239,13 @@ pub fn print_help() {
         println!("    \x1b[1mcontext\x1b[0m              Export dense prompt block");
         println!("    \x1b[1msession add\x1b[0m  <msg>   Record session checkpoint");
         println!("    \x1b[1msession list\x1b[0m         Display recent checkpoints");
+        println!("    \x1b[1msync\x1b[0m [file] [--export] Synchronize team rules (.agent-rules) without SQLite merge conflicts");
         println!("    \x1b[1mmcp\x1b[0m                  Start native Model Context Protocol stdio server");
         println!("    \x1b[1mmcp install\x1b[0m [client]  Configure Claude Desktop, Cursor, or Antigravity");
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list, mcp, mcp install",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list, sync, mcp, mcp install",
             env!("CARGO_PKG_VERSION")
         );
     }

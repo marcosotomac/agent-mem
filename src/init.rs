@@ -12,9 +12,11 @@ pub struct InitReport {
     pub root: PathBuf,
     pub gitignore_updated: bool,
     pub hook_configured: bool,
+    pub post_merge_configured: bool,
     pub trigger_target: String,
     pub trigger_updated: bool,
     pub created_rule_file: bool,
+    pub rules_file_created: bool,
 }
 
 /// Find repository / project root by walking up looking for .git or .agent-mem
@@ -106,6 +108,39 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
             }
             report.hook_configured = true;
         }
+
+        // 3. Configure .git/hooks/post-merge idempotently for automatic team sync
+        let merge_hook_path = git_hooks_dir.join("post-merge");
+        let merge_hook_cmd = "agent-mem sync 2>/dev/null || true\n";
+
+        if merge_hook_path.exists() {
+            let content = fs::read_to_string(&merge_hook_path).unwrap_or_default();
+            if !content.contains("agent-mem sync") {
+                let mut new_content = content;
+                if !new_content.ends_with('\n') && !new_content.is_empty() {
+                    new_content.push('\n');
+                }
+                new_content.push_str(merge_hook_cmd);
+                fs::write(&merge_hook_path, new_content)?;
+                report.post_merge_configured = true;
+            }
+        } else {
+            let new_content = format!("#!/bin/sh\n{}", merge_hook_cmd);
+            fs::write(&merge_hook_path, new_content)?;
+            #[cfg(unix)]
+            {
+                let _ = fs::set_permissions(&merge_hook_path, fs::Permissions::from_mode(0o755));
+            }
+            report.post_merge_configured = true;
+        }
+    }
+
+    // 4. Initialize .agent-rules plain text file for git tracking
+    let rules_path = root.join(".agent-rules");
+    if !rules_path.exists() {
+        let store = Store::open(&db_path, false)?;
+        store.export_to_file(&rules_path)?;
+        report.rules_file_created = true;
     }
 
 const TRIGGER_BLOCK: &str = "\
@@ -116,7 +151,7 @@ const TRIGGER_BLOCK: &str = "\
 - **On search:** Run `agent-mem find <query>` (or MCP `mem_find`) to look up specific memories.
 <!-- /agent-mem -->\n";
 
-    // 3. Inject minimal AI trigger instruction idempotently into rules file
+    // 5. Inject minimal AI trigger instruction idempotently into rules file
     let candidate_files = ["AGENTS.md", "CLAUDE.md", ".cursorrules", ".windsurfrules"];
     let trigger_target = candidate_files.iter().map(|f| root.join(f)).find(|p| p.exists());
 
