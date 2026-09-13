@@ -193,6 +193,14 @@ pub fn print_init(report: &InitReport) {
         if report.post_merge_configured {
             println!("  {MUTED}hooks{RESET}     post-merge active  {SUBTLE}(auto-sync){RESET}");
         }
+        if report.post_checkout_configured {
+            println!("  {MUTED}hooks{RESET}     post-checkout active  {SUBTLE}(auto-sync){RESET}");
+        }
+        if report.post_rewrite_configured {
+            println!(
+                "  {MUTED}hooks{RESET}     post-rewrite active  {SUBTLE}(auto-sync on rebase){RESET}"
+            );
+        }
         if report.rules_file_created {
             println!(
                 "  {MUTED}sync{RESET}      created .agent-rules  {SUBTLE}(team git sync){RESET}"
@@ -387,9 +395,12 @@ pub fn print_doctor(
                     "    {AMBER}!{RESET}  {MUTED}sync{RESET}      {ACCENT}.agent-rules{RESET}  {SUBTLE}·{RESET}  {MUTED}union merge not configured{RESET}"
                 );
             }
-            if git_stats.post_commit_active && git_stats.post_merge_active {
+            let all_hooks_active = git_stats.post_commit_active
+                && git_stats.post_merge_active
+                && git_stats.post_checkout_active;
+            if all_hooks_active {
                 println!(
-                    "    {EMERALD}✓{RESET}  {MUTED}hooks{RESET}     {ACCENT}active{RESET}  {SUBTLE}·{RESET}  {MUTED}post-commit (sessions), post-merge (sync){RESET}"
+                    "    {EMERALD}✓{RESET}  {MUTED}hooks{RESET}     {ACCENT}active{RESET}  {SUBTLE}·{RESET}  {MUTED}post-commit, post-merge, post-checkout{RESET}"
                 );
             } else if git_stats.post_commit_active {
                 println!(
@@ -452,12 +463,13 @@ pub fn print_doctor(
             println!("Storage: not initialized");
         }
         println!(
-            "Git: repo={}, ignore={}, attributes={}, post-commit={}, post-merge={}, rules={}",
+            "Git: repo={}, ignore={}, attributes={}, post-commit={}, post-merge={}, post-checkout={}, rules={}",
             git_stats.is_git_repo,
             git_stats.gitignore_active,
             git_stats.gitattributes_active,
             git_stats.post_commit_active,
             git_stats.post_merge_active,
+            git_stats.post_checkout_active,
             git_stats.rules_count
         );
         for client in clients {

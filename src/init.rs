@@ -14,6 +14,8 @@ pub struct InitReport {
     pub gitattributes_updated: bool,
     pub hook_configured: bool,
     pub post_merge_configured: bool,
+    pub post_checkout_configured: bool,
+    pub post_rewrite_configured: bool,
     pub trigger_target: String,
     pub trigger_updated: bool,
     pub created_rule_file: bool,
@@ -105,57 +107,44 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
         report.gitattributes_updated = true;
     }
 
-    // 3. Configure .git/hooks/post-commit idempotently if this is a git repo
-    let git_hooks_dir = root.join(".git").join("hooks");
-    if git_hooks_dir.exists() {
-        let hook_path = git_hooks_dir.join("post-commit");
-        let hook_cmd = "agent-mem session add \"$(git log -1 --pretty=%s)\" 2>/dev/null || true\n";
-
+    fn install_git_hook(dir: &Path, name: &str, cmd: &str) -> Result<bool> {
+        let hook_path = dir.join(name);
+        let hook_line = format!("{}\n", cmd.trim());
         if hook_path.exists() {
             let content = fs::read_to_string(&hook_path).unwrap_or_default();
-            if !content.contains("agent-mem session add") {
+            if !content.contains(cmd.trim()) {
                 let mut new_content = content;
                 if !new_content.ends_with('\n') && !new_content.is_empty() {
                     new_content.push('\n');
                 }
-                new_content.push_str(hook_cmd);
+                new_content.push_str(&hook_line);
                 fs::write(&hook_path, new_content)?;
-                report.hook_configured = true;
+                return Ok(true);
             }
         } else {
-            let new_content = format!("#!/bin/sh\n{}", hook_cmd);
+            let new_content = format!("#!/bin/sh\n{}", hook_line);
             fs::write(&hook_path, new_content)?;
             #[cfg(unix)]
             {
                 let _ = fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755));
             }
-            report.hook_configured = true;
+            return Ok(true);
         }
+        Ok(false)
+    }
 
-        // 3. Configure .git/hooks/post-merge idempotently for automatic team sync
-        let merge_hook_path = git_hooks_dir.join("post-merge");
-        let merge_hook_cmd = "agent-mem sync 2>/dev/null || true\n";
+    // 3. Configure .git/hooks idempotently (post-commit, post-merge, post-checkout, post-rewrite)
+    let git_hooks_dir = root.join(".git").join("hooks");
+    if git_hooks_dir.exists() {
+        let session_cmd = "agent-mem session add \"$(git log -1 --pretty=%s)\" 2>/dev/null || true";
+        let sync_cmd = "agent-mem sync 2>/dev/null || true";
 
-        if merge_hook_path.exists() {
-            let content = fs::read_to_string(&merge_hook_path).unwrap_or_default();
-            if !content.contains("agent-mem sync") {
-                let mut new_content = content;
-                if !new_content.ends_with('\n') && !new_content.is_empty() {
-                    new_content.push('\n');
-                }
-                new_content.push_str(merge_hook_cmd);
-                fs::write(&merge_hook_path, new_content)?;
-                report.post_merge_configured = true;
-            }
-        } else {
-            let new_content = format!("#!/bin/sh\n{}", merge_hook_cmd);
-            fs::write(&merge_hook_path, new_content)?;
-            #[cfg(unix)]
-            {
-                let _ = fs::set_permissions(&merge_hook_path, fs::Permissions::from_mode(0o755));
-            }
-            report.post_merge_configured = true;
-        }
+        report.hook_configured = install_git_hook(&git_hooks_dir, "post-commit", session_cmd)?;
+        report.post_merge_configured = install_git_hook(&git_hooks_dir, "post-merge", sync_cmd)?;
+        report.post_checkout_configured =
+            install_git_hook(&git_hooks_dir, "post-checkout", sync_cmd)?;
+        report.post_rewrite_configured =
+            install_git_hook(&git_hooks_dir, "post-rewrite", sync_cmd)?;
     }
 
     // 4. Initialize .agent-rules plain text file for git tracking
@@ -244,6 +233,7 @@ pub struct GitDoctorReport {
     pub gitattributes_active: bool,
     pub post_commit_active: bool,
     pub post_merge_active: bool,
+    pub post_checkout_active: bool,
     pub rules_file_exists: bool,
     pub rules_count: usize,
 }
@@ -274,6 +264,12 @@ pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
             .map(|c| c.contains("agent-mem sync"))
             .unwrap_or(false);
 
+    let post_checkout_path = root.join(".git").join("hooks").join("post-checkout");
+    let post_checkout_active = post_checkout_path.exists()
+        && fs::read_to_string(&post_checkout_path)
+            .map(|c| c.contains("agent-mem sync"))
+            .unwrap_or(false);
+
     let rules_path = root.join(".agent-rules");
     let rules_file_exists = rules_path.exists();
     let rules_count = if rules_file_exists {
@@ -291,6 +287,7 @@ pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
         gitattributes_active,
         post_commit_active,
         post_merge_active,
+        post_checkout_active,
         rules_file_exists,
         rules_count,
     }
