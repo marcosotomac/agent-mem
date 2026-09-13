@@ -28,3 +28,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[[bench]]
+name = "bench_suite"
+harness = false
