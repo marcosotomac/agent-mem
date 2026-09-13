@@ -237,12 +237,23 @@ impl McpServer {
                     && let Ok(store) = self.open_store("project", false)
                     && let Ok(results) = store.find(query)
                 {
-                    for (k, v, a) in results {
-                        match a {
-                            Some(anchor) => {
-                                lines.push(format!("[project] {}: {} ({})", k, v, anchor))
+                    for r in results {
+                        let status_tag = if r.is_archived() {
+                            r.archive_reason
+                                .as_deref()
+                                .map(|reason| format!(" [archived: {}]", reason))
+                                .unwrap_or_else(|| " [archived]".to_string())
+                        } else {
+                            String::new()
+                        };
+                        match r.anchor {
+                            Some(anchor) => lines.push(format!(
+                                "[project] {}: {}{} ({})",
+                                r.key, r.val, status_tag, anchor
+                            )),
+                            None => {
+                                lines.push(format!("[project] {}: {}{}", r.key, r.val, status_tag))
                             }
-                            None => lines.push(format!("[project] {}: {}", k, v)),
                         }
                     }
                 }
@@ -251,12 +262,23 @@ impl McpServer {
                     && let Ok(store) = self.open_store("global", false)
                     && let Ok(results) = store.find(query)
                 {
-                    for (k, v, a) in results {
-                        match a {
-                            Some(anchor) => {
-                                lines.push(format!("[global] {}: {} ({})", k, v, anchor))
+                    for r in results {
+                        let status_tag = if r.is_archived() {
+                            r.archive_reason
+                                .as_deref()
+                                .map(|reason| format!(" [archived: {}]", reason))
+                                .unwrap_or_else(|| " [archived]".to_string())
+                        } else {
+                            String::new()
+                        };
+                        match r.anchor {
+                            Some(anchor) => lines.push(format!(
+                                "[global] {}: {}{} ({})",
+                                r.key, r.val, status_tag, anchor
+                            )),
+                            None => {
+                                lines.push(format!("[global] {}: {}{}", r.key, r.val, status_tag))
                             }
-                            None => lines.push(format!("[global] {}: {}", k, v)),
                         }
                     }
                 }

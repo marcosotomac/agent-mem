@@ -64,19 +64,19 @@ fn test_fts_and_fallback() {
     // Search keyword in value
     let results = store.find("SQLite WAL").unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, "db-rule");
+    assert_eq!(results[0].key, "db-rule");
 
     // Search keyword in key
     let results_key = store.find("auth").unwrap();
     assert_eq!(results_key.len(), 1);
-    assert_eq!(results_key[0].0, "auth-rule");
+    assert_eq!(results_key[0].key, "auth-rule");
 
     // Search with special characters (must not crash FTS5 parser)
     let safe_search = store
         .find("SQLite: \"WAL\" mode (sub-millisecond)")
         .unwrap();
     assert!(!safe_search.is_empty());
-    assert_eq!(safe_search[0].0, "db-rule");
+    assert_eq!(safe_search[0].key, "db-rule");
 
     // Search non-existent
     let empty = store.find("nonexistentquerythatshouldnevermatch").unwrap();
@@ -92,7 +92,7 @@ fn test_no_phantom_results_after_delete() {
         .unwrap();
     let found = store.find("disappear").unwrap();
     assert_eq!(found.len(), 1);
-    assert_eq!(found[0].0, "ghost-key");
+    assert_eq!(found[0].key, "ghost-key");
 
     let deleted = store.del("ghost-key").unwrap();
     assert!(deleted);
@@ -152,7 +152,7 @@ fn test_fts_porter_stemming_and_no_wildcard_pollution() {
     // 1. Porter stemming: "architecture" should stem to match "architectural"
     let stemmed = store.find("architecture").unwrap();
     assert_eq!(stemmed.len(), 1);
-    assert_eq!(stemmed[0].0, "arch-rule");
+    assert_eq!(stemmed[0].key, "arch-rule");
 
     // 2. Exact token: "wal" must NOT match "wallet" because automatic * wildcard was removed
     let no_wildcard_pollution = store.find("wal").unwrap();
@@ -161,7 +161,7 @@ fn test_fts_porter_stemming_and_no_wildcard_pollution() {
     // 3. Explicit prefix search: user explicitly requested wildcard "wal*"
     let explicit_wildcard = store.find("wal*").unwrap();
     assert_eq!(explicit_wildcard.len(), 1);
-    assert_eq!(explicit_wildcard[0].0, "wallet-rule");
+    assert_eq!(explicit_wildcard[0].key, "wallet-rule");
 }
 
 #[test]
@@ -222,8 +222,8 @@ fn test_anchor_storage_and_search() {
 
     // 1. get_entry returns value and anchor
     let entry = store.get_entry("jwt-auth").unwrap().expect("entry found");
-    assert_eq!(entry.0, "RS256 validation required for all requests");
-    assert_eq!(entry.1.as_deref(), Some("src/auth/jwt.rs:42"));
+    assert_eq!(entry.val, "RS256 validation required for all requests");
+    assert_eq!(entry.anchor.as_deref(), Some("src/auth/jwt.rs:42"));
 
     // 2. dump returns anchor
     let all = store.dump().unwrap();
@@ -233,8 +233,8 @@ fn test_anchor_storage_and_search() {
     // 3. BM25 / FTS matches on anchor path
     let by_anchor = store.find("auth/jwt.rs").unwrap();
     assert_eq!(by_anchor.len(), 1);
-    assert_eq!(by_anchor[0].0, "jwt-auth");
-    assert_eq!(by_anchor[0].2.as_deref(), Some("src/auth/jwt.rs:42"));
+    assert_eq!(by_anchor[0].key, "jwt-auth");
+    assert_eq!(by_anchor[0].anchor.as_deref(), Some("src/auth/jwt.rs:42"));
 }
 
 #[test]
@@ -307,52 +307,35 @@ api/streaming: Prefer HTTP/2 streaming (@ src/api.rs:10)
 
     let rules = Store::parse_rules_text(input);
     assert_eq!(rules.len(), 5);
+    assert_eq!(rules[0].key, "architecture/db");
+    assert_eq!(rules[0].val, "Use SQLite WAL mode without rowid");
+    assert_eq!(rules[0].anchor, None);
+
+    assert_eq!(rules[1].key, "auth/jwt");
+    assert_eq!(rules[1].val, "RS256 with 15-minute expiration");
+    assert_eq!(rules[1].anchor.as_deref(), Some("src/auth.rs:42"));
+
+    assert_eq!(rules[2].key, "conventions/naming");
+    assert_eq!(rules[2].val, "Use snake_case for functions");
+    assert_eq!(rules[2].anchor, None);
+
+    assert_eq!(rules[3].key, "comments/ignored");
     assert_eq!(
-        rules[0],
-        (
-            "architecture/db".into(),
-            "Use SQLite WAL mode without rowid".into(),
-            None
-        )
+        rules[3].val,
+        "// this line should not be ignored as a rule if key=val, but comments start with //"
     );
-    assert_eq!(
-        rules[1],
-        (
-            "auth/jwt".into(),
-            "RS256 with 15-minute expiration".into(),
-            Some("src/auth.rs:42".into())
-        )
-    );
-    assert_eq!(
-        rules[2],
-        (
-            "conventions/naming".into(),
-            "Use snake_case for functions".into(),
-            None
-        )
-    );
-    assert_eq!(
-        rules[3],
-        (
-            "comments/ignored".into(),
-            "// this line should not be ignored as a rule if key=val, but comments start with //"
-                .into(),
-            None
-        )
-    );
-    assert_eq!(
-        rules[4],
-        (
-            "api/streaming".into(),
-            "Prefer HTTP/2 streaming".into(),
-            Some("src/api.rs:10".into())
-        )
-    );
+    assert_eq!(rules[3].anchor, None);
+
+    assert_eq!(rules[4].key, "api/streaming");
+    assert_eq!(rules[4].val, "Prefer HTTP/2 streaming");
+    assert_eq!(rules[4].anchor.as_deref(), Some("src/api.rs:10"));
 
     // Verify deterministic export from Store
     let mut store = Store::open_in_memory().unwrap();
-    for (k, v, a) in rules {
-        store.set_with_anchor(&k, &v, a.as_deref()).unwrap();
+    for r in rules {
+        store
+            .set_with_anchor(&r.key, &r.val, r.anchor.as_deref())
+            .unwrap();
     }
     let exported = store.export_rules_text().unwrap();
     assert!(exported.contains("api/streaming = Prefer HTTP/2 streaming (@ src/api.rs:10)"));
@@ -414,7 +397,7 @@ lint/clippy = Run cargo clippy with -D warnings
     // Verify FTS5 search reflects the sync immediately
     let search_res = store.find("clippy").unwrap();
     assert_eq!(search_res.len(), 1);
-    assert_eq!(search_res[0].0, "lint/clippy");
+    assert_eq!(search_res[0].key, "lint/clippy");
 
     // 4. sync_export explicitly rewrites file from SQLite
     store.set("cache/ttl", "3600s").unwrap();

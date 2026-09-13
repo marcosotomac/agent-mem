@@ -62,8 +62,8 @@ fn test_massive_scale_10k_records_and_sub_millisecond_latency() {
         total_records, fts_duration
     );
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, "service_0034/module_05/convention_06");
-    assert!(results[0].1.contains("CRITICAL_NEEDLE"));
+    assert_eq!(results[0].key, "service_0034/module_05/convention_06");
+    assert!(results[0].val.contains("CRITICAL_NEEDLE"));
     assert!(
         fts_duration.as_millis() < 25,
         "FTS5 BM25 search must execute in < 25ms"
@@ -205,7 +205,7 @@ fn test_massive_sync_reconciliation_scale() {
     // BM25 verify
     let results = store.find("Rule description number 1500").unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, "team/rule_1500");
+    assert_eq!(results[0].key, "team/rule_1500");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

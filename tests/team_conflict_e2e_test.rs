@@ -168,7 +168,7 @@ fn test_team_multi_branch_swarm_and_union_merge_resolution() {
     // BM25 full-text search across merged team knowledge
     let hits = store.find("Idempotency").unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].0, "billing/stripe");
+    assert_eq!(hits[0].key, "billing/stripe");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -274,8 +274,10 @@ conflict/ignored = version 2\r\n\
     let parsed = Store::parse_rules_text(dirty);
     assert_eq!(parsed.len(), 5);
 
-    let map: std::collections::HashMap<String, (String, Option<String>)> =
-        parsed.into_iter().map(|(k, v, a)| (k, (v, a))).collect();
+    let map: std::collections::HashMap<String, (String, Option<String>)> = parsed
+        .into_iter()
+        .map(|r| (r.key, (r.val, r.anchor)))
+        .collect();
 
     assert_eq!(map.len(), 4);
 

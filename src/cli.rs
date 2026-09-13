@@ -21,6 +21,13 @@ pub enum Command {
     Del {
         key: String,
     },
+    Archive {
+        key: String,
+        reason: Option<String>,
+    },
+    Unarchive {
+        key: String,
+    },
     Find {
         query: String,
     },
@@ -49,6 +56,8 @@ impl Command {
             self,
             Command::Set { .. }
                 | Command::Del { .. }
+                | Command::Archive { .. }
+                | Command::Unarchive { .. }
                 | Command::SessionAdd { .. }
                 | Command::Sync { export: false, .. }
         )
@@ -104,6 +113,34 @@ where
                 return Err(Error::Usage("Usage: agent-mem del <key>".to_string()));
             }
             Ok(Command::Del {
+                key: args[2].clone(),
+            })
+        }
+        "archive" => {
+            if args.len() < 3 {
+                return Err(Error::Usage(
+                    "Usage: agent-mem archive <key> [--reason <reason>]".to_string(),
+                ));
+            }
+            let key = args[2].clone();
+            let mut reason = None;
+            let mut i = 3;
+            while i < args.len() {
+                if (args[i] == "--reason" || args[i] == "-r") && i + 1 < args.len() {
+                    reason = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    reason = Some(args[i..].join(" "));
+                    break;
+                }
+            }
+            Ok(Command::Archive { key, reason })
+        }
+        "unarchive" => {
+            if args.len() < 3 {
+                return Err(Error::Usage("Usage: agent-mem unarchive <key>".to_string()));
+            }
+            Ok(Command::Unarchive {
                 key: args[2].clone(),
             })
         }
@@ -251,8 +288,8 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
 
             match cmd {
                 Command::Get { key } => {
-                    if let Some(val) = store.get(&key)? {
-                        print_get(&val);
+                    if let Some(record) = store.get_entry(&key)? {
+                        print_get_record(&record);
                     } else {
                         return Err(crate::error::Error::NotFound(key));
                     }
@@ -272,6 +309,28 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                         let _ = store.export_to_file(&rules_file);
                     }
                     print_del(&key, deleted);
+                }
+                Command::Archive { key, reason } => {
+                    let archived = store.archive(&key, reason.as_deref())?;
+                    if !archived {
+                        return Err(crate::error::Error::NotFound(key));
+                    }
+                    let rules_file = root.join(".agent-rules");
+                    if rules_file.exists() {
+                        let _ = store.export_to_file(&rules_file);
+                    }
+                    print_archive(&key, reason.as_deref());
+                }
+                Command::Unarchive { key } => {
+                    let unarchived = store.unarchive(&key)?;
+                    if !unarchived {
+                        return Err(crate::error::Error::NotFound(key));
+                    }
+                    let rules_file = root.join(".agent-rules");
+                    if rules_file.exists() {
+                        let _ = store.export_to_file(&rules_file);
+                    }
+                    print_unarchive(&key);
                 }
                 Command::Dump => {
                     let entries = store.dump()?;

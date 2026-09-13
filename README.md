@@ -53,7 +53,13 @@ agent-mem get <key>
 # Delete a rule
 agent-mem del <key>
 
-# List all rules
+# Archive an obsolete rule with migration reason (zero prompt token waste, discoverable via search)
+agent-mem archive <key> [--reason <reason>]
+
+# Reactivate an archived rule
+agent-mem unarchive <key>
+
+# List all active rules
 agent-mem dump
 
 # Fast BM25 keyword search
@@ -82,8 +88,9 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 
 - Local `.agent-mem/mem.db` stays in `.gitignore` as an ultra-fast sub-millisecond local cache.
 - Project conventions are version-controlled in `.agent-rules` as clean, PR-reviewable plain text.
-- `agent-mem set` and `del` automatically update `.agent-rules` in real time.
-- `agent-mem init` installs a `.git/hooks/post-merge` hook that automatically runs `agent-mem sync` when you `git pull` or switch branches. Zero binary conflicts, 100% PR visibility!
+- `agent-mem set`, `del`, `archive`, and `unarchive` automatically update `.agent-rules` in real time.
+- Obsolete conventions are soft-deprecated into an `# Archived Rules` block with migration reasons, preventing AI agents from repeating dead patterns while sparing prompt tokens.
+- `agent-mem init` installs Git hooks (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) that automatically keep `.agent-rules` and local SQLite in sync across rebases and branch switches. Zero binary conflicts, 100% PR visibility!
 
 ## Model Context Protocol (MCP) Setup
 

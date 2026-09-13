@@ -53,6 +53,57 @@ pub fn print_del(key: &str, deleted: bool) {
     }
 }
 
+pub fn print_get_record(record: &crate::store::RuleRecord) {
+    if io::stdout().is_terminal() {
+        if record.is_archived() {
+            let reason = record
+                .archive_reason
+                .as_deref()
+                .map(|r| format!("  {AMBER}(reason: {}){RESET}", r))
+                .unwrap_or_default();
+            println!(
+                "  {AMBER}⊘ [archived]{RESET} {ACCENT}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}{}",
+                record.key, record.val, reason
+            );
+        } else {
+            print_get(&record.val);
+        }
+    } else if record.is_archived() {
+        let reason = record
+            .archive_reason
+            .as_deref()
+            .map(|r| format!(" (reason: {})", r))
+            .unwrap_or_default();
+        println!("[archived] {}: {}{}", record.key, record.val, reason);
+    } else {
+        print_get(&record.val);
+    }
+}
+
+pub fn print_archive(key: &str, reason: Option<&str>) {
+    if io::stdout().is_terminal() {
+        match reason {
+            Some(r) => println!(
+                "  {AMBER}⊘{RESET}  {MUTED}archived{RESET}  {ACCENT}{key}{RESET}  {SUBTLE}·{RESET}  {AMBER}{r}{RESET}"
+            ),
+            None => println!("  {AMBER}⊘{RESET}  {MUTED}archived{RESET}  {ACCENT}{key}{RESET}"),
+        }
+    } else {
+        match reason {
+            Some(r) => println!("archived {} ({})", key, r),
+            None => println!("archived {}", key),
+        }
+    }
+}
+
+pub fn print_unarchive(key: &str) {
+    if io::stdout().is_terminal() {
+        println!("  {EMERALD}✓{RESET}  {MUTED}reactivated{RESET}  {ACCENT}{key}{RESET}");
+    } else {
+        println!("reactivated {}", key);
+    }
+}
+
 pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let is_tty = io::stdout().is_terminal();
     if entries.is_empty() {
@@ -105,7 +156,7 @@ pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let _ = out.flush();
 }
 
-pub fn print_find(query: &str, entries: &[(String, String, Option<String>)]) {
+pub fn print_find(query: &str, entries: &[crate::store::RuleRecord]) {
     if entries.is_empty() {
         if io::stdout().is_terminal() {
             println!(
@@ -115,7 +166,67 @@ pub fn print_find(query: &str, entries: &[(String, String, Option<String>)]) {
         }
         return;
     }
-    print_dump(entries);
+
+    let is_tty = io::stdout().is_terminal();
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    let max_key_len = entries
+        .iter()
+        .map(|r| r.key.len())
+        .max()
+        .unwrap_or(12)
+        .clamp(12, 36);
+
+    for record in entries {
+        if record.is_archived() {
+            let reason = record
+                .archive_reason
+                .as_deref()
+                .map(|r| format!(" (reason: {})", r))
+                .unwrap_or_default();
+            if is_tty {
+                let _ = writeln!(
+                    out,
+                    "  {AMBER}⊘ [archived]{RESET} {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}  {AMBER}{}{RESET}",
+                    record.key,
+                    record.val,
+                    reason,
+                    width = max_key_len
+                );
+            } else {
+                let _ = writeln!(out, "[archived] {}: {}{}", record.key, record.val, reason);
+            }
+        } else {
+            match (is_tty, record.anchor.as_deref()) {
+                (true, Some(a)) => {
+                    let _ = writeln!(
+                        out,
+                        "  {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}  {MUTED}{}{RESET}",
+                        record.key,
+                        record.val,
+                        a,
+                        width = max_key_len
+                    );
+                }
+                (true, None) => {
+                    let _ = writeln!(
+                        out,
+                        "  {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}",
+                        record.key,
+                        record.val,
+                        width = max_key_len
+                    );
+                }
+                (false, Some(a)) => {
+                    let _ = writeln!(out, "{}: {} ({})", record.key, record.val, a);
+                }
+                (false, None) => {
+                    let _ = writeln!(out, "{}: {}", record.key, record.val);
+                }
+            }
+        }
+    }
+    let _ = out.flush();
 }
 
 pub fn print_session_add(id: i64) {
@@ -305,6 +416,12 @@ pub fn print_help() {
         );
         println!("    {ACCENT}del{RESET}     {MUTED}<key>{RESET}           Delete a memory rule");
         println!(
+            "    {ACCENT}archive{RESET} {MUTED}<key> [--reason <msg>]{RESET} Deprecate an obsolete rule"
+        );
+        println!(
+            "    {ACCENT}unarchive{RESET} {MUTED}<key>{RESET}       Reactivate an archived rule"
+        );
+        println!(
             "    {ACCENT}find{RESET}    {MUTED}<query>{RESET}         Search rules via BM25 index"
         );
         println!("    {ACCENT}dump{RESET}                    List all active rules");
@@ -330,7 +447,7 @@ pub fn print_help() {
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list, sync, mcp, mcp install, doctor",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, archive, unarchive, find, dump, context, session add, session list, sync, mcp, mcp install, doctor",
             env!("CARGO_PKG_VERSION")
         );
     }
@@ -353,11 +470,19 @@ pub fn print_doctor(
         // Storage
         println!("  {MUTED}Storage{RESET}");
         if let Some(stats) = store_stats {
+            let rules_summary = if stats.archived_rules_count > 0 {
+                format!(
+                    "{} active ({} archived)",
+                    stats.active_rules_count, stats.archived_rules_count
+                )
+            } else {
+                format!("{} rules", stats.rules_count)
+            };
             println!(
-                "    {EMERALD}✓{RESET}  {MUTED}database{RESET}  {ACCENT}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} mode  ·  {} rules, {} sessions{RESET}",
+                "    {EMERALD}✓{RESET}  {MUTED}database{RESET}  {ACCENT}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} mode  ·  {}, {} sessions{RESET}",
                 stats.db_path.display(),
                 stats.journal_mode,
-                stats.rules_count,
+                rules_summary,
                 stats.sessions_count
             );
             println!(
@@ -453,10 +578,12 @@ pub fn print_doctor(
         println!("=== AGENT-MEM DOCTOR ===");
         if let Some(stats) = store_stats {
             println!(
-                "Storage: {} (mode: {}, rules: {}, sessions: {})",
+                "Storage: {} (mode: {}, rules: {} [active: {}, archived: {}], sessions: {})",
                 stats.db_path.display(),
                 stats.journal_mode,
                 stats.rules_count,
+                stats.active_rules_count,
+                stats.archived_rules_count,
                 stats.sessions_count
             );
         } else {

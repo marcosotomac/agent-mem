@@ -8,4 +8,4 @@ pub mod store;
 
 pub use error::{Error, Result};
 pub use mcp::McpServer;
-pub use store::{Store, SyncReport};
+pub use store::{RuleRecord, Store, SyncReport};

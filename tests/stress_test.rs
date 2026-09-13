@@ -146,10 +146,10 @@ fn test_bulk_volume_and_fts_bm25_speed() {
     let search_duration = search_start.elapsed();
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, "arch/service_77/component_7");
-    assert!(results[0].1.contains("Quantum resilience token protocol"));
+    assert_eq!(results[0].key, "arch/service_77/component_7");
+    assert!(results[0].val.contains("Quantum resilience token protocol"));
     assert_eq!(
-        results[0].2.as_deref(),
+        results[0].anchor.as_deref(),
         Some("services/srv_77/src/lib.rs:777")
     );
 
@@ -177,7 +177,7 @@ fn test_fuzz_unicode_and_extreme_inputs() {
     assert_eq!(store.get(emoji_key).unwrap().as_deref(), Some(emoji_val));
     let search_emoji = store.find("Ed25519 🛡️").unwrap();
     assert_eq!(search_emoji.len(), 1);
-    assert_eq!(search_emoji[0].0, emoji_key);
+    assert_eq!(search_emoji[0].key, emoji_key);
 
     let large_val = "A".repeat(64 * 1024);
     store.set("huge_blob", &large_val).unwrap();
@@ -197,12 +197,10 @@ fn test_fuzz_unicode_and_extreme_inputs() {
 
     let parsed = Store::parse_rules_text(&dirty_input);
     assert!(
-        parsed
-            .iter()
-            .any(|r| r.0 == "key_with_equals"
-                && r.1 == "value with = internal = signs = and symbols")
+        parsed.iter().any(|r| r.key == "key_with_equals"
+            && r.val == "value with = internal = signs = and symbols")
     );
-    assert!(parsed.iter().any(|r| r.0 == emoji_key));
-    assert!(parsed.iter().any(|r| r.0 == "strange/anchor"
-        && r.2.as_deref() == Some("nested (parenthesis) path/to/file.rs:99")));
+    assert!(parsed.iter().any(|r| r.key == emoji_key));
+    assert!(parsed.iter().any(|r| r.key == "strange/anchor"
+        && r.anchor.as_deref() == Some("nested (parenthesis) path/to/file.rs:99")));
 }
