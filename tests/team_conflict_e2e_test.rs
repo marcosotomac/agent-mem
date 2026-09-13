@@ -33,7 +33,7 @@ fn test_team_multi_branch_swarm_and_union_merge_resolution() {
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     // 1. Setup git repo
-    run_git(&temp_dir, &["init"]);
+    run_git(&temp_dir, &["init", "-b", "main"]);
     run_git(&temp_dir, &["config", "user.name", "Team Lead"]);
     run_git(&temp_dir, &["config", "user.email", "lead@enterprise.com"]);
 
@@ -184,7 +184,7 @@ fn test_conflicting_edits_on_same_rule_key_across_branches() {
     ));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
-    run_git(&temp_dir, &["init"]);
+    run_git(&temp_dir, &["init", "-b", "main"]);
     run_git(&temp_dir, &["config", "user.name", "Lead"]);
     run_git(&temp_dir, &["config", "user.email", "lead@enterprise.com"]);
 
