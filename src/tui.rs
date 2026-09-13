@@ -1317,14 +1317,15 @@ fn render_doctor_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::styled("Git Hooks: ", Style::default().fg(MUTED)),
             Span::styled(
                 format!(
-                    "post-commit:{}, post-merge:{}, post-checkout:{}",
+                    "post-commit:{}, post-merge:{}, post-checkout:{}, post-rewrite:{}",
                     if git.post_commit_active { "✓" } else { "·" },
                     if git.post_merge_active { "✓" } else { "·" },
                     if git.post_checkout_active {
                         "✓"
                     } else {
                         "·"
-                    }
+                    },
+                    if git.post_rewrite_active { "✓" } else { "·" },
                 ),
                 Style::default().fg(EMERALD),
             ),

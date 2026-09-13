@@ -429,6 +429,19 @@ pub fn print_init(report: &InitReport) {
                 report.trigger_target
             );
         }
+        for client_res in &report.configured_clients {
+            if client_res.already_configured {
+                println!(
+                    "  {MUTED}mcp{RESET}       {}  {SUBTLE}(already configured){RESET}",
+                    client_res.client.display_name()
+                );
+            } else {
+                println!(
+                    "  {EMERALD}✓{RESET}  {MUTED}mcp{RESET}       {}  {SUBTLE}(auto-configured){RESET}",
+                    client_res.client.display_name()
+                );
+            }
+        }
         println!();
     } else {
         println!("[agent-mem] Initialized in {}", report.root.display());
@@ -442,10 +455,29 @@ pub fn print_init(report: &InitReport) {
         if report.post_merge_configured {
             println!("- Hook: .git/hooks/post-merge active (auto-sync)");
         }
+        if report.post_checkout_configured {
+            println!("- Hook: .git/hooks/post-checkout active (auto-sync)");
+        }
+        if report.post_rewrite_configured {
+            println!("- Hook: .git/hooks/post-rewrite active (auto-sync on rebase)");
+        }
         if report.rules_file_created {
             println!("- Sync: created .agent-rules (team git sync)");
         }
         println!("- Protocol: updated {}", report.trigger_target);
+        for client_res in &report.configured_clients {
+            if client_res.already_configured {
+                println!(
+                    "- MCP: {} (already configured)",
+                    client_res.client.display_name()
+                );
+            } else {
+                println!(
+                    "- MCP: {} auto-configured",
+                    client_res.client.display_name()
+                );
+            }
+        }
     }
 }
 
@@ -628,10 +660,11 @@ pub fn print_doctor(
             }
             let all_hooks_active = git_stats.post_commit_active
                 && git_stats.post_merge_active
-                && git_stats.post_checkout_active;
+                && git_stats.post_checkout_active
+                && git_stats.post_rewrite_active;
             if all_hooks_active {
                 println!(
-                    "    {EMERALD}✓{RESET}  {MUTED}hooks{RESET}     {ACCENT}active{RESET}  {SUBTLE}·{RESET}  {MUTED}post-commit, post-merge, post-checkout{RESET}"
+                    "    {EMERALD}✓{RESET}  {MUTED}hooks{RESET}     {ACCENT}active{RESET}  {SUBTLE}·{RESET}  {MUTED}post-commit, post-merge, post-checkout, post-rewrite{RESET}"
                 );
             } else if git_stats.post_commit_active {
                 println!(
@@ -702,13 +735,14 @@ pub fn print_doctor(
             println!("Storage: not initialized");
         }
         println!(
-            "Git: repo={}, ignore={}, attributes={}, post-commit={}, post-merge={}, post-checkout={}, rules={}",
+            "Git: repo={}, ignore={}, attributes={}, post-commit={}, post-merge={}, post-checkout={}, post-rewrite={}, rules={}",
             git_stats.is_git_repo,
             git_stats.gitignore_active,
             git_stats.gitattributes_active,
             git_stats.post_commit_active,
             git_stats.post_merge_active,
             git_stats.post_checkout_active,
+            git_stats.post_rewrite_active,
             git_stats.rules_count
         );
         for client in clients {

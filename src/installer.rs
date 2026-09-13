@@ -392,6 +392,7 @@ impl TargetClient {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct InstallResult {
     pub client: TargetClient,
     pub path: PathBuf,
@@ -731,6 +732,35 @@ pub fn install_all_or_target(target: Option<&str>) -> Result<Vec<InstallResult>>
             Ok(vec![install_client(client)?])
         }
     }
+}
+
+pub fn install_detected_clients() -> Result<Vec<InstallResult>> {
+    if env::var("AGENT_MEM_NO_AUTO_INSTALL").is_ok() {
+        return Ok(Vec::new());
+    }
+    if env::var("AGENT_MEM_TEST_HOME").is_err()
+        && (env::var("CARGO_TARGET_TMPDIR").is_ok() || cfg!(test))
+    {
+        return Ok(Vec::new());
+    }
+
+    let home = env::var("AGENT_MEM_TEST_HOME")
+        .or_else(|_| env::var("HOME"))
+        .or_else(|_| env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .map_err(|_| Error::Usage("Could not determine user HOME directory".to_string()))?;
+
+    let mut results = Vec::new();
+    for &client in ALL_CLIENTS {
+        let status = check_client_status_with_home(client, &home);
+        if (status.installed || status.configured)
+            && let Some(config_path) = status.path
+            && let Ok(res) = install_to_path(&config_path, client)
+        {
+            results.push(res);
+        }
+    }
+    Ok(results)
 }
 
 pub struct ClientStatus {

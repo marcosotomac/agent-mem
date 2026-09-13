@@ -499,3 +499,141 @@ fn test_cli_sync_and_auto_sync_lifecycle() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_init_git_worktree_hook_resolution_and_commondir() {
+    let base_temp = std::env::temp_dir().join(format!(
+        "agent_mem_worktree_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&base_temp).unwrap();
+
+    let main_repo = base_temp.join("main_repo");
+    let main_git = main_repo.join(".git");
+    let main_hooks = main_git.join("hooks");
+    let worktree_meta = main_git.join("worktrees").join("feature_wt");
+    fs::create_dir_all(&main_hooks).unwrap();
+    fs::create_dir_all(&worktree_meta).unwrap();
+
+    // Create commondir pointing to ../..
+    fs::write(worktree_meta.join("commondir"), "../..\n").unwrap();
+
+    // Create the worktree checkout
+    let worktree_dir = base_temp.join("feature_wt");
+    fs::create_dir_all(&worktree_dir).unwrap();
+    fs::write(
+        worktree_dir.join(".git"),
+        format!("gitdir: {}\n", worktree_meta.display()),
+    )
+    .unwrap();
+
+    // Initialize agent-mem in the worktree
+    let report = agent_mem::init::init_project(&worktree_dir).unwrap();
+    assert!(report.hook_configured);
+    assert!(report.post_merge_configured);
+    assert!(report.post_checkout_configured);
+    assert!(report.post_rewrite_configured);
+
+    // Verify hooks were installed in main_repo/.git/hooks
+    let post_commit = main_hooks.join("post-commit");
+    assert!(post_commit.exists());
+    let hook_content = fs::read_to_string(&post_commit).unwrap();
+    assert!(hook_content.contains("agent-mem session add"));
+
+    let post_rewrite = main_hooks.join("post-rewrite");
+    assert!(post_rewrite.exists());
+    let hook_content = fs::read_to_string(&post_rewrite).unwrap();
+    assert!(hook_content.contains("agent-mem sync"));
+
+    // Verify inspect_git_health detects it as a valid git repo with active hooks
+    let health = agent_mem::init::inspect_git_health(&worktree_dir);
+    assert!(health.is_git_repo);
+    assert!(health.post_commit_active);
+    assert!(health.post_merge_active);
+    assert!(health.post_checkout_active);
+    assert!(health.post_rewrite_active);
+
+    let _ = fs::remove_dir_all(&base_temp);
+}
+
+#[test]
+fn test_init_git_submodule_hook_resolution() {
+    let base_temp = std::env::temp_dir().join(format!(
+        "agent_mem_submodule_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&base_temp).unwrap();
+
+    let main_repo = base_temp.join("main_repo");
+    let submodule_git = main_repo.join(".git").join("modules").join("nested_sub");
+    fs::create_dir_all(&submodule_git).unwrap();
+
+    let submodule_dir = main_repo.join("nested_sub");
+    fs::create_dir_all(&submodule_dir).unwrap();
+    fs::write(
+        submodule_dir.join(".git"),
+        format!("gitdir: {}\n", submodule_git.display()),
+    )
+    .unwrap();
+
+    let report = agent_mem::init::init_project(&submodule_dir).unwrap();
+    assert!(report.hook_configured);
+    assert!(report.post_merge_configured);
+
+    // Hooks should be installed in submodule's git modules dir
+    let post_commit = submodule_git.join("hooks").join("post-commit");
+    assert!(post_commit.exists());
+
+    let health = agent_mem::init::inspect_git_health(&submodule_dir);
+    assert!(health.is_git_repo);
+    assert!(health.post_commit_active);
+
+    let _ = fs::remove_dir_all(&base_temp);
+}
+
+#[test]
+fn test_init_auto_configures_detected_clients() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_auto_client_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let mock_home = temp_dir.join("home");
+    fs::create_dir_all(mock_home.join(".cursor")).unwrap();
+
+    unsafe {
+        std::env::set_var("AGENT_MEM_TEST_HOME", &mock_home);
+    }
+
+    let project_dir = temp_dir.join("project");
+    fs::create_dir_all(&project_dir).unwrap();
+
+    let report = agent_mem::init::init_project(&project_dir).unwrap();
+    assert!(!report.configured_clients.is_empty());
+    let has_cursor = report
+        .configured_clients
+        .iter()
+        .any(|c| c.client == agent_mem::installer::TargetClient::Cursor);
+    assert!(has_cursor);
+
+    let cursor_config = mock_home.join(".cursor").join("mcp.json");
+    assert!(cursor_config.exists());
+    let content = fs::read_to_string(&cursor_config).unwrap();
+    assert!(content.contains("agent-mem"));
+
+    unsafe {
+        std::env::remove_var("AGENT_MEM_TEST_HOME");
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

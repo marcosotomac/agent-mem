@@ -20,6 +20,7 @@ pub struct InitReport {
     pub trigger_updated: bool,
     pub created_rule_file: bool,
     pub rules_file_created: bool,
+    pub configured_clients: Vec<crate::installer::InstallResult>,
 }
 
 /// Find repository / project root by walking up looking for .git or .agent-mem
@@ -54,6 +55,69 @@ pub fn global_db_path() -> PathBuf {
     } else {
         PathBuf::from(".config").join("agent-mem").join("global.db")
     }
+}
+
+/// Resolves the actual git directory for standard repositories, git worktrees, or submodules.
+pub fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    if dot_git.is_file()
+        && let Ok(content) = fs::read_to_string(&dot_git)
+    {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("gitdir:") {
+                let gitdir_path = rest.trim();
+                let path = PathBuf::from(gitdir_path);
+                let resolved = if path.is_absolute() {
+                    path
+                } else {
+                    root.join(path)
+                };
+                let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
+                if canonical.exists() {
+                    return Some(canonical);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolves the hooks directory for git repositories, worktrees, and submodules.
+/// In Git worktrees, checks for `commondir` pointing back to the primary repository hooks.
+/// Automatically creates the hooks directory if it does not already exist.
+pub fn resolve_git_hooks_dir(root: &Path) -> Option<PathBuf> {
+    let git_dir = resolve_git_dir(root)?;
+    let commondir_file = git_dir.join("commondir");
+    let target_git_dir = if commondir_file.is_file() {
+        if let Ok(commondir_content) = fs::read_to_string(&commondir_file) {
+            let common_path = PathBuf::from(commondir_content.trim());
+            let resolved = if common_path.is_absolute() {
+                common_path
+            } else {
+                git_dir.join(common_path)
+            };
+            let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
+            if canonical.exists() {
+                canonical
+            } else {
+                git_dir
+            }
+        } else {
+            git_dir
+        }
+    } else {
+        git_dir
+    };
+
+    let hooks_dir = target_git_dir.join("hooks");
+    if !hooks_dir.exists() {
+        let _ = fs::create_dir_all(&hooks_dir);
+    }
+    Some(hooks_dir)
 }
 
 /// Initialize isolated project memory (.agent-mem/, gitignore, git post-commit hook, rules file).
@@ -133,9 +197,8 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
         Ok(false)
     }
 
-    // 3. Configure .git/hooks idempotently (post-commit, post-merge, post-checkout, post-rewrite)
-    let git_hooks_dir = root.join(".git").join("hooks");
-    if git_hooks_dir.exists() {
+    // 3. Configure git hooks idempotently (post-commit, post-merge, post-checkout, post-rewrite)
+    if let Some(git_hooks_dir) = resolve_git_hooks_dir(root) {
         let session_cmd = "agent-mem session add \"$(git log -1 --pretty=%s)\" 2>/dev/null || true";
         let sync_cmd = "agent-mem sync 2>/dev/null || true";
 
@@ -225,6 +288,9 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
     // Auto-register project in the global canonical registry
     let _ = crate::registry::ProjectRegistry::load().and_then(|mut reg| reg.register(root));
 
+    // 6. Auto-configure detected AI editor / MCP clients
+    report.configured_clients = crate::installer::install_detected_clients().unwrap_or_default();
+
     Ok(report)
 }
 
@@ -237,12 +303,13 @@ pub struct GitDoctorReport {
     pub post_commit_active: bool,
     pub post_merge_active: bool,
     pub post_checkout_active: bool,
+    pub post_rewrite_active: bool,
     pub rules_file_exists: bool,
     pub rules_count: usize,
 }
 
 pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
-    let is_git_repo = root.join(".git").exists();
+    let is_git_repo = resolve_git_dir(root).is_some();
     let gitignore_path = root.join(".gitignore");
     let gitignore_active = gitignore_path.exists()
         && fs::read_to_string(&gitignore_path)
@@ -255,23 +322,21 @@ pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
             .map(|c| c.contains(".agent-rules merge=union"))
             .unwrap_or(false);
 
-    let post_commit_path = root.join(".git").join("hooks").join("post-commit");
-    let post_commit_active = post_commit_path.exists()
-        && fs::read_to_string(&post_commit_path)
-            .map(|c| c.contains("agent-mem session add"))
-            .unwrap_or(false);
+    let hooks_dir = resolve_git_hooks_dir(root);
+    let check_hook = |name: &str, pattern: &str| -> bool {
+        hooks_dir
+            .as_ref()
+            .map(|d| d.join(name))
+            .filter(|p| p.exists())
+            .and_then(|p| fs::read_to_string(p).ok())
+            .map(|c| c.contains(pattern))
+            .unwrap_or(false)
+    };
 
-    let post_merge_path = root.join(".git").join("hooks").join("post-merge");
-    let post_merge_active = post_merge_path.exists()
-        && fs::read_to_string(&post_merge_path)
-            .map(|c| c.contains("agent-mem sync"))
-            .unwrap_or(false);
-
-    let post_checkout_path = root.join(".git").join("hooks").join("post-checkout");
-    let post_checkout_active = post_checkout_path.exists()
-        && fs::read_to_string(&post_checkout_path)
-            .map(|c| c.contains("agent-mem sync"))
-            .unwrap_or(false);
+    let post_commit_active = check_hook("post-commit", "agent-mem session add");
+    let post_merge_active = check_hook("post-merge", "agent-mem sync");
+    let post_checkout_active = check_hook("post-checkout", "agent-mem sync");
+    let post_rewrite_active = check_hook("post-rewrite", "agent-mem sync");
 
     let rules_path = root.join(".agent-rules");
     let rules_file_exists = rules_path.exists();
@@ -291,6 +356,7 @@ pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
         post_commit_active,
         post_merge_active,
         post_checkout_active,
+        post_rewrite_active,
         rules_file_exists,
         rules_count,
     }
