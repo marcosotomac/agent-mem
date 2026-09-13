@@ -104,7 +104,7 @@ impl Store {
                 .unwrap_or(0)
                 > 0;
 
-            if !has_anchor && need_write {
+            if !has_anchor {
                 let _ = conn.execute("ALTER TABLE memories ADD COLUMN anchor TEXT;", []);
                 let _ = conn.execute("DROP TABLE IF EXISTS memories_fts;", []);
                 let _ = conn.execute(
