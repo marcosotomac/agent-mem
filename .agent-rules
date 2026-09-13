@@ -2,3 +2,4 @@
 # Track this file in git to share rules across your team without SQLite binary conflicts.
 
 architecture/auth = JWT RS256 with key rotation (@ src/auth/jwt.rs:42)
+architecture/canonical-project-registry = Canonical project registry in ~/.config/agent-mem/projects.json resolves symlinks/case-folding and anchors by git remote URL, eliminating duplication while keeping zero overhead on reads. (@ src/registry.rs:1)
