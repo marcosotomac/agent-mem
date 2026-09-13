@@ -22,7 +22,13 @@ fn test_parse_args() {
     // Init
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "init".into()]).unwrap(),
-        Command::Init
+        Command::Init { path: None }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "init".into(), "my-dir".into()]).unwrap(),
+        Command::Init {
+            path: Some("my-dir".into())
+        }
     );
 
     // Set

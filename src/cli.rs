@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::init::{find_project_root, init_project};
+use crate::init::{find_project_root_from, init_project};
 use crate::output::*;
 use crate::store::Store;
 use std::env;
@@ -7,7 +7,9 @@ use std::path::Path;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    Init,
+    Init {
+        path: Option<String>,
+    },
     Get {
         key: String,
     },
@@ -64,7 +66,9 @@ where
 
     let cmd_str = args[1].as_str();
     match cmd_str {
-        "init" => Ok(Command::Init),
+        "init" => Ok(Command::Init {
+            path: args.get(2).cloned(),
+        }),
         "get" => {
             if args.len() < 3 {
                 return Err(Error::Usage("Usage: agent-mem get <key>".to_string()));
@@ -184,7 +188,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             println!("agent-mem {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::Init => {
+        Command::Init { .. } => {
             let report = init_project(root)?;
             print_init(&report);
             Ok(())
@@ -303,7 +307,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     };
                     print_sync(&report);
                 }
-                Command::Init
+                Command::Init { .. }
                 | Command::Help
                 | Command::Version
                 | Command::Doctor
@@ -317,6 +321,18 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
 
 pub fn run() -> Result<()> {
     let cmd = parse_args(env::args())?;
-    let root = find_project_root();
+    let cwd = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let root = match &cmd {
+        Command::Init { path: Some(p) } => {
+            let target = std::path::PathBuf::from(p);
+            if target.is_absolute() {
+                target
+            } else {
+                cwd.join(target)
+            }
+        }
+        Command::Init { path: None } => cwd,
+        _ => find_project_root_from(&cwd),
+    };
     execute_command(cmd, &root)
 }
