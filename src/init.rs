@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 pub struct InitReport {
     pub root: PathBuf,
     pub gitignore_updated: bool,
+    pub gitattributes_updated: bool,
     pub hook_configured: bool,
     pub post_merge_configured: bool,
     pub trigger_target: String,
@@ -82,7 +83,26 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
         report.gitignore_updated = true;
     }
 
-    // 2. Configure .git/hooks/post-commit idempotently if this is a git repo
+    // 2. Update .gitattributes for automatic conflict-free union merges on team rules
+    let gitattributes_path = root.join(".gitattributes");
+    let attr_line = ".agent-rules merge=union\n";
+    if gitattributes_path.exists() {
+        let content = fs::read_to_string(&gitattributes_path).unwrap_or_default();
+        if !content.contains(".agent-rules merge=union") {
+            let mut new_content = content;
+            if !new_content.ends_with('\n') && !new_content.is_empty() {
+                new_content.push('\n');
+            }
+            new_content.push_str(attr_line);
+            fs::write(&gitattributes_path, new_content)?;
+            report.gitattributes_updated = true;
+        }
+    } else {
+        fs::write(&gitattributes_path, attr_line)?;
+        report.gitattributes_updated = true;
+    }
+
+    // 3. Configure .git/hooks/post-commit idempotently if this is a git repo
     let git_hooks_dir = root.join(".git").join("hooks");
     if git_hooks_dir.exists() {
         let hook_path = git_hooks_dir.join("post-commit");

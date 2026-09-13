@@ -350,6 +350,9 @@ impl Store {
                 || trimmed.starts_with('#')
                 || trimmed.starts_with("//")
                 || trimmed.starts_with(';')
+                || trimmed.starts_with("<<<<<<<")
+                || trimmed.starts_with("=======")
+                || trimmed.starts_with(">>>>>>>")
             {
                 continue;
             }
