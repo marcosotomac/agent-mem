@@ -179,7 +179,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 }
                 Command::Set { key, val, anchor } => {
                     store.set_with_anchor(&key, &val, anchor.as_deref())?;
-                    print_set(&key);
+                    print_set(&key, anchor.as_deref());
                 }
                 Command::Del { key } => {
                     let deleted = store.del(&key)?;
@@ -191,7 +191,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 }
                 Command::Find { query } => {
                     let entries = store.find(&query)?;
-                    print_find(&entries);
+                    print_find(&query, &entries);
                 }
                 Command::SessionAdd { summary } => {
                     let id = store.session_add(&summary)?;

@@ -14,11 +14,17 @@ pub fn print_get(val: &str) {
     }
 }
 
-pub fn print_set(key: &str) {
+pub fn print_set(key: &str, anchor: Option<&str>) {
     if io::stdout().is_terminal() {
-        println!("  \x1b[2msaved\x1b[0m    {}", key);
+        match anchor {
+            Some(a) => println!("  \x1b[2msaved\x1b[0m    {} \x1b[2m({})\x1b[0m", key, a),
+            None => println!("  \x1b[2msaved\x1b[0m    {}", key),
+        }
     } else {
-        println!("saved {}", key);
+        match anchor {
+            Some(a) => println!("saved {} ({})", key, a),
+            None => println!("saved {}", key),
+        }
     }
 }
 
@@ -38,20 +44,37 @@ pub fn print_del(key: &str, deleted: bool) {
 
 pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let is_tty = io::stdout().is_terminal();
+    if entries.is_empty() {
+        if is_tty {
+            println!("  \x1b[2mno memories recorded yet. Run 'agent-mem set <key> <val>' to add one.\x1b[0m");
+        }
+        return;
+    }
+
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
+    let max_key_len = entries
+        .iter()
+        .map(|(k, _, _)| k.len())
+        .max()
+        .unwrap_or(12)
+        .clamp(12, 36);
 
     for (key, val, anchor) in entries {
         match (is_tty, anchor) {
             (true, Some(a)) => {
                 let _ = writeln!(
                     out,
-                    "  \x1b[1m{:<16}\x1b[0m \x1b[38;5;250m{}\x1b[0m \x1b[2m({})\x1b[0m",
-                    key, val, a
+                    "  \x1b[1m{:<width$}\x1b[0m \x1b[38;5;250m{}\x1b[0m \x1b[2m({})\x1b[0m",
+                    key, val, a, width = max_key_len
                 );
             }
             (true, None) => {
-                let _ = writeln!(out, "  \x1b[1m{:<16}\x1b[0m \x1b[38;5;250m{}\x1b[0m", key, val);
+                let _ = writeln!(
+                    out,
+                    "  \x1b[1m{:<width$}\x1b[0m \x1b[38;5;250m{}\x1b[0m",
+                    key, val, width = max_key_len
+                );
             }
             (false, Some(a)) => {
                 let _ = writeln!(out, "{}: {} ({})", key, val, a);
@@ -64,7 +87,13 @@ pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let _ = out.flush();
 }
 
-pub fn print_find(entries: &[(String, String, Option<String>)]) {
+pub fn print_find(query: &str, entries: &[(String, String, Option<String>)]) {
+    if entries.is_empty() {
+        if io::stdout().is_terminal() {
+            println!("  \x1b[2mno memories found matching\x1b[0m '{}'", query);
+        }
+        return;
+    }
     print_dump(entries);
 }
 
