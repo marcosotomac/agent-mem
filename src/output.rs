@@ -316,11 +316,156 @@ pub fn print_help() {
         println!(
             "    {ACCENT}mcp{RESET}     {MUTED}install [client]{RESET} Configure Claude Desktop, Cursor, or Antigravity"
         );
+        println!(
+            "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
+        );
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list, sync, mcp, mcp install",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list, sync, mcp, mcp install, doctor",
             env!("CARGO_PKG_VERSION")
         );
+    }
+}
+
+pub fn print_doctor(
+    store_stats: Option<&crate::store::StoreStats>,
+    git_stats: &crate::init::GitDoctorReport,
+    clients: &[crate::installer::ClientStatus],
+) {
+    let is_tty = io::stdout().is_terminal();
+
+    if is_tty {
+        println!();
+        println!(
+            "  {ACCENT}agent-mem doctor{RESET}  {SUBTLE}·{RESET}  {MUTED}system health check{RESET}"
+        );
+        println!();
+
+        // Storage
+        println!("  {MUTED}Storage{RESET}");
+        if let Some(stats) = store_stats {
+            println!(
+                "    {EMERALD}✓{RESET}  {MUTED}database{RESET}  {ACCENT}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} mode  ·  {} rules, {} sessions{RESET}",
+                stats.db_path.display(),
+                stats.journal_mode,
+                stats.rules_count,
+                stats.sessions_count
+            );
+            println!(
+                "    {EMERALD}✓{RESET}  {MUTED}full-text{RESET} {ACCENT}FTS5 BM25{RESET}  {SUBTLE}·{RESET}  {MUTED}porter unicode61 tokenizer active{RESET}"
+            );
+        } else {
+            println!(
+                "    {AMBER}!{RESET}  {MUTED}database{RESET}  {ACCENT}not initialized{RESET}  {SUBTLE}·{RESET}  {MUTED}run 'agent-mem init' to initialize{RESET}"
+            );
+        }
+        println!();
+
+        // Git & Team Sync
+        println!("  {MUTED}Git & Team Sync{RESET}");
+        if git_stats.is_git_repo {
+            println!(
+                "    {EMERALD}✓{RESET}  {MUTED}repo{RESET}      {ACCENT}{}{RESET}",
+                git_stats.root.display()
+            );
+            if git_stats.gitignore_active {
+                println!(
+                    "    {EMERALD}✓{RESET}  {MUTED}ignore{RESET}    {ACCENT}.agent-mem/{RESET}  {SUBTLE}·{RESET}  {MUTED}ignored in .gitignore{RESET}"
+                );
+            } else {
+                println!(
+                    "    {AMBER}!{RESET}  {MUTED}ignore{RESET}    {ACCENT}.agent-mem/{RESET}  {SUBTLE}·{RESET}  {MUTED}not in .gitignore{RESET}"
+                );
+            }
+            if git_stats.gitattributes_active {
+                println!(
+                    "    {EMERALD}✓{RESET}  {MUTED}sync{RESET}      {ACCENT}.agent-rules{RESET}  {SUBTLE}·{RESET}  {MUTED}merge=union configured{RESET}"
+                );
+            } else {
+                println!(
+                    "    {AMBER}!{RESET}  {MUTED}sync{RESET}      {ACCENT}.agent-rules{RESET}  {SUBTLE}·{RESET}  {MUTED}union merge not configured{RESET}"
+                );
+            }
+            if git_stats.post_commit_active && git_stats.post_merge_active {
+                println!(
+                    "    {EMERALD}✓{RESET}  {MUTED}hooks{RESET}     {ACCENT}active{RESET}  {SUBTLE}·{RESET}  {MUTED}post-commit (sessions), post-merge (sync){RESET}"
+                );
+            } else if git_stats.post_commit_active {
+                println!(
+                    "    {EMERALD}✓{RESET}  {MUTED}hooks{RESET}     {ACCENT}partial{RESET}  {SUBTLE}·{RESET}  {MUTED}post-commit active{RESET}"
+                );
+            } else {
+                println!(
+                    "    {SUBTLE}·{RESET}  {MUTED}hooks{RESET}     {MUTED}none installed  ·  run 'agent-mem init'{RESET}"
+                );
+            }
+            if git_stats.rules_file_exists {
+                println!(
+                    "    {EMERALD}✓{RESET}  {MUTED}rules{RESET}     {ACCENT}.agent-rules{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active{RESET}",
+                    git_stats.rules_count
+                );
+            }
+        } else {
+            println!(
+                "    {SUBTLE}·{RESET}  {MUTED}git{RESET}       {MUTED}not a git repository{RESET}"
+            );
+        }
+        println!();
+
+        // MCP Clients
+        println!("  {MUTED}MCP Clients{RESET}");
+        for client in clients {
+            let c_name = client.client.display_name();
+            if client.configured {
+                let p_str = client
+                    .path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                println!(
+                    "    {EMERALD}✓{RESET}  {ACCENT}{c_name:<18}{RESET}  {MUTED}configured{RESET}  {SUBTLE}·{RESET}  {MUTED}{p_str}{RESET}"
+                );
+            } else {
+                let name = match client.client {
+                    crate::installer::TargetClient::Claude => "claude",
+                    crate::installer::TargetClient::Cursor => "cursor",
+                    crate::installer::TargetClient::Antigravity => "antigravity",
+                };
+                println!(
+                    "    {SUBTLE}·{RESET}  {MUTED}{c_name:<18}{RESET}  {SUBTLE}not configured  ·  run 'agent-mem mcp install {name}'{RESET}"
+                );
+            }
+        }
+        println!();
+    } else {
+        println!("=== AGENT-MEM DOCTOR ===");
+        if let Some(stats) = store_stats {
+            println!(
+                "Storage: {} (mode: {}, rules: {}, sessions: {})",
+                stats.db_path.display(),
+                stats.journal_mode,
+                stats.rules_count,
+                stats.sessions_count
+            );
+        } else {
+            println!("Storage: not initialized");
+        }
+        println!(
+            "Git: repo={}, ignore={}, attributes={}, post-commit={}, post-merge={}, rules={}",
+            git_stats.is_git_repo,
+            git_stats.gitignore_active,
+            git_stats.gitattributes_active,
+            git_stats.post_commit_active,
+            git_stats.post_merge_active,
+            git_stats.rules_count
+        );
+        for client in clients {
+            println!(
+                "Client {}: configured={}",
+                client.client.display_name(),
+                client.configured
+            );
+        }
     }
 }

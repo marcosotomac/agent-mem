@@ -526,4 +526,37 @@ impl Store {
             file_updated: exists,
         })
     }
+
+    /// Retrieve store diagnostics and health metrics.
+    pub fn stats(&self, path: &Path) -> Result<StoreStats> {
+        let journal_mode: String = self
+            .conn
+            .query_row("PRAGMA journal_mode;", [], |r| r.get(0))?;
+        let user_version: u32 = self
+            .conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))?;
+        let rules_count: usize =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM memories;", [], |r| r.get(0))?;
+        let sessions_count: usize =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM sessions;", [], |r| r.get(0))?;
+
+        Ok(StoreStats {
+            db_path: path.to_path_buf(),
+            journal_mode,
+            user_version,
+            rules_count,
+            sessions_count,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreStats {
+    pub db_path: PathBuf,
+    pub journal_mode: String,
+    pub user_version: u32,
+    pub rules_count: usize,
+    pub sessions_count: usize,
 }

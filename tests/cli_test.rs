@@ -122,6 +122,12 @@ fn test_parse_args() {
         Command::Mcp
     );
 
+    // Doctor
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "doctor".into()]).unwrap(),
+        Command::Doctor
+    );
+
     // Mcp Install (auto)
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "mcp".into(), "install".into()]).unwrap(),

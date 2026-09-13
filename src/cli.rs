@@ -36,6 +36,7 @@ pub enum Command {
     McpInstall {
         client: Option<String>,
     },
+    Doctor,
     Help,
     Version,
 }
@@ -163,6 +164,7 @@ where
             }
         }
         "--mcp" => Ok(Command::Mcp),
+        "doctor" => Ok(Command::Doctor),
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
         unknown => Err(Error::Usage(format!(
@@ -223,6 +225,20 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     }
                 }
             }
+            Ok(())
+        }
+        Command::Doctor => {
+            let db_path = root.join(".agent-mem").join("mem.db");
+            let store_stats = if db_path.exists() {
+                Store::open(&db_path, false)
+                    .ok()
+                    .and_then(|s| s.stats(&db_path).ok())
+            } else {
+                None
+            };
+            let git_stats = crate::init::inspect_git_health(root);
+            let clients = crate::installer::check_all_clients();
+            print_doctor(store_stats.as_ref(), &git_stats, &clients);
             Ok(())
         }
         _ => {
@@ -290,6 +306,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 Command::Init
                 | Command::Help
                 | Command::Version
+                | Command::Doctor
                 | Command::Mcp
                 | Command::McpInstall { .. } => unreachable!(),
             }

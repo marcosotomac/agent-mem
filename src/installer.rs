@@ -199,3 +199,45 @@ pub fn install_all_or_target(target: Option<&str>) -> Result<Vec<InstallResult>>
         }
     }
 }
+
+pub struct ClientStatus {
+    pub client: TargetClient,
+    pub path: Option<PathBuf>,
+    pub configured: bool,
+}
+
+pub fn check_client_status(client: TargetClient) -> ClientStatus {
+    let path = client.config_path();
+    let configured = if let Some(ref p) = path {
+        if p.exists() {
+            if let Ok(content) = fs::read_to_string(p) {
+                if let Ok(json) = serde_json::from_str::<Value>(&content) {
+                    json.get("mcpServers")
+                        .and_then(|m| m.get("agent-mem"))
+                        .is_some()
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    ClientStatus {
+        client,
+        path,
+        configured,
+    }
+}
+
+pub fn check_all_clients() -> Vec<ClientStatus> {
+    vec![
+        check_client_status(TargetClient::Antigravity),
+        check_client_status(TargetClient::Cursor),
+        check_client_status(TargetClient::Claude),
+    ]
+}

@@ -235,3 +235,63 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
 
     Ok(report)
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitDoctorReport {
+    pub is_git_repo: bool,
+    pub root: PathBuf,
+    pub gitignore_active: bool,
+    pub gitattributes_active: bool,
+    pub post_commit_active: bool,
+    pub post_merge_active: bool,
+    pub rules_file_exists: bool,
+    pub rules_count: usize,
+}
+
+pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
+    let is_git_repo = root.join(".git").exists();
+    let gitignore_path = root.join(".gitignore");
+    let gitignore_active = gitignore_path.exists()
+        && fs::read_to_string(&gitignore_path)
+            .map(|c| c.contains(".agent-mem"))
+            .unwrap_or(false);
+
+    let gitattributes_path = root.join(".gitattributes");
+    let gitattributes_active = gitattributes_path.exists()
+        && fs::read_to_string(&gitattributes_path)
+            .map(|c| c.contains(".agent-rules merge=union"))
+            .unwrap_or(false);
+
+    let post_commit_path = root.join(".git").join("hooks").join("post-commit");
+    let post_commit_active = post_commit_path.exists()
+        && fs::read_to_string(&post_commit_path)
+            .map(|c| c.contains("agent-mem session add"))
+            .unwrap_or(false);
+
+    let post_merge_path = root.join(".git").join("hooks").join("post-merge");
+    let post_merge_active = post_merge_path.exists()
+        && fs::read_to_string(&post_merge_path)
+            .map(|c| c.contains("agent-mem sync"))
+            .unwrap_or(false);
+
+    let rules_path = root.join(".agent-rules");
+    let rules_file_exists = rules_path.exists();
+    let rules_count = if rules_file_exists {
+        fs::read_to_string(&rules_path)
+            .map(|c| Store::parse_rules_text(&c).len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    GitDoctorReport {
+        is_git_repo,
+        root: root.to_path_buf(),
+        gitignore_active,
+        gitattributes_active,
+        post_commit_active,
+        post_merge_active,
+        rules_file_exists,
+        rules_count,
+    }
+}
