@@ -483,6 +483,13 @@ impl Store {
         let content = fs::read_to_string(path)?;
         let rules = Self::parse_rules_text(&content);
 
+        // Deduplicate in memory: if multiple conflict markers or duplicate lines exist, last one wins
+        let mut unique_rules: std::collections::BTreeMap<&str, (&str, Option<&str>)> =
+            std::collections::BTreeMap::new();
+        for (k, v, a) in &rules {
+            unique_rules.insert(k.as_str(), (v.as_str(), a.as_deref()));
+        }
+
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -490,17 +497,18 @@ impl Store {
         tx.execute("DELETE FROM memories_fts;", [])?;
 
         let now = now_epoch();
-        for (key, val, anchor) in &rules {
-            tx.execute(
-                "INSERT INTO memories (key, val, updated_at, anchor) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor;",
-                params![key, val, now, anchor],
+        {
+            let mut insert_mem = tx.prepare_cached(
+                "INSERT INTO memories (key, val, updated_at, anchor) VALUES (?1, ?2, ?3, ?4);",
             )?;
-            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![key])?;
-            tx.execute(
+            let mut insert_fts = tx.prepare_cached(
                 "INSERT INTO memories_fts (key, val, anchor) VALUES (?1, ?2, ?3);",
-                params![key, val, anchor],
             )?;
+
+            for (key, (val, anchor)) in unique_rules {
+                insert_mem.execute(params![key, val, now, anchor])?;
+                insert_fts.execute(params![key, val, anchor])?;
+            }
         }
         tx.commit()?;
 

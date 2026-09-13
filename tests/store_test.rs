@@ -464,4 +464,3 @@ feature/auth = Use Passkeys WebAuthn (@ src/webauthn.rs:20)
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
-
