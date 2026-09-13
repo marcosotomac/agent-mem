@@ -1,6 +1,15 @@
 use crate::init::InitReport;
 use std::io::{self, BufWriter, IsTerminal, Write};
 
+// shadcn / geist color tokens (256-color ANSI for terminal fidelity)
+const ACCENT: &str = "\x1b[1;37m";        // Pure white bold (headings, keys)
+const MUTED: &str = "\x1b[38;5;245m";     // Zinc-400 (secondary text, labels)
+const SUBTLE: &str = "\x1b[38;5;240m";    // Zinc-700 (dots, borders, numbers)
+const BODY: &str = "\x1b[38;5;252m";      // Zinc-200 (readable body text)
+const EMERALD: &str = "\x1b[38;5;150m";   // Soft emerald green (checks, success)
+const AMBER: &str = "\x1b[38;5;216m";     // Soft amber (warnings, deletions)
+const RESET: &str = "\x1b[0m";
+
 pub fn print_get(val: &str) {
     if io::stdout().is_terminal() {
         if val.ends_with('\n') {
@@ -17,8 +26,8 @@ pub fn print_get(val: &str) {
 pub fn print_set(key: &str, anchor: Option<&str>) {
     if io::stdout().is_terminal() {
         match anchor {
-            Some(a) => println!("  \x1b[2msaved\x1b[0m    {} \x1b[2m({})\x1b[0m", key, a),
-            None => println!("  \x1b[2msaved\x1b[0m    {}", key),
+            Some(a) => println!("  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {ACCENT}{key}{RESET}  {SUBTLE}·{RESET}  {MUTED}{a}{RESET}"),
+            None => println!("  {EMERALD}✓{RESET}  {MUTED}saved{RESET}  {ACCENT}{key}{RESET}"),
         }
     } else {
         match anchor {
@@ -31,9 +40,9 @@ pub fn print_set(key: &str, anchor: Option<&str>) {
 pub fn print_del(key: &str, deleted: bool) {
     if io::stdout().is_terminal() {
         if deleted {
-            println!("  \x1b[2mdeleted\x1b[0m  {}", key);
+            println!("  {AMBER}-{RESET}  {MUTED}deleted{RESET}  {ACCENT}{key}{RESET}");
         } else {
-            println!("  \x1b[2mnot found\x1b[0m {}", key);
+            println!("  {SUBTLE}·{RESET}  {MUTED}not found{RESET}  {ACCENT}{key}{RESET}");
         }
     } else if deleted {
         println!("deleted {}", key);
@@ -46,7 +55,7 @@ pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let is_tty = io::stdout().is_terminal();
     if entries.is_empty() {
         if is_tty {
-            println!("  \x1b[2mno memories recorded yet. Run 'agent-mem set <key> <val>' to add one.\x1b[0m");
+            println!("  {SUBTLE}◇{RESET}  {MUTED}no memories recorded yet. Run 'agent-mem set <key> <val>' to add one.{RESET}");
         }
         return;
     }
@@ -65,14 +74,14 @@ pub fn print_dump(entries: &[(String, String, Option<String>)]) {
             (true, Some(a)) => {
                 let _ = writeln!(
                     out,
-                    "  \x1b[1m{:<width$}\x1b[0m \x1b[38;5;250m{}\x1b[0m \x1b[2m({})\x1b[0m",
+                    "  {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}  {MUTED}{}{RESET}",
                     key, val, a, width = max_key_len
                 );
             }
             (true, None) => {
                 let _ = writeln!(
                     out,
-                    "  \x1b[1m{:<width$}\x1b[0m \x1b[38;5;250m{}\x1b[0m",
+                    "  {ACCENT}{:<width$}{RESET}  {SUBTLE}·{RESET}  {BODY}{}{RESET}",
                     key, val, width = max_key_len
                 );
             }
@@ -90,7 +99,7 @@ pub fn print_dump(entries: &[(String, String, Option<String>)]) {
 pub fn print_find(query: &str, entries: &[(String, String, Option<String>)]) {
     if entries.is_empty() {
         if io::stdout().is_terminal() {
-            println!("  \x1b[2mno memories found matching\x1b[0m '{}'", query);
+            println!("  {SUBTLE}◇{RESET}  {MUTED}no memories found matching{RESET} '{}'", query);
         }
         return;
     }
@@ -99,7 +108,7 @@ pub fn print_find(query: &str, entries: &[(String, String, Option<String>)]) {
 
 pub fn print_session_add(id: i64) {
     if io::stdout().is_terminal() {
-        println!("  \x1b[2mrecorded\x1b[0m session checkpoint #{}", id);
+        println!("  {EMERALD}✓{RESET}  {MUTED}checkpoint{RESET}  {ACCENT}#{id}{RESET}");
     } else {
         println!("recorded #{}", id);
     }
@@ -112,7 +121,7 @@ pub fn print_session_list(sessions: &[(i64, String)]) {
 
     for (id, summary) in sessions {
         if is_tty {
-            let _ = writeln!(out, "  \x1b[2m#{:<3}\x1b[0m {}", id, summary);
+            let _ = writeln!(out, "  {SUBTLE}#{:<3}{RESET}  {BODY}{}{RESET}", id, summary);
         } else {
             let _ = writeln!(out, "[#{}] {}", id, summary);
         }
@@ -149,29 +158,31 @@ pub fn print_init(report: &InitReport) {
 
     if is_tty {
         println!();
-        println!("  \x1b[1magent-mem\x1b[0m \x1b[2minitialized in\x1b[0m {}", report.root.display());
+        println!("  {ACCENT}agent-mem{RESET} {MUTED}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}initialized{RESET}", env!("CARGO_PKG_VERSION"));
+        println!("  {SUBTLE}{}{RESET}", report.root.display());
         println!();
-        println!("  \x1b[2mstore\x1b[0m    .agent-mem/mem.db \x1b[2m(sqlite wal)\x1b[0m");
+        println!("  {MUTED}store{RESET}     .agent-mem/mem.db  {SUBTLE}(sqlite wal){RESET}");
         if report.gitignore_updated {
-            println!("  \x1b[2mgit\x1b[0m      .agent-mem/ added to .gitignore");
-        } else {
-            println!("  \x1b[2mgit\x1b[0m      .agent-mem/ already ignored");
+            println!("  {MUTED}git{RESET}       .agent-mem/ added to .gitignore");
+        }
+        if report.gitattributes_updated {
+            println!("  {MUTED}git{RESET}       .agent-rules union merge configured in .gitattributes");
         }
         if report.hook_configured {
-            println!("  \x1b[2mhook\x1b[0m     .git/hooks/post-commit active");
+            println!("  {MUTED}hooks{RESET}     post-commit active  {SUBTLE}(auto-sessions){RESET}");
         }
         if report.post_merge_configured {
-            println!("  \x1b[2mhook\x1b[0m     .git/hooks/post-merge active (auto-sync)");
+            println!("  {MUTED}hooks{RESET}     post-merge active  {SUBTLE}(auto-sync){RESET}");
         }
         if report.rules_file_created {
-            println!("  \x1b[2msync\x1b[0m     created .agent-rules (team git sync)");
+            println!("  {MUTED}sync{RESET}      created .agent-rules  {SUBTLE}(team git sync){RESET}");
         }
         if report.created_rule_file {
-            println!("  \x1b[2mtrigger\x1b[0m  created {}", report.trigger_target);
+            println!("  {MUTED}protocol{RESET}  created {}", report.trigger_target);
         } else if report.trigger_updated {
-            println!("  \x1b[2mtrigger\x1b[0m  updated {}", report.trigger_target);
+            println!("  {MUTED}protocol{RESET}  updated {}", report.trigger_target);
         } else {
-            println!("  \x1b[2mtrigger\x1b[0m  active in {}", report.trigger_target);
+            println!("  {MUTED}protocol{RESET}  active in {}", report.trigger_target);
         }
         println!();
     } else {
@@ -200,13 +211,13 @@ pub fn print_sync(report: &crate::store::SyncReport) {
     let file_name = report.path.file_name().and_then(|n| n.to_str()).unwrap_or(".agent-rules");
     if is_tty {
         if report.file_created {
-            println!("  \x1b[32m✔\x1b[0m \x1b[1mcreated\x1b[0m {} \x1b[2m({} rules exported)\x1b[0m", file_name, report.total);
+            println!("  {EMERALD}✓{RESET}  {MUTED}created{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules exported{RESET}", report.total);
         } else if report.file_updated {
-            println!("  \x1b[32m✔\x1b[0m \x1b[1mexported\x1b[0m {} \x1b[2m({} rules written)\x1b[0m", file_name, report.total);
+            println!("  {EMERALD}✓{RESET}  {MUTED}exported{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules written{RESET}", report.total);
         } else {
             println!(
-                "  \x1b[32m✔\x1b[0m \x1b[1msynchronized\x1b[0m {} \x1b[2m({} rules active)\x1b[0m",
-                file_name, report.total
+                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active{RESET}",
+                report.total
             );
         }
     } else if report.file_created {
@@ -223,25 +234,25 @@ pub fn print_help() {
 
     if is_tty {
         println!();
-        println!("  \x1b[1magent-mem\x1b[0m \x1b[2m{}\x1b[0m", env!("CARGO_PKG_VERSION"));
-        println!("  \x1b[2mLocal-first, sub-millisecond memory engine for AI coding agents.\x1b[0m");
+        println!("  {ACCENT}agent-mem{RESET} {MUTED}{}{RESET}", env!("CARGO_PKG_VERSION"));
+        println!("  {MUTED}Local-first, sub-millisecond memory engine for AI coding agents.{RESET}");
         println!();
-        println!("  \x1b[2mUSAGE\x1b[0m");
-        println!("    $ agent-mem <command> [arguments]");
+        println!("  {MUTED}Usage{RESET}");
+        println!("    {SUBTLE}${RESET} agent-mem {MUTED}<command> [arguments]{RESET}");
         println!();
-        println!("  \x1b[2mCOMMANDS\x1b[0m");
-        println!("    \x1b[1minit\x1b[0m                 Initialize isolated memory in repository");
-        println!("    \x1b[1mget\x1b[0m  <key>           Retrieve raw value for key");
-        println!("    \x1b[1mset\x1b[0m  <key> <val>     Record or update memory rule");
-        println!("    \x1b[1mdel\x1b[0m  <key>           Delete a memory rule");
-        println!("    \x1b[1mfind\x1b[0m <query>         Search rules via BM25 index");
-        println!("    \x1b[1mdump\x1b[0m                 List all active rules");
-        println!("    \x1b[1mcontext\x1b[0m              Export dense prompt block");
-        println!("    \x1b[1msession add\x1b[0m  <msg>   Record session checkpoint");
-        println!("    \x1b[1msession list\x1b[0m         Display recent checkpoints");
-        println!("    \x1b[1msync\x1b[0m [file] [--export] Synchronize team rules (.agent-rules) without SQLite merge conflicts");
-        println!("    \x1b[1mmcp\x1b[0m                  Start native Model Context Protocol stdio server");
-        println!("    \x1b[1mmcp install\x1b[0m [client]  Configure Claude Desktop, Cursor, or Antigravity");
+        println!("  {MUTED}Commands{RESET}");
+        println!("    {ACCENT}init{RESET}                    Initialize isolated memory in repository");
+        println!("    {ACCENT}get{RESET}     {MUTED}<key>{RESET}           Retrieve raw value for key");
+        println!("    {ACCENT}set{RESET}     {MUTED}<key> <val>{RESET}     Record or update memory rule");
+        println!("    {ACCENT}del{RESET}     {MUTED}<key>{RESET}           Delete a memory rule");
+        println!("    {ACCENT}find{RESET}    {MUTED}<query>{RESET}         Search rules via BM25 index");
+        println!("    {ACCENT}dump{RESET}                    List all active rules");
+        println!("    {ACCENT}sync{RESET}    {MUTED}[file] [--export]{RESET} Synchronize team rules (.agent-rules)");
+        println!("    {ACCENT}context{RESET}                 Export dense prompt block");
+        println!("    {ACCENT}session{RESET} {MUTED}add <msg>{RESET}       Record session checkpoint");
+        println!("    {ACCENT}session{RESET} {MUTED}list{RESET}            Display recent checkpoints");
+        println!("    {ACCENT}mcp{RESET}                     Start Model Context Protocol stdio server");
+        println!("    {ACCENT}mcp{RESET}     {MUTED}install [client]{RESET} Configure Claude Desktop, Cursor, or Antigravity");
         println!();
     } else {
         println!(

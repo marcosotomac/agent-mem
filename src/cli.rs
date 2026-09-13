@@ -176,7 +176,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 for r in results {
                     let status = if r.already_configured { "updated" } else { "configured" };
                     if is_tty {
-                        println!("  \x1b[32m✔\x1b[0m \x1b[1m{}\x1b[0m {} in \x1b[2m{}\x1b[0m", status, r.client.display_name(), r.path.display());
+                        println!("  \x1b[38;5;150m✓\x1b[0m  \x1b[38;5;245m{}\x1b[0m  \x1b[1;37m{}\x1b[0m  \x1b[38;5;240m·\x1b[0m  \x1b[38;5;245m{}\x1b[0m", status, r.client.display_name(), r.path.display());
                     } else {
                         println!("{} {} in {}", status, r.client.display_name(), r.path.display());
                     }
