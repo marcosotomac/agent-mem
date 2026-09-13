@@ -1,27 +1,17 @@
 name: Security Audit
 
 on:
+  push:
+    branches: [ "main" ]
   schedule:
-    - cron: '0 0 * * 1' # Runs weekly on Mondays
-  pull_request:
-    paths:
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-  workflow_dispatch:
-
-permissions:
-  contents: read
+    - cron: '0 0 * * 1' # Weekly on Mondays
 
 jobs:
   audit:
-    name: Cargo Audit
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
-
-      - name: Run security audit on dependencies
-        run: cargo audit
+      - uses: actions/checkout@v4
+      - name: Security Audit
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
