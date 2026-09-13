@@ -286,7 +286,7 @@ fn test_empty_input_exceptions() {
     assert_eq!(store.get("  ").unwrap(), None);
 
     // 6. Empty key in del returns false safely
-    assert_eq!(store.del("  ").unwrap(), false);
+    assert!(!store.del("  ").unwrap());
 }
 
 #[test]
