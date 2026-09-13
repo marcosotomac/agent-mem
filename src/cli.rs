@@ -21,6 +21,7 @@ pub enum Command {
     SessionAdd { summary: String },
     SessionList,
     Mcp,
+    McpInstall { client: Option<String> },
     Help,
     Version,
 }
@@ -108,7 +109,19 @@ where
             }
         }
         "context" => Ok(Command::Context),
-        "mcp" | "--mcp" => Ok(Command::Mcp),
+        "mcp" => {
+            if args.len() >= 3 && args[2] == "install" {
+                let client = if args.len() >= 4 {
+                    Some(args[3].clone())
+                } else {
+                    None
+                };
+                Ok(Command::McpInstall { client })
+            } else {
+                Ok(Command::Mcp)
+            }
+        }
+        "--mcp" => Ok(Command::Mcp),
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
         unknown => Err(Error::Usage(format!("Unknown command '{}'. Run 'agent-mem --help' for usage.", unknown))),
@@ -133,6 +146,24 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
         Command::Mcp => {
             let server = crate::mcp::McpServer::new();
             server.run_stdio()
+        }
+        Command::McpInstall { client } => {
+            use std::io::IsTerminal;
+            let results = crate::installer::install_all_or_target(client.as_deref())?;
+            if results.is_empty() {
+                println!("No supported clients detected. Run 'agent-mem mcp install [claude|cursor|antigravity]'.");
+            } else {
+                let is_tty = std::io::stdout().is_terminal();
+                for r in results {
+                    let status = if r.already_configured { "updated" } else { "configured" };
+                    if is_tty {
+                        println!("  \x1b[32m✔\x1b[0m \x1b[1m{}\x1b[0m {} in \x1b[2m{}\x1b[0m", status, r.client.display_name(), r.path.display());
+                    } else {
+                        println!("{} {} in {}", status, r.client.display_name(), r.path.display());
+                    }
+                }
+            }
+            Ok(())
         }
         _ => {
             let db_path = root.join(".agent-mem").join("mem.db");
@@ -174,7 +205,11 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     let (rules, sessions) = store.context()?;
                     print_context(&rules, &sessions);
                 }
-                Command::Init | Command::Help | Command::Version | Command::Mcp => unreachable!(),
+                Command::Init
+                | Command::Help
+                | Command::Version
+                | Command::Mcp
+                | Command::McpInstall { .. } => unreachable!(),
             }
             Ok(())
         }

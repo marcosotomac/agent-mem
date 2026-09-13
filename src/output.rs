@@ -176,10 +176,11 @@ pub fn print_help() {
         println!("    \x1b[1msession add\x1b[0m  <msg>   Record session checkpoint");
         println!("    \x1b[1msession list\x1b[0m         Display recent checkpoints");
         println!("    \x1b[1mmcp\x1b[0m                  Start native Model Context Protocol stdio server");
+        println!("    \x1b[1mmcp install\x1b[0m [client]  Configure Claude Desktop, Cursor, or Antigravity");
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list, mcp",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, del, find, dump, context, session add, session list, mcp, mcp install",
             env!("CARGO_PKG_VERSION")
         );
     }

@@ -29,6 +29,14 @@ function getTargetAsset() {
 
 function findSystemBinary() {
   const isWin = os.platform() === 'win32';
+
+  // 1. Check local build in development
+  const localDevBin = path.join(__dirname, '..', '..', 'target', 'release', isWin ? 'agent-mem.exe' : 'agent-mem');
+  if (fs.existsSync(localDevBin)) {
+    return localDevBin;
+  }
+
+  // 2. Check system PATH
   const cmd = isWin ? 'where agent-mem.exe' : 'which agent-mem';
   try {
     const out = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
@@ -36,12 +44,6 @@ function findSystemBinary() {
       return out;
     }
   } catch (_) {}
-
-  // Check local build in development
-  const localDevBin = path.join(__dirname, '..', '..', 'target', 'release', isWin ? 'agent-mem.exe' : 'agent-mem');
-  if (fs.existsSync(localDevBin)) {
-    return localDevBin;
-  }
 
   return null;
 }

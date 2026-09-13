@@ -77,6 +77,22 @@ fn test_parse_args() {
     // Context
     assert_eq!(parse_args(vec!["agent-mem".into(), "context".into()]).unwrap(), Command::Context);
 
+    // Mcp
+    assert_eq!(parse_args(vec!["agent-mem".into(), "mcp".into()]).unwrap(), Command::Mcp);
+    assert_eq!(parse_args(vec!["agent-mem".into(), "--mcp".into()]).unwrap(), Command::Mcp);
+
+    // Mcp Install (auto)
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "mcp".into(), "install".into()]).unwrap(),
+        Command::McpInstall { client: None }
+    );
+
+    // Mcp Install (claude)
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "mcp".into(), "install".into(), "claude".into()]).unwrap(),
+        Command::McpInstall { client: Some("claude".into()) }
+    );
+
     // Missing required args return error
     assert!(parse_args(vec!["agent-mem".into(), "get".into()]).is_err());
     assert!(parse_args(vec!["agent-mem".into(), "unknown-cmd".into()]).is_err());
