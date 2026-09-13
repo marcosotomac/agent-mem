@@ -7,40 +7,64 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetClient {
     Claude,
+    ClaudeCode,
+    Codex,
     Cursor,
     Antigravity,
+    Gemini,
     Windsurf,
     VSCode,
+    Trae,
     Zed,
     OpenCode,
     RooCode,
     Cline,
+    Continue,
+    Kiro,
+    Qwen,
+    KiloCode,
 }
 
 pub const ALL_CLIENTS: &[TargetClient] = &[
     TargetClient::Antigravity,
     TargetClient::Cursor,
     TargetClient::Claude,
+    TargetClient::ClaudeCode,
+    TargetClient::Codex,
     TargetClient::Windsurf,
     TargetClient::VSCode,
+    TargetClient::Trae,
     TargetClient::Zed,
     TargetClient::OpenCode,
     TargetClient::RooCode,
     TargetClient::Cline,
+    TargetClient::Continue,
+    TargetClient::Gemini,
+    TargetClient::Kiro,
+    TargetClient::Qwen,
+    TargetClient::KiloCode,
 ];
 
 impl TargetClient {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().replace(['-', '_', ' '], "").as_str() {
             "claude" | "claudedesktop" => Some(Self::Claude),
+            "claudecode" | "claudecli" => Some(Self::ClaudeCode),
+            "codex" | "openaicodex" => Some(Self::Codex),
             "cursor" => Some(Self::Cursor),
-            "antigravity" | "gemini" => Some(Self::Antigravity),
+            "antigravity" => Some(Self::Antigravity),
+            "gemini" | "geminicli" => Some(Self::Gemini),
             "windsurf" | "codeium" => Some(Self::Windsurf),
             "vscode" | "code" => Some(Self::VSCode),
+            "trae" => Some(Self::Trae),
             "zed" => Some(Self::Zed),
             "opencode" => Some(Self::OpenCode),
             "roocode" | "roo" => Some(Self::RooCode),
             "cline" => Some(Self::Cline),
+            "continue" | "continuedev" => Some(Self::Continue),
+            "kiro" | "kiroide" => Some(Self::Kiro),
+            "qwen" | "qwencode" => Some(Self::Qwen),
+            "kilocode" | "kilo" => Some(Self::KiloCode),
             _ => None,
         }
     }
@@ -48,28 +72,44 @@ impl TargetClient {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::Claude => "Claude Desktop",
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "OpenAI Codex",
             Self::Cursor => "Cursor",
             Self::Antigravity => "Google Antigravity",
+            Self::Gemini => "Gemini CLI",
             Self::Windsurf => "Windsurf",
             Self::VSCode => "VS Code",
+            Self::Trae => "Trae",
             Self::Zed => "Zed",
             Self::OpenCode => "OpenCode",
             Self::RooCode => "Roo Code",
             Self::Cline => "Cline",
+            Self::Continue => "Continue.dev",
+            Self::Kiro => "Kiro IDE",
+            Self::Qwen => "Qwen Code",
+            Self::KiloCode => "Kilo Code",
         }
     }
 
     pub fn cli_id(&self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::Antigravity => "antigravity",
+            Self::Gemini => "gemini",
             Self::Windsurf => "windsurf",
             Self::VSCode => "vscode",
+            Self::Trae => "trae",
             Self::Zed => "zed",
             Self::OpenCode => "opencode",
             Self::RooCode => "roocode",
             Self::Cline => "cline",
+            Self::Continue => "continue",
+            Self::Kiro => "kiro",
+            Self::Qwen => "qwen",
+            Self::KiloCode => "kilocode",
         }
     }
 
@@ -96,15 +136,21 @@ impl TargetClient {
                     Some(home_path.join(".config/Claude/claude_desktop_config.json"))
                 }
             }
+            Self::ClaudeCode => Some(home_path.join(".claude.json")),
+            Self::Codex => Some(home_path.join(".codex/config.toml")),
             Self::Cursor => Some(home_path.join(".cursor/mcp.json")),
             Self::Antigravity => {
+                let gemini_cfg = home_path.join(".gemini/config/mcp_config.json");
                 let gemini_path = home_path.join(".gemini/antigravity-cli/mcp_config.json");
-                if gemini_path.parent().map(|p| p.exists()).unwrap_or(false) {
+                if gemini_cfg.exists() || gemini_cfg.parent().map(|p| p.exists()).unwrap_or(false) {
+                    Some(gemini_cfg)
+                } else if gemini_path.parent().map(|p| p.exists()).unwrap_or(false) {
                     Some(gemini_path)
                 } else {
                     Some(home_path.join(".config/antigravity/mcp_config.json"))
                 }
             }
+            Self::Gemini => Some(home_path.join(".gemini/settings.json")),
             Self::Windsurf => {
                 let codeium_mcp = home_path.join(".codeium/windsurf/mcp_config.json");
                 if codeium_mcp.exists() || home_path.join(".codeium/windsurf").exists() {
@@ -149,6 +195,24 @@ impl TargetClient {
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
                     Some(home_path.join(".config/Code/User/mcp.json"))
+                }
+            }
+            Self::Trae => {
+                #[cfg(target_os = "macos")]
+                {
+                    Some(home_path.join("Library/Application Support/Trae/User/mcp.json"))
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    if let Ok(appdata) = env::var("APPDATA") {
+                        Some(PathBuf::from(appdata).join("Trae/User/mcp.json"))
+                    } else {
+                        Some(home_path.join("AppData/Roaming/Trae/User/mcp.json"))
+                    }
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                {
+                    Some(home_path.join(".config/Trae/User/mcp.json"))
                 }
             }
             Self::Zed => {
@@ -232,6 +296,10 @@ impl TargetClient {
                     Some(home_path.join(".config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"))
                 }
             }
+            Self::Continue => Some(home_path.join(".continue/config.json")),
+            Self::Kiro => Some(home_path.join(".kiro/settings/mcp.json")),
+            Self::Qwen => Some(home_path.join(".qwen/settings.json")),
+            Self::KiloCode => Some(home_path.join(".config/kilo/opencode.json")),
         }
     }
 
@@ -253,6 +321,14 @@ impl TargetClient {
                     || home_path.join(".config/Claude").exists()
                     || Path::new("/Applications/Claude.app").exists()
             }
+            Self::ClaudeCode => {
+                home_path.join(".claude").exists() || home_path.join(".claude.json").exists()
+            }
+            Self::Codex => {
+                home_path.join(".codex").exists()
+                    || Path::new("/Applications/Codex.app").exists()
+                    || Path::new("/Applications/ChatGPT.app").exists()
+            }
             Self::Cursor => {
                 home_path.join(".cursor").exists()
                     || Path::new("/Applications/Cursor.app").exists()
@@ -260,9 +336,11 @@ impl TargetClient {
             Self::Antigravity => {
                 home_path.join(".gemini/antigravity-cli").exists()
                     || home_path.join(".config/antigravity").exists()
+                    || home_path.join(".gemini").exists()
                     || Path::new("/Applications/Antigravity.app").exists()
                     || Path::new("/Applications/Antigravity IDE.app").exists()
             }
+            Self::Gemini => home_path.join(".gemini").exists(),
             Self::Windsurf => {
                 home_path.join(".codeium/windsurf").exists()
                     || home_path.join(".windsurf").exists()
@@ -273,6 +351,11 @@ impl TargetClient {
                 home_path.join("Library/Application Support/Code").exists()
                     || home_path.join(".config/Code").exists()
                     || Path::new("/Applications/Visual Studio Code.app").exists()
+            }
+            Self::Trae => {
+                home_path.join("Library/Application Support/Trae").exists()
+                    || home_path.join(".trae").exists()
+                    || Path::new("/Applications/Trae.app").exists()
             }
             Self::Zed => {
                 home_path.join(".config/zed").exists()
@@ -299,6 +382,12 @@ impl TargetClient {
                         .join(".config/Code/User/globalStorage/saoudrizwan.claude-dev")
                         .exists()
             }
+            Self::Continue => home_path.join(".continue").exists(),
+            Self::Kiro => {
+                home_path.join(".kiro").exists() || Path::new("/Applications/Kiro.app").exists()
+            }
+            Self::Qwen => home_path.join(".qwen").exists(),
+            Self::KiloCode => home_path.join(".config/kilo").exists(),
         }
     }
 }
@@ -378,6 +467,46 @@ pub fn install_to_path(
 ) -> Result<InstallResult> {
     let binary_cmd = resolve_binary_command();
 
+    if client == TargetClient::Codex {
+        let (already_configured, updated_content) = if config_path.exists() {
+            let raw = fs::read_to_string(config_path)?;
+            let has_header = raw.contains("[mcp_servers.agent-mem]")
+                || raw.contains("[mcp_servers.\"agent-mem\"]");
+            if has_header {
+                (true, raw)
+            } else {
+                let mut c = raw;
+                if !c.is_empty() && !c.ends_with('\n') {
+                    c.push('\n');
+                }
+                c.push_str(&format!(
+                    "\n[mcp_servers.agent-mem]\ncommand = \"{}\"\nargs = [\"mcp\"]\n",
+                    binary_cmd
+                ));
+                (false, c)
+            }
+        } else {
+            let c = format!(
+                "[mcp_servers.agent-mem]\ncommand = \"{}\"\nargs = [\"mcp\"]\n",
+                binary_cmd
+            );
+            (false, c)
+        };
+
+        if !already_configured || !config_path.exists() {
+            if let Some(parent) = config_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(config_path, updated_content)?;
+        }
+
+        return Ok(InstallResult {
+            client,
+            path: config_path.to_path_buf(),
+            already_configured,
+        });
+    }
+
     let mut root_json: Value = if config_path.exists() {
         let raw = fs::read_to_string(config_path)?;
         let clean = strip_json_comments(&raw);
@@ -391,6 +520,7 @@ pub fn install_to_path(
     }
 
     let already_configured = match client {
+        TargetClient::Codex => unreachable!(),
         TargetClient::VSCode => {
             let servers = root_json
                 .as_object_mut()
@@ -428,7 +558,7 @@ pub fn install_to_path(
             servers_obj.insert("agent-mem".to_string(), new_entry);
             is_configured
         }
-        TargetClient::OpenCode => {
+        TargetClient::OpenCode | TargetClient::KiloCode => {
             let servers = root_json
                 .as_object_mut()
                 .unwrap()
@@ -446,12 +576,79 @@ pub fn install_to_path(
             servers_obj.insert("agent-mem".to_string(), new_entry);
             is_configured
         }
+        TargetClient::ClaudeCode => {
+            let servers = root_json
+                .as_object_mut()
+                .unwrap()
+                .entry("mcpServers")
+                .or_insert_with(|| json!({}));
+            if !servers.is_object() {
+                *servers = json!({});
+            }
+            let servers_obj = servers.as_object_mut().unwrap();
+            let new_entry = json!({
+                "type": "stdio",
+                "command": binary_cmd,
+                "args": ["mcp"]
+            });
+            let is_configured = servers_obj.get("agent-mem") == Some(&new_entry);
+            servers_obj.insert("agent-mem".to_string(), new_entry);
+            is_configured
+        }
+        TargetClient::Continue => {
+            let servers_val = root_json
+                .as_object_mut()
+                .unwrap()
+                .entry("mcpServers")
+                .or_insert_with(|| json!([]));
+            if let Some(arr) = servers_val.as_array_mut() {
+                let mut found_idx = None;
+                for (i, item) in arr.iter().enumerate() {
+                    if item.get("name").and_then(|n| n.as_str()) == Some("agent-mem") {
+                        found_idx = Some(i);
+                        break;
+                    }
+                }
+                let new_entry = json!({
+                    "name": "agent-mem",
+                    "command": binary_cmd,
+                    "args": ["mcp"]
+                });
+                if let Some(i) = found_idx {
+                    let is_configured = arr[i] == new_entry;
+                    arr[i] = new_entry;
+                    is_configured
+                } else {
+                    arr.push(new_entry);
+                    false
+                }
+            } else if let Some(servers_obj) = servers_val.as_object_mut() {
+                let new_entry = json!({
+                    "command": binary_cmd,
+                    "args": ["mcp"]
+                });
+                let is_configured = servers_obj.get("agent-mem") == Some(&new_entry);
+                servers_obj.insert("agent-mem".to_string(), new_entry);
+                is_configured
+            } else {
+                *servers_val = json!([{
+                    "name": "agent-mem",
+                    "command": binary_cmd,
+                    "args": ["mcp"]
+                }]);
+                false
+            }
+        }
         TargetClient::Claude
         | TargetClient::Cursor
         | TargetClient::Antigravity
+        | TargetClient::Gemini
         | TargetClient::Windsurf
+        | TargetClient::Trae
         | TargetClient::RooCode
-        | TargetClient::Cline => {
+        | TargetClient::Cline
+        | TargetClient::Kiro
+        | TargetClient::Qwen => {
             let servers = root_json
                 .as_object_mut()
                 .unwrap()
@@ -527,7 +724,7 @@ pub fn install_all_or_target(target: Option<&str>) -> Result<Vec<InstallResult>>
         Some(name) => {
             let client = TargetClient::parse(name).ok_or_else(|| {
                 Error::Usage(format!(
-                    "Unknown client '{}'. Supported clients: claude, cursor, antigravity, windsurf, vscode, zed, opencode, roocode, cline, all",
+                    "Unknown client '{}'. Supported clients: claude, claude-code, codex, cursor, antigravity, gemini, windsurf, vscode, trae, zed, opencode, roocode, cline, continue, kiro, qwen, kilocode, all",
                     name
                 ))
             })?;
@@ -549,10 +746,18 @@ pub fn check_client_status_with_home(client: TargetClient, home: &Path) -> Clien
     let configured = if let Some(ref p) = path
         && p.exists()
     {
-        if let Ok(raw) = fs::read_to_string(p) {
+        if client == TargetClient::Codex {
+            if let Ok(raw) = fs::read_to_string(p) {
+                raw.contains("[mcp_servers.agent-mem]")
+                    || raw.contains("[mcp_servers.\"agent-mem\"]")
+            } else {
+                false
+            }
+        } else if let Ok(raw) = fs::read_to_string(p) {
             let clean = strip_json_comments(&raw);
             if let Ok(json) = serde_json::from_str::<Value>(&clean) {
                 match client {
+                    TargetClient::Codex => unreachable!(),
                     TargetClient::VSCode => {
                         json.get("servers")
                             .and_then(|m| m.get("agent-mem"))
@@ -566,15 +771,32 @@ pub fn check_client_status_with_home(client: TargetClient, home: &Path) -> Clien
                         .get("context_servers")
                         .and_then(|m| m.get("agent-mem"))
                         .is_some(),
-                    TargetClient::OpenCode => {
+                    TargetClient::OpenCode | TargetClient::KiloCode => {
                         json.get("mcp").and_then(|m| m.get("agent-mem")).is_some()
                     }
+                    TargetClient::Continue => {
+                        if let Some(arr) = json.get("mcpServers").and_then(|m| m.as_array()) {
+                            arr.iter().any(|i| {
+                                i.get("name").and_then(|n| n.as_str()) == Some("agent-mem")
+                            })
+                        } else if let Some(obj) = json.get("mcpServers").and_then(|m| m.as_object())
+                        {
+                            obj.get("agent-mem").is_some()
+                        } else {
+                            false
+                        }
+                    }
                     TargetClient::Claude
+                    | TargetClient::ClaudeCode
                     | TargetClient::Cursor
                     | TargetClient::Antigravity
+                    | TargetClient::Gemini
                     | TargetClient::Windsurf
+                    | TargetClient::Trae
                     | TargetClient::RooCode
-                    | TargetClient::Cline => {
+                    | TargetClient::Cline
+                    | TargetClient::Kiro
+                    | TargetClient::Qwen => {
                         json.get("mcpServers")
                             .and_then(|m| m.get("agent-mem"))
                             .is_some()

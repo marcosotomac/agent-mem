@@ -9,14 +9,24 @@ fn test_installer_client_parsing() {
         TargetClient::parse("claude-desktop"),
         Some(TargetClient::Claude)
     );
+    assert_eq!(
+        TargetClient::parse("claude-code"),
+        Some(TargetClient::ClaudeCode)
+    );
+    assert_eq!(TargetClient::parse("codex"), Some(TargetClient::Codex));
+    assert_eq!(
+        TargetClient::parse("openai-codex"),
+        Some(TargetClient::Codex)
+    );
     assert_eq!(TargetClient::parse("cursor"), Some(TargetClient::Cursor));
     assert_eq!(
         TargetClient::parse("antigravity"),
         Some(TargetClient::Antigravity)
     );
+    assert_eq!(TargetClient::parse("gemini"), Some(TargetClient::Gemini));
     assert_eq!(
-        TargetClient::parse("gemini"),
-        Some(TargetClient::Antigravity)
+        TargetClient::parse("gemini-cli"),
+        Some(TargetClient::Gemini)
     );
     assert_eq!(
         TargetClient::parse("windsurf"),
@@ -26,6 +36,7 @@ fn test_installer_client_parsing() {
     assert_eq!(TargetClient::parse("vscode"), Some(TargetClient::VSCode));
     assert_eq!(TargetClient::parse("vs-code"), Some(TargetClient::VSCode));
     assert_eq!(TargetClient::parse("code"), Some(TargetClient::VSCode));
+    assert_eq!(TargetClient::parse("trae"), Some(TargetClient::Trae));
     assert_eq!(TargetClient::parse("zed"), Some(TargetClient::Zed));
     assert_eq!(
         TargetClient::parse("opencode"),
@@ -34,6 +45,21 @@ fn test_installer_client_parsing() {
     assert_eq!(TargetClient::parse("roocode"), Some(TargetClient::RooCode));
     assert_eq!(TargetClient::parse("roo-code"), Some(TargetClient::RooCode));
     assert_eq!(TargetClient::parse("cline"), Some(TargetClient::Cline));
+    assert_eq!(
+        TargetClient::parse("continue"),
+        Some(TargetClient::Continue)
+    );
+    assert_eq!(
+        TargetClient::parse("continue-dev"),
+        Some(TargetClient::Continue)
+    );
+    assert_eq!(TargetClient::parse("kiro"), Some(TargetClient::Kiro));
+    assert_eq!(TargetClient::parse("qwen"), Some(TargetClient::Qwen));
+    assert_eq!(
+        TargetClient::parse("kilocode"),
+        Some(TargetClient::KiloCode)
+    );
+    assert_eq!(TargetClient::parse("kilo"), Some(TargetClient::KiloCode));
     assert_eq!(TargetClient::parse("unknown-editor"), None);
 
     for client in ALL_CLIENTS {
@@ -236,6 +262,117 @@ fn test_installer_windsurf_format() {
     // Idempotency
     let res2 =
         install_to_path(&config_path, TargetClient::Windsurf).expect("re-install should succeed");
+    assert!(res2.already_configured);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_installer_codex_toml_format() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_codex_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+
+    // Existing TOML configuration
+    let initial_toml = r#"model = "gpt-5.6-sol"
+personality = "pragmatic"
+
+[mcp_servers.codegraph]
+command = "codegraph"
+args = ["serve", "--mcp"]
+"#;
+    fs::write(&config_path, initial_toml).unwrap();
+
+    // 1. Install agent-mem into Codex TOML
+    let res = install_to_path(&config_path, TargetClient::Codex).expect("install should succeed");
+    assert!(!res.already_configured);
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("[mcp_servers.agent-mem]"));
+    assert!(content.contains("args = [\"mcp\"]"));
+    // Ensure existing settings were preserved
+    assert!(content.contains("model = \"gpt-5.6-sol\""));
+    assert!(content.contains("[mcp_servers.codegraph]"));
+
+    // 2. Idempotency test
+    let res2 =
+        install_to_path(&config_path, TargetClient::Codex).expect("re-install should succeed");
+    assert!(res2.already_configured);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_installer_claude_code_format() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_claude_code_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join(".claude.json");
+
+    let res =
+        install_to_path(&config_path, TargetClient::ClaudeCode).expect("install should succeed");
+    assert!(!res.already_configured);
+
+    let content: Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(content["mcpServers"]["agent-mem"]["type"], "stdio");
+    assert_eq!(content["mcpServers"]["agent-mem"]["args"][0], "mcp");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_installer_continue_format() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_continue_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.json");
+
+    // Array format test
+    let initial = json!({
+        "models": [],
+        "mcpServers": [
+            {
+                "name": "other-tool",
+                "command": "other",
+                "args": []
+            }
+        ]
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&initial).unwrap(),
+    )
+    .unwrap();
+
+    let res =
+        install_to_path(&config_path, TargetClient::Continue).expect("install should succeed");
+    assert!(!res.already_configured);
+
+    let content: Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    let arr = content["mcpServers"].as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[1]["name"], "agent-mem");
+    assert_eq!(arr[1]["args"][0], "mcp");
+
+    // Idempotency
+    let res2 =
+        install_to_path(&config_path, TargetClient::Continue).expect("re-install should succeed");
     assert!(res2.already_configured);
 
     let _ = fs::remove_dir_all(&temp_dir);
