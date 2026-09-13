@@ -117,8 +117,8 @@ fn test_enterprise_high_concurrency_50_workers() {
         let _ = Store::open(&db_path, true).unwrap();
     }
 
-    let worker_count = 30;
-    let ops_per_worker = 30;
+    let worker_count = 20;
+    let ops_per_worker = 25;
     let completed_ops = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();

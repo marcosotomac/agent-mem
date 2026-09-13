@@ -53,9 +53,9 @@ impl Store {
     }
 
     fn configure_conn(conn: &Connection, need_write: bool) -> Result<()> {
-        let mut pragma_stmt = "PRAGMA busy_timeout = 3000; PRAGMA mmap_size = 268435456;";
+        let mut pragma_stmt = "PRAGMA busy_timeout = 10000; PRAGMA mmap_size = 268435456;";
         if need_write {
-            pragma_stmt = "PRAGMA busy_timeout = 3000; PRAGMA synchronous = NORMAL; PRAGMA mmap_size = 268435456;";
+            pragma_stmt = "PRAGMA busy_timeout = 10000; PRAGMA synchronous = NORMAL; PRAGMA mmap_size = 268435456;";
         }
         conn.execute_batch(pragma_stmt)?;
 
