@@ -1,4 +1,6 @@
 use crate::error::Result;
+use crate::init::GitDoctorReport;
+use crate::installer::{ClientStatus, check_all_clients, install_all_or_target, install_client};
 use crate::store::{RuleRecord, SessionEntry, Store};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -29,14 +31,30 @@ const BG_SELECT: Color = Color::Indexed(236); // Subtle selection gray
 pub enum ActiveTab {
     Rules,
     Sessions,
+    Doctor,
     Help,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
     Filter,
     ConfirmDelete,
+    NewRule {
+        field: usize, // 0: Key, 1: Value, 2: Anchor
+        key: String,
+        val: String,
+        anchor: String,
+    },
+    EditRule {
+        field: usize, // 0: Value, 1: Anchor
+        key: String,
+        val: String,
+        anchor: String,
+    },
+    NewSession {
+        summary: String,
+    },
 }
 
 pub struct App {
@@ -50,6 +68,9 @@ pub struct App {
     pub selected_rule_idx: usize,
     pub sessions: Vec<SessionEntry>,
     pub selected_session_idx: usize,
+    pub git_doctor: GitDoctorReport,
+    pub client_statuses: Vec<ClientStatus>,
+    pub selected_client_idx: usize,
     pub toast: Option<(String, Instant)>,
     pub should_quit: bool,
 }
@@ -57,6 +78,9 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf) -> Result<Self> {
         let db_path = root.join(".agent-mem").join("mem.db");
+        let git_doctor = crate::init::inspect_git_health(&root);
+        let client_statuses = check_all_clients();
+
         let mut app = Self {
             root,
             db_path,
@@ -68,6 +92,9 @@ impl App {
             selected_rule_idx: 0,
             sessions: Vec::new(),
             selected_session_idx: 0,
+            git_doctor,
+            client_statuses,
+            selected_client_idx: 0,
             toast: None,
             should_quit: false,
         };
@@ -84,6 +111,8 @@ impl App {
             self.rules.clear();
             self.sessions.clear();
         }
+        self.git_doctor = crate::init::inspect_git_health(&self.root);
+        self.client_statuses = check_all_clients();
         self.apply_filter();
         Ok(())
     }
@@ -174,6 +203,77 @@ impl App {
         self.reload_data()
     }
 
+    pub fn create_rule(&mut self, key: &str, val: &str, anchor: Option<&str>) -> Result<bool> {
+        if key.trim().is_empty() || val.trim().is_empty() {
+            self.set_toast("Rule Key and Value cannot be empty!");
+            return Ok(false);
+        }
+
+        let mut store = Store::open(&self.db_path, true)?;
+        store.set_with_anchor(
+            key.trim(),
+            val.trim(),
+            anchor.filter(|a| !a.trim().is_empty()),
+        )?;
+        let rules_file = self.root.join(".agent-rules");
+        if rules_file.exists() {
+            let _ = store.export_to_file(&rules_file);
+        }
+        self.set_toast(format!("Saved rule: {}", key.trim()));
+        self.reload_data()?;
+        Ok(true)
+    }
+
+    pub fn add_session(&mut self, summary: &str) -> Result<bool> {
+        if summary.trim().is_empty() {
+            self.set_toast("Session summary cannot be empty!");
+            return Ok(false);
+        }
+
+        let mut store = Store::open(&self.db_path, true)?;
+        let id = store.session_add(summary.trim())?;
+        self.set_toast(format!("Recorded checkpoint #{}", id));
+        self.reload_data()?;
+        Ok(true)
+    }
+
+    pub fn run_git_sync(&mut self) -> Result<()> {
+        let rules_file = self.root.join(".agent-rules");
+        let mut store = Store::open(&self.db_path, true)?;
+        let report = if rules_file.exists() {
+            store.sync_with_file(&rules_file)?
+        } else {
+            store.sync_export(&rules_file)?
+        };
+        self.set_toast(format!(
+            "Git Sync: {} imported, {} total rules",
+            report.imported, report.total
+        ));
+        self.reload_data()
+    }
+
+    pub fn install_selected_client_mcp(&mut self) -> Result<()> {
+        let detected_clients: Vec<&ClientStatus> = self
+            .client_statuses
+            .iter()
+            .filter(|c| c.installed || c.configured)
+            .collect();
+
+        if let Some(target) = detected_clients.get(self.selected_client_idx) {
+            let res = install_client(target.client)?;
+            self.set_toast(format!("Configured MCP for {}", res.client.display_name()));
+            self.client_statuses = check_all_clients();
+        }
+        Ok(())
+    }
+
+    pub fn install_all_clients_mcp(&mut self) -> Result<()> {
+        let results = install_all_or_target(None)?;
+        self.set_toast(format!("Configured MCP for {} AI clients", results.len()));
+        self.client_statuses = check_all_clients();
+        Ok(())
+    }
+
     pub fn next_item(&mut self) {
         match self.active_tab {
             ActiveTab::Rules => {
@@ -188,6 +288,17 @@ impl App {
                         (self.selected_session_idx + 1).min(self.sessions.len() - 1);
                 }
             }
+            ActiveTab::Doctor => {
+                let detected_count = self
+                    .client_statuses
+                    .iter()
+                    .filter(|c| c.installed || c.configured)
+                    .count();
+                if detected_count > 0 {
+                    self.selected_client_idx =
+                        (self.selected_client_idx + 1).min(detected_count - 1);
+                }
+            }
             ActiveTab::Help => {}
         }
     }
@@ -200,6 +311,9 @@ impl App {
             ActiveTab::Sessions => {
                 self.selected_session_idx = self.selected_session_idx.saturating_sub(1);
             }
+            ActiveTab::Doctor => {
+                self.selected_client_idx = self.selected_client_idx.saturating_sub(1);
+            }
             ActiveTab::Help => {}
         }
     }
@@ -207,13 +321,14 @@ impl App {
     pub fn switch_tab(&mut self) {
         self.active_tab = match self.active_tab {
             ActiveTab::Rules => ActiveTab::Sessions,
-            ActiveTab::Sessions => ActiveTab::Help,
+            ActiveTab::Sessions => ActiveTab::Doctor,
+            ActiveTab::Doctor => ActiveTab::Help,
             ActiveTab::Help => ActiveTab::Rules,
         };
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        match self.input_mode {
+        match &mut self.input_mode {
             InputMode::Normal => match key.code {
                 KeyCode::Char('q') => self.should_quit = true,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -222,7 +337,8 @@ impl App {
                 KeyCode::Tab => self.switch_tab(),
                 KeyCode::Char('1') => self.active_tab = ActiveTab::Rules,
                 KeyCode::Char('2') => self.active_tab = ActiveTab::Sessions,
-                KeyCode::Char('?') => self.active_tab = ActiveTab::Help,
+                KeyCode::Char('3') => self.active_tab = ActiveTab::Doctor,
+                KeyCode::Char('?') | KeyCode::Char('4') => self.active_tab = ActiveTab::Help,
                 KeyCode::Char('/') if self.active_tab == ActiveTab::Rules => {
                     self.input_mode = InputMode::Filter;
                 }
@@ -236,9 +352,41 @@ impl App {
                         self.input_mode = InputMode::ConfirmDelete;
                     }
                 }
+                KeyCode::Char('n') if self.active_tab == ActiveTab::Rules => {
+                    self.input_mode = InputMode::NewRule {
+                        field: 0,
+                        key: String::new(),
+                        val: String::new(),
+                        anchor: String::new(),
+                    };
+                }
+                KeyCode::Char('e') if self.active_tab == ActiveTab::Rules => {
+                    if let Some(rule) = self.current_selected_rule() {
+                        self.input_mode = InputMode::EditRule {
+                            field: 0,
+                            key: rule.key.clone(),
+                            val: rule.val.clone(),
+                            anchor: rule.anchor.clone().unwrap_or_default(),
+                        };
+                    }
+                }
+                KeyCode::Char('c') => {
+                    self.input_mode = InputMode::NewSession {
+                        summary: String::new(),
+                    };
+                }
+                KeyCode::Char('S') => {
+                    self.run_git_sync()?;
+                }
+                KeyCode::Char('i') if self.active_tab == ActiveTab::Doctor => {
+                    self.install_selected_client_mcp()?;
+                }
+                KeyCode::Char('I') if self.active_tab == ActiveTab::Doctor => {
+                    self.install_all_clients_mcp()?;
+                }
                 KeyCode::Char('r') => {
                     self.reload_data()?;
-                    self.set_toast("Database reloaded");
+                    self.set_toast("Database and diagnostics reloaded");
                 }
                 KeyCode::Esc => {
                     if !self.filter_query.is_empty() {
@@ -250,10 +398,7 @@ impl App {
                 _ => {}
             },
             InputMode::Filter => match key.code {
-                KeyCode::Esc => {
-                    self.input_mode = InputMode::Normal;
-                }
-                KeyCode::Enter => {
+                KeyCode::Esc | KeyCode::Enter => {
                     self.input_mode = InputMode::Normal;
                 }
                 KeyCode::Backspace => {
@@ -274,6 +419,117 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
                     self.set_toast("Deletion cancelled");
+                }
+                _ => {}
+            },
+            InputMode::NewRule {
+                field,
+                key: k,
+                val: v,
+                anchor: a,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.set_toast("Rule creation cancelled");
+                }
+                KeyCode::Tab => {
+                    *field = (*field + 1) % 3;
+                }
+                KeyCode::BackTab => {
+                    *field = (*field + 2) % 3;
+                }
+                KeyCode::Enter => {
+                    if *field < 2 {
+                        *field += 1;
+                    } else {
+                        let k_clone = k.clone();
+                        let v_clone = v.clone();
+                        let a_clone = a.clone();
+                        if self.create_rule(&k_clone, &v_clone, Some(&a_clone))? {
+                            self.input_mode = InputMode::Normal;
+                        }
+                    }
+                }
+                KeyCode::Backspace => match *field {
+                    0 => {
+                        k.pop();
+                    }
+                    1 => {
+                        v.pop();
+                    }
+                    2 => {
+                        a.pop();
+                    }
+                    _ => {}
+                },
+                KeyCode::Char(c) => match *field {
+                    0 => k.push(c),
+                    1 => v.push(c),
+                    2 => a.push(c),
+                    _ => {}
+                },
+                _ => {}
+            },
+            InputMode::EditRule {
+                field,
+                key: k,
+                val: v,
+                anchor: a,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.set_toast("Rule edit cancelled");
+                }
+                KeyCode::Tab => {
+                    *field = (*field + 1) % 2;
+                }
+                KeyCode::BackTab => {
+                    *field = (*field + 1) % 2;
+                }
+                KeyCode::Enter => {
+                    if *field < 1 {
+                        *field += 1;
+                    } else {
+                        let k_clone = k.clone();
+                        let v_clone = v.clone();
+                        let a_clone = a.clone();
+                        if self.create_rule(&k_clone, &v_clone, Some(&a_clone))? {
+                            self.input_mode = InputMode::Normal;
+                        }
+                    }
+                }
+                KeyCode::Backspace => match *field {
+                    0 => {
+                        v.pop();
+                    }
+                    1 => {
+                        a.pop();
+                    }
+                    _ => {}
+                },
+                KeyCode::Char(c) => match *field {
+                    0 => v.push(c),
+                    1 => a.push(c),
+                    _ => {}
+                },
+                _ => {}
+            },
+            InputMode::NewSession { summary } => match key.code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.set_toast("Session checkpoint cancelled");
+                }
+                KeyCode::Enter => {
+                    let s_clone = summary.clone();
+                    if self.add_session(&s_clone)? {
+                        self.input_mode = InputMode::Normal;
+                    }
+                }
+                KeyCode::Backspace => {
+                    summary.pop();
+                }
+                KeyCode::Char(c) => {
+                    summary.push(c);
                 }
                 _ => {}
             },
@@ -348,13 +604,28 @@ fn render_ui(f: &mut ratatui::Frame, app: &App) {
     match app.active_tab {
         ActiveTab::Rules => render_rules_tab(f, app, chunks[1]),
         ActiveTab::Sessions => render_sessions_tab(f, app, chunks[1]),
+        ActiveTab::Doctor => render_doctor_tab(f, app, chunks[1]),
         ActiveTab::Help => render_help_tab(f, chunks[1]),
     }
 
     render_footer(f, app, chunks[2]);
 
-    if app.input_mode == InputMode::ConfirmDelete {
-        render_delete_modal(f, app);
+    match &app.input_mode {
+        InputMode::ConfirmDelete => render_delete_modal(f, app),
+        InputMode::NewRule {
+            field,
+            key,
+            val,
+            anchor,
+        } => render_new_rule_modal(f, *field, key, val, anchor),
+        InputMode::EditRule {
+            field,
+            key,
+            val,
+            anchor,
+        } => render_edit_rule_modal(f, *field, key, val, anchor),
+        InputMode::NewSession { summary } => render_new_session_modal(f, summary),
+        InputMode::Normal | InputMode::Filter => {}
     }
 }
 
@@ -363,8 +634,8 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(24), // Title
-            Constraint::Min(20),    // Tabs
-            Constraint::Length(28), // Meta info
+            Constraint::Min(25),    // Tabs
+            Constraint::Length(30), // Meta info
         ])
         .split(area);
 
@@ -384,13 +655,20 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
     // Tabs
     let rules_label = format!(" 1 Rules ({}) ", app.rules.len());
     let sessions_label = format!(" 2 Sessions ({}) ", app.sessions.len());
+    let doctor_label = " 3 Doctor & AIs ";
     let help_label = " ? Help ";
 
-    let titles = vec![rules_label, sessions_label, help_label.to_string()];
+    let titles = vec![
+        rules_label,
+        sessions_label,
+        doctor_label.to_string(),
+        help_label.to_string(),
+    ];
     let active_index = match app.active_tab {
         ActiveTab::Rules => 0,
         ActiveTab::Sessions => 1,
-        ActiveTab::Help => 2,
+        ActiveTab::Doctor => 2,
+        ActiveTab::Help => 3,
     };
 
     let tabs = Tabs::new(titles)
@@ -666,75 +944,317 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
 }
 
+fn render_doctor_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let top_bottom = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(9), Constraint::Min(8)])
+        .split(area);
+
+    let top_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(top_bottom[0]);
+
+    // Storage Status
+    let active_rules = app.rules.iter().filter(|r| !r.is_archived()).count();
+    let archived_rules = app.rules.len() - active_rules;
+    let storage_lines = vec![
+        Line::from(vec![
+            Span::styled("Database: ", Style::default().fg(MUTED)),
+            Span::styled(
+                app.db_path.display().to_string(),
+                Style::default().fg(ACCENT),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Journal Mode: ", Style::default().fg(MUTED)),
+            Span::styled("WAL (Write-Ahead Log)", Style::default().fg(EMERALD)),
+        ]),
+        Line::from(vec![
+            Span::styled("Rules in memory: ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!("{} active", active_rules),
+                Style::default().fg(EMERALD),
+            ),
+            Span::styled(
+                format!(" ({} archived)", archived_rules),
+                Style::default().fg(AMBER),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Full-Text Search: ", Style::default().fg(MUTED)),
+            Span::styled(
+                "SQLite FTS5 BM25 (porter tokenizer)",
+                Style::default().fg(ACCENT),
+            ),
+        ]),
+    ];
+    let storage_block = Paragraph::new(storage_lines).block(
+        Block::default()
+            .title(" Storage & Database ")
+            .title_style(Style::default().fg(MUTED))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBTLE)),
+    );
+    f.render_widget(storage_block, top_chunks[0]);
+
+    // Git Status
+    let git = &app.git_doctor;
+    let git_lines = vec![
+        Line::from(vec![
+            Span::styled("Repository: ", Style::default().fg(MUTED)),
+            Span::styled(
+                if git.is_git_repo {
+                    "Git active"
+                } else {
+                    "None"
+                },
+                Style::default().fg(EMERALD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Sync File: ", Style::default().fg(MUTED)),
+            Span::styled(".agent-rules ", Style::default().fg(ACCENT)),
+            Span::styled(
+                if git.gitattributes_active {
+                    "(merge=union ✓)"
+                } else {
+                    "(no union merge)"
+                },
+                if git.gitattributes_active {
+                    Style::default().fg(EMERALD)
+                } else {
+                    Style::default().fg(AMBER)
+                },
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(".gitignore: ", Style::default().fg(MUTED)),
+            Span::styled(
+                if git.gitignore_active {
+                    ".agent-mem/ ignored ✓"
+                } else {
+                    "not ignored ✗"
+                },
+                if git.gitignore_active {
+                    Style::default().fg(EMERALD)
+                } else {
+                    Style::default().fg(AMBER)
+                },
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Git Hooks: ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!(
+                    "post-commit:{}, post-merge:{}, post-checkout:{}",
+                    if git.post_commit_active { "✓" } else { "·" },
+                    if git.post_merge_active { "✓" } else { "·" },
+                    if git.post_checkout_active {
+                        "✓"
+                    } else {
+                        "·"
+                    }
+                ),
+                Style::default().fg(EMERALD),
+            ),
+        ]),
+    ];
+    let git_block = Paragraph::new(git_lines).block(
+        Block::default()
+            .title(" Git & Team Sync ")
+            .title_style(Style::default().fg(MUTED))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBTLE)),
+    );
+    f.render_widget(git_block, top_chunks[1]);
+
+    // Detected AI Clients
+    let detected_clients: Vec<&ClientStatus> = app
+        .client_statuses
+        .iter()
+        .filter(|c| c.installed || c.configured)
+        .collect();
+
+    let client_items: Vec<ListItem> = detected_clients
+        .iter()
+        .enumerate()
+        .map(|(idx, client)| {
+            let is_selected = idx == app.selected_client_idx;
+            let (icon, icon_style) = if client.configured {
+                ("✓ configured", Style::default().fg(EMERALD).bold())
+            } else {
+                (
+                    "! detected (not configured)",
+                    Style::default().fg(AMBER).bold(),
+                )
+            };
+            let prefix = if is_selected { "▶ " } else { "  " };
+            let p_str = client
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+
+            let line = Line::from(vec![
+                Span::styled(prefix, Style::default().fg(EMERALD)),
+                Span::styled(
+                    format!("{:<20} ", client.client.display_name()),
+                    Style::default().fg(ACCENT).bold(),
+                ),
+                Span::styled(format!("{:<28} ", icon), icon_style),
+                Span::styled(p_str, Style::default().fg(MUTED)),
+            ]);
+
+            let item_style = if is_selected {
+                Style::default().bg(BG_SELECT)
+            } else {
+                Style::default()
+            };
+
+            ListItem::new(line).style(item_style)
+        })
+        .collect();
+
+    let client_list = List::new(client_items).block(
+        Block::default()
+            .title(format!(" Detected AI Clients & MCP ({} on system) - [i] Install selected, [I] Install ALL ", detected_clients.len()))
+            .title_style(Style::default().fg(MUTED))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBTLE)),
+    );
+    f.render_widget(client_list, top_bottom[1]);
+}
+
 fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
     let help_text = vec![
         Line::from(Span::styled(
-            "agent-mem TUI Keyboard Cheatsheet",
+            "agent-mem TUI - The Complete Developer Cockpit",
             Style::default().fg(ACCENT).bold(),
         )),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "  Navigation:",
+            "  Navigation & Tabs:",
             Style::default().fg(EMERALD).bold(),
         )]),
         Line::from(vec![
-            Span::styled("    j / ↓       ", Style::default().fg(ACCENT)),
-            Span::styled("Move cursor down", Style::default().fg(MUTED)),
-        ]),
-        Line::from(vec![
-            Span::styled("    k / ↑       ", Style::default().fg(ACCENT)),
-            Span::styled("Move cursor up", Style::default().fg(MUTED)),
-        ]),
-        Line::from(vec![
-            Span::styled("    Tab         ", Style::default().fg(ACCENT)),
+            Span::styled("    j / ↓ , k / ↑ ", Style::default().fg(ACCENT)),
             Span::styled(
-                "Switch between Rules, Sessions, and Help tabs",
+                "Move cursor up/down across items",
                 Style::default().fg(MUTED),
             ),
         ]),
         Line::from(vec![
-            Span::styled("    1, 2, ?     ", Style::default().fg(ACCENT)),
-            Span::styled("Directly jump to tab", Style::default().fg(MUTED)),
+            Span::styled("    Tab           ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Cycle between Rules, Sessions, Doctor, and Help tabs",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("    1, 2, 3, ?    ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Jump directly to Rules, Sessions, Doctor, or Help",
+                Style::default().fg(MUTED),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "  Rule Operations:",
+            "  Rule Management (Tab 1):",
             Style::default().fg(EMERALD).bold(),
         )]),
         Line::from(vec![
-            Span::styled("    /           ", Style::default().fg(ACCENT)),
+            Span::styled("    n             ", Style::default().fg(ACCENT)),
             Span::styled(
-                "Enter real-time search filter (Esc to clear)",
+                "Create new rule (interactive modal: Key, Value, Anchor)",
                 Style::default().fg(MUTED),
             ),
         ]),
         Line::from(vec![
-            Span::styled("    a           ", Style::default().fg(ACCENT)),
+            Span::styled("    e             ", Style::default().fg(ACCENT)),
             Span::styled(
-                "Toggle Archive / Unarchive selected rule",
+                "Edit selected rule (Content & Anchor)",
                 Style::default().fg(MUTED),
             ),
         ]),
         Line::from(vec![
-            Span::styled("    d or x      ", Style::default().fg(ACCENT)),
+            Span::styled("    a             ", Style::default().fg(ACCENT)),
             Span::styled(
-                "Delete selected rule (prompts confirmation)",
+                "Toggle Archive / Reactivate selected rule",
                 Style::default().fg(MUTED),
             ),
         ]),
         Line::from(vec![
-            Span::styled("    r           ", Style::default().fg(ACCENT)),
-            Span::styled("Reload data from database", Style::default().fg(MUTED)),
+            Span::styled("    d / x         ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Permanently delete selected rule (prompts confirmation)",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("    /             ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Real-time search filter across key, value, and anchor",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("    S (Shift+s)   ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Run Git Sync with .agent-rules immediately",
+                Style::default().fg(MUTED),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "  Application:",
+            "  Sessions & Checkpoints (Tab 2):",
             Style::default().fg(EMERALD).bold(),
         )]),
         Line::from(vec![
-            Span::styled("    q / Ctrl+c  ", Style::default().fg(ACCENT)),
+            Span::styled("    c             ", Style::default().fg(ACCENT)),
             Span::styled(
-                "Quit agent-mem TUI and restore terminal cleanly",
+                "Record a manual session checkpoint summary",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "  Doctor & AI Integration (Tab 3):",
+            Style::default().fg(EMERALD).bold(),
+        )]),
+        Line::from(vec![
+            Span::styled("    i             ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Install / configure MCP server for selected AI client",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("    I (Shift+i)   ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Install MCP server for ALL detected AI clients in 1 step",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "  General:",
+            Style::default().fg(EMERALD).bold(),
+        )]),
+        Line::from(vec![
+            Span::styled("    r             ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Reload database, rules, and system diagnostics",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("    q / Ctrl+c    ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Cleanly exit agent-mem TUI and restore terminal",
                 Style::default().fg(MUTED),
             ),
         ]),
@@ -743,7 +1263,7 @@ fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
     let p = Paragraph::new(help_text)
         .block(
             Block::default()
-                .title(" Help & Shortcuts ")
+                .title(" Help & Keyboard Shortcuts ")
                 .title_style(Style::default().fg(MUTED))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -754,26 +1274,57 @@ fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
 }
 
 fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let left_spans = match app.input_mode {
-        InputMode::Normal => vec![
-            Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Switch Tab  ", Style::default().fg(MUTED)),
-            Span::styled("[/] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Filter  ", Style::default().fg(MUTED)),
-            Span::styled("[a] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Toggle Archive  ", Style::default().fg(MUTED)),
-            Span::styled("[d] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Delete  ", Style::default().fg(MUTED)),
-            Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Reload  ", Style::default().fg(MUTED)),
-            Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Quit", Style::default().fg(MUTED)),
-        ],
+    let left_spans = match &app.input_mode {
+        InputMode::Normal => match app.active_tab {
+            ActiveTab::Rules => vec![
+                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Tab  ", Style::default().fg(MUTED)),
+                Span::styled("[n] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("New  ", Style::default().fg(MUTED)),
+                Span::styled("[e] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Edit  ", Style::default().fg(MUTED)),
+                Span::styled("[a] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Archive  ", Style::default().fg(MUTED)),
+                Span::styled("[d] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Delete  ", Style::default().fg(MUTED)),
+                Span::styled("[S] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Sync  ", Style::default().fg(MUTED)),
+                Span::styled("[/] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Search  ", Style::default().fg(MUTED)),
+                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Quit", Style::default().fg(MUTED)),
+            ],
+            ActiveTab::Sessions => vec![
+                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Tab  ", Style::default().fg(MUTED)),
+                Span::styled("[c] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("New Checkpoint  ", Style::default().fg(MUTED)),
+                Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Reload  ", Style::default().fg(MUTED)),
+                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Quit", Style::default().fg(MUTED)),
+            ],
+            ActiveTab::Doctor => vec![
+                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Tab  ", Style::default().fg(MUTED)),
+                Span::styled("[i] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Install MCP  ", Style::default().fg(MUTED)),
+                Span::styled("[I] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Install ALL  ", Style::default().fg(MUTED)),
+                Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Reload  ", Style::default().fg(MUTED)),
+                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Quit", Style::default().fg(MUTED)),
+            ],
+            ActiveTab::Help => vec![
+                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Tab  ", Style::default().fg(MUTED)),
+                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Quit", Style::default().fg(MUTED)),
+            ],
+        },
         InputMode::Filter => vec![
-            Span::styled(
-                " Type query to filter in real-time... ",
-                Style::default().fg(EMERALD).bold(),
-            ),
+            Span::styled(" Filter Query: ", Style::default().fg(EMERALD).bold()),
             Span::styled("[Enter] ", Style::default().fg(ACCENT).bold()),
             Span::styled("Confirm  ", Style::default().fg(MUTED)),
             Span::styled("[Esc] ", Style::default().fg(ACCENT).bold()),
@@ -782,8 +1333,24 @@ fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         InputMode::ConfirmDelete => vec![
             Span::styled(" CONFIRM DELETION: ", Style::default().fg(AMBER).bold()),
             Span::styled("[y] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Confirm Delete  ", Style::default().fg(AMBER)),
+            Span::styled("Delete  ", Style::default().fg(AMBER)),
             Span::styled("[n / Esc] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Cancel", Style::default().fg(MUTED)),
+        ],
+        InputMode::NewRule { .. } | InputMode::EditRule { .. } => vec![
+            Span::styled(" FORM: ", Style::default().fg(EMERALD).bold()),
+            Span::styled("[Tab] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Next Field  ", Style::default().fg(MUTED)),
+            Span::styled("[Enter] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Next / Submit  ", Style::default().fg(MUTED)),
+            Span::styled("[Esc] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Cancel", Style::default().fg(MUTED)),
+        ],
+        InputMode::NewSession { .. } => vec![
+            Span::styled(" NEW CHECKPOINT: ", Style::default().fg(EMERALD).bold()),
+            Span::styled("[Enter] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Save Checkpoint  ", Style::default().fg(MUTED)),
+            Span::styled("[Esc] ", Style::default().fg(ACCENT).bold()),
             Span::styled("Cancel", Style::default().fg(MUTED)),
         ],
     };
@@ -798,7 +1365,7 @@ fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(20), Constraint::Length(35)])
+        .constraints([Constraint::Min(20), Constraint::Length(38)])
         .split(area);
 
     let left_p = Paragraph::new(Line::from(left_spans));
@@ -836,7 +1403,7 @@ fn render_delete_modal(f: &mut ratatui::Frame, app: &App) {
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "  [y] Yes, permanently delete    [n/Esc] Cancel  ",
+            "  [y] Yes, delete rule    [n/Esc] Cancel  ",
             Style::default().fg(MUTED),
         )]),
     ];
@@ -845,6 +1412,190 @@ fn render_delete_modal(f: &mut ratatui::Frame, app: &App) {
         .block(block)
         .alignment(Alignment::Center);
     f.render_widget(p, area);
+}
+
+fn render_new_rule_modal(f: &mut ratatui::Frame, field: usize, key: &str, val: &str, anchor: &str) {
+    let area = centered_rect(65, 13, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" New Memory Rule ")
+        .title_style(Style::default().fg(EMERALD).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(EMERALD));
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Key
+            Constraint::Length(3), // Value
+            Constraint::Length(3), // Anchor
+            Constraint::Length(1), // Hint
+        ])
+        .margin(1)
+        .split(area);
+
+    f.render_widget(block, area);
+
+    // Field 0: Key
+    let key_style = if field == 0 {
+        Style::default().fg(EMERALD).bold()
+    } else {
+        Style::default().fg(SUBTLE)
+    };
+    let key_box = Paragraph::new(key).block(
+        Block::default()
+            .title(" Rule Key (e.g. arch/auth) ")
+            .title_style(Style::default().fg(if field == 0 { ACCENT } else { MUTED }))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(key_style),
+    );
+    f.render_widget(key_box, inner[0]);
+
+    // Field 1: Value
+    let val_style = if field == 1 {
+        Style::default().fg(EMERALD).bold()
+    } else {
+        Style::default().fg(SUBTLE)
+    };
+    let val_box = Paragraph::new(val).block(
+        Block::default()
+            .title(" Rule Content ")
+            .title_style(Style::default().fg(if field == 1 { ACCENT } else { MUTED }))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(val_style),
+    );
+    f.render_widget(val_box, inner[1]);
+
+    // Field 2: Anchor
+    let anchor_style = if field == 2 {
+        Style::default().fg(EMERALD).bold()
+    } else {
+        Style::default().fg(SUBTLE)
+    };
+    let anchor_box = Paragraph::new(anchor).block(
+        Block::default()
+            .title(" Source Anchor (optional, e.g. src/auth.ts:12) ")
+            .title_style(Style::default().fg(if field == 2 { ACCENT } else { MUTED }))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(anchor_style),
+    );
+    f.render_widget(anchor_box, inner[2]);
+
+    let hint = Paragraph::new("[Tab] Switch Field  ·  [Enter] Next / Submit  ·  [Esc] Cancel")
+        .style(Style::default().fg(MUTED))
+        .alignment(Alignment::Center);
+    f.render_widget(hint, inner[3]);
+}
+
+fn render_edit_rule_modal(
+    f: &mut ratatui::Frame,
+    field: usize,
+    key: &str,
+    val: &str,
+    anchor: &str,
+) {
+    let area = centered_rect(65, 11, f.area());
+    f.render_widget(Clear, area);
+
+    let title_str = format!(" Edit Rule: {} ", key);
+    let block = Block::default()
+        .title(title_str)
+        .title_style(Style::default().fg(EMERALD).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(EMERALD));
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Value
+            Constraint::Length(3), // Anchor
+            Constraint::Length(1), // Hint
+        ])
+        .margin(1)
+        .split(area);
+
+    f.render_widget(block, area);
+
+    // Field 0: Value
+    let val_style = if field == 0 {
+        Style::default().fg(EMERALD).bold()
+    } else {
+        Style::default().fg(SUBTLE)
+    };
+    let val_box = Paragraph::new(val).block(
+        Block::default()
+            .title(" Rule Content ")
+            .title_style(Style::default().fg(if field == 0 { ACCENT } else { MUTED }))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(val_style),
+    );
+    f.render_widget(val_box, inner[0]);
+
+    // Field 1: Anchor
+    let anchor_style = if field == 1 {
+        Style::default().fg(EMERALD).bold()
+    } else {
+        Style::default().fg(SUBTLE)
+    };
+    let anchor_box = Paragraph::new(anchor).block(
+        Block::default()
+            .title(" Source Anchor (optional, e.g. src/auth.ts:12) ")
+            .title_style(Style::default().fg(if field == 1 { ACCENT } else { MUTED }))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(anchor_style),
+    );
+    f.render_widget(anchor_box, inner[1]);
+
+    let hint = Paragraph::new("[Tab] Switch Field  ·  [Enter] Save Changes  ·  [Esc] Cancel")
+        .style(Style::default().fg(MUTED))
+        .alignment(Alignment::Center);
+    f.render_widget(hint, inner[2]);
+}
+
+fn render_new_session_modal(f: &mut ratatui::Frame, summary: &str) {
+    let area = centered_rect(65, 8, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Record Session Checkpoint ")
+        .title_style(Style::default().fg(EMERALD).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(EMERALD));
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Summary input
+            Constraint::Length(1), // Hint
+        ])
+        .margin(1)
+        .split(area);
+
+    f.render_widget(block, area);
+
+    let summary_box = Paragraph::new(summary).block(
+        Block::default()
+            .title(" Checkpoint Summary (e.g. feat(auth): implemented JWT verification) ")
+            .title_style(Style::default().fg(ACCENT))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(EMERALD).bold()),
+    );
+    f.render_widget(summary_box, inner[0]);
+
+    let hint = Paragraph::new("[Enter] Record Checkpoint  ·  [Esc] Cancel")
+        .style(Style::default().fg(MUTED))
+        .alignment(Alignment::Center);
+    f.render_widget(hint, inner[1]);
 }
 
 fn centered_rect(percent_x: u16, height_lines: u16, r: Rect) -> Rect {

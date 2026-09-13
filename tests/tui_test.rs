@@ -38,9 +38,12 @@ fn test_tui_app_state_and_navigation() {
     assert_eq!(app.active_tab, ActiveTab::Rules);
     assert_eq!(app.input_mode, InputMode::Normal);
 
-    // Tab switching
+    // Tab switching (Rules -> Sessions -> Doctor -> Help -> Rules)
     app.handle_key(key(KeyCode::Tab)).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Sessions);
+
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    assert_eq!(app.active_tab, ActiveTab::Doctor);
 
     app.handle_key(key(KeyCode::Tab)).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Help);
@@ -51,6 +54,8 @@ fn test_tui_app_state_and_navigation() {
     // Direct jump
     app.handle_key(key(KeyCode::Char('2'))).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Sessions);
+    app.handle_key(key(KeyCode::Char('3'))).unwrap();
+    assert_eq!(app.active_tab, ActiveTab::Doctor);
     app.handle_key(key(KeyCode::Char('1'))).unwrap();
     assert_eq!(app.active_tab, ActiveTab::Rules);
 
@@ -78,8 +83,12 @@ fn test_tui_filtering_and_search() {
 
     {
         let mut store = Store::open(&db_path, true).unwrap();
-        store.set("frontend/react", "Use functional components").unwrap();
-        store.set("backend/rust", "Axum router and tower middleware").unwrap();
+        store
+            .set("frontend/react", "Use functional components")
+            .unwrap();
+        store
+            .set("backend/rust", "Axum router and tower middleware")
+            .unwrap();
         store.set("db/sqlite", "SQLite WAL mode clustered").unwrap();
     }
 
@@ -155,6 +164,104 @@ fn test_tui_archive_and_delete_actions() {
     app.handle_key(key(KeyCode::Char('y'))).unwrap();
     assert_eq!(app.input_mode, InputMode::Normal);
     assert_eq!(app.rules.len(), 1); // 1 rule remaining!
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_tui_new_rule_and_edit_modals() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_tui_form_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let _db_path = temp_dir.join(".agent-mem").join("mem.db");
+
+    let mut app = App::new(temp_dir.clone()).unwrap();
+    assert_eq!(app.rules.len(), 0);
+
+    // 1. Press 'n' to open New Rule modal
+    app.handle_key(key(KeyCode::Char('n'))).unwrap();
+    assert!(matches!(app.input_mode, InputMode::NewRule { .. }));
+
+    // Type Key: "sec/ssl"
+    for c in "sec/ssl".chars() {
+        app.handle_key(key(KeyCode::Char(c))).unwrap();
+    }
+    // Switch to Value field with Tab
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    // Type Value: "Enforce TLS 1.3"
+    for c in "Enforce TLS 1.3".chars() {
+        app.handle_key(key(KeyCode::Char(c))).unwrap();
+    }
+    // Switch to Anchor field with Tab
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    // Type Anchor: "src/net.rs:10"
+    for c in "src/net.rs:10".chars() {
+        app.handle_key(key(KeyCode::Char(c))).unwrap();
+    }
+    // Submit with Enter
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert_eq!(app.rules.len(), 1);
+    assert_eq!(app.rules[0].key, "sec/ssl");
+    assert_eq!(app.rules[0].val, "Enforce TLS 1.3");
+    assert_eq!(app.rules[0].anchor.as_deref(), Some("src/net.rs:10"));
+
+    // 2. Press 'e' to Edit the selected rule
+    app.handle_key(key(KeyCode::Char('e'))).unwrap();
+    assert!(matches!(app.input_mode, InputMode::EditRule { .. }));
+
+    // In EditRule, field 0 is Value. Append " strictly"
+    for c in " strictly".chars() {
+        app.handle_key(key(KeyCode::Char(c))).unwrap();
+    }
+    // Tab to Anchor
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    // Enter to save
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert_eq!(app.rules.len(), 1);
+    assert_eq!(app.rules[0].val, "Enforce TLS 1.3 strictly");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_tui_new_session_modal_and_git_sync() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_tui_session_sync_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let _db_path = temp_dir.join(".agent-mem").join("mem.db");
+
+    let mut app = App::new(temp_dir.clone()).unwrap();
+    assert_eq!(app.sessions.len(), 0);
+
+    // 1. Press 'c' to open New Session modal
+    app.handle_key(key(KeyCode::Char('c'))).unwrap();
+    assert!(matches!(app.input_mode, InputMode::NewSession { .. }));
+
+    // Type summary: "feat(auth): initial commit"
+    for c in "feat(auth): initial commit".chars() {
+        app.handle_key(key(KeyCode::Char(c))).unwrap();
+    }
+    // Submit with Enter
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.sessions[0].1, "feat(auth): initial commit");
+
+    // 2. Trigger Git Sync with 'S'
+    app.handle_key(key(KeyCode::Char('S'))).unwrap();
+    assert!(app.toast.is_some());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
