@@ -1,4 +1,4 @@
-use agent_mem::mcp::{JsonRpcRequest, McpServer};
+use agent_mem::mcp::{JsonRpcRequest, MODERN_PROTOCOL_VERSION, McpServer};
 use serde_json::json;
 use std::fs;
 
@@ -36,6 +36,30 @@ fn test_mcp_schema_token_budget_ratchet() {
         char_count < 1050,
         "MCP schema footprint regressed! Current: {} chars (limit: 1050 chars / ~160 tokens)",
         char_count
+    );
+
+    let modern_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/list".into(),
+        params: json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }),
+    };
+    let modern_resp = server.handle_request(&modern_req).expect("modern response");
+    let modern_chars = serde_json::to_string(&modern_resp.result)
+        .expect("serialize modern response")
+        .len();
+    println!(
+        "Modern MCP tools/list: {modern_chars} chars (+{} over legacy)",
+        modern_chars - char_count
+    );
+    assert!(
+        modern_chars <= char_count + 80,
+        "Modern MCP metadata overhead regressed: legacy={char_count}, modern={modern_chars}"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
