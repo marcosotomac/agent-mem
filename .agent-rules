@@ -2,7 +2,6 @@
 # Track this file in git to share rules across your team without SQLite binary conflicts.
 
 architecture/anchor-garbage-collection = Auto-Poda de Reglas Zombis (clean and post-commit hook): inspects anchor paths against filesystem and git deleted files, auto-archiving stale memories with [file_deleted: <paths>] without leaving working trees dirty or breaking multi-branch isolation
-architecture/auth = JWT RS256 with key rotation (@ src/auth/jwt.rs:42)
 architecture/canonical-project-registry = Canonical project registry in ~/.config/agent-mem/projects.json resolves symlinks/case-folding and anchors by git remote URL, eliminating duplication while keeping zero overhead on reads. (@ src/registry.rs:1)
 architecture/clustered-knowledge-hypergraph = Clustered Knowledge Hypergraph (PRAGMA user_version=3) supporting 4 entity kinds (rule, decision, gotcha, pattern), typed relations (relates_to, mitigates, depends_on, supersedes), code anchor filtering with 1-hop expansion cutting token overhead by >95%, and plain-text Team Git Sync. (@ src/store.rs:162)
 [decision] architecture/zero-friction-init = Single-command init with auto-configured AI editor MCP clients and robust git worktree/submodule commondir hook resolution (@ src/init.rs:60)
@@ -14,3 +13,6 @@ release/v1.1.0 = Release v1.1.0 published: benchmark suite (cargo bench), AI cli
 # Relations
 [rel] architecture/zero-friction-init -> relates_to -> architecture/canonical-project-registry
 [rel] benchmark/competitive-suite -> relates_to -> architecture/zero-friction-init
+
+# Archived Rules
+[archived] architecture/auth = JWT RS256 with key rotation (@ src/auth/jwt.rs:42) --reason: file_deleted: src/auth/jwt.rs
