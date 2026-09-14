@@ -47,6 +47,8 @@ pub enum Command {
         anchor: Option<String>,
         topic: Option<String>,
         limit: usize,
+        diff: bool,
+        files: Vec<String>,
     },
     SessionAdd {
         summary: String,
@@ -242,6 +244,8 @@ where
             let mut anchor = None;
             let mut topic = None;
             let mut limit = 20;
+            let mut diff = false;
+            let mut files = Vec::new();
             let mut i = 2;
             while i < args.len() {
                 if (args[i] == "--anchor" || args[i] == "-a") && i + 1 < args.len() {
@@ -257,6 +261,25 @@ where
                         limit = num;
                     }
                     i += 2;
+                } else if args[i] == "--diff" || args[i] == "-d" {
+                    diff = true;
+                    i += 1;
+                } else if (args[i] == "--files" || args[i] == "-f") && i + 1 < args.len() {
+                    for f in args[i + 1].split(',') {
+                        let trimmed = f.trim();
+                        if !trimmed.is_empty() {
+                            files.push(trimmed.to_string());
+                        }
+                    }
+                    i += 2;
+                } else if !args[i].starts_with('-') && files.is_empty() {
+                    for f in args[i].split(',') {
+                        let trimmed = f.trim();
+                        if !trimmed.is_empty() {
+                            files.push(trimmed.to_string());
+                        }
+                    }
+                    i += 1;
                 } else {
                     i += 1;
                 }
@@ -265,6 +288,8 @@ where
                 anchor,
                 topic,
                 limit,
+                diff,
+                files,
             })
         }
         "sync" => {
@@ -528,9 +553,23 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     anchor,
                     topic,
                     limit,
+                    diff,
+                    mut files,
                 } => {
-                    let (rules, rels, sessions) =
-                        store.context_filtered(anchor.as_deref(), topic.as_deref(), limit)?;
+                    if diff {
+                        let diff_files = crate::hook::get_diff_files(root);
+                        for df in diff_files {
+                            if !files.contains(&df) {
+                                files.push(df);
+                            }
+                        }
+                    }
+
+                    let (rules, rels, sessions) = if !files.is_empty() {
+                        store.context_for_files(&files, topic.as_deref(), limit)?
+                    } else {
+                        store.context_filtered(anchor.as_deref(), topic.as_deref(), limit)?
+                    };
                     print_context_filtered(&rules, &rels, &sessions);
                 }
                 Command::Sync { file, export } => {

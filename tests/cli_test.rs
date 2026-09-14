@@ -157,6 +157,8 @@ fn test_parse_args() {
             anchor: None,
             topic: None,
             limit: 20,
+            diff: false,
+            files: Vec::new(),
         }
     );
 
@@ -177,6 +179,27 @@ fn test_parse_args() {
             anchor: Some("src/auth.rs".into()),
             topic: Some("auth/".into()),
             limit: 5,
+            diff: false,
+            files: Vec::new(),
+        }
+    );
+
+    // Context with diff and files
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "context".into(),
+            "--diff".into(),
+            "--files".into(),
+            "src/main.rs,src/lib.rs".into(),
+        ])
+        .unwrap(),
+        Command::Context {
+            anchor: None,
+            topic: None,
+            limit: 20,
+            diff: true,
+            files: vec!["src/main.rs".into(), "src/lib.rs".into()],
         }
     );
 
