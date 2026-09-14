@@ -1,4 +1,7 @@
-use agent_mem::installer::{ALL_CLIENTS, TargetClient, install_to_path, strip_json_comments};
+use agent_mem::installer::{
+    ALL_CLIENTS, TargetClient, install_detected_clients_with_home, install_to_path,
+    strip_json_comments,
+};
 use serde_json::{Value, json};
 use std::fs;
 
@@ -374,6 +377,35 @@ fn test_installer_continue_format() {
     let res2 =
         install_to_path(&config_path, TargetClient::Continue).expect("re-install should succeed");
     assert!(res2.already_configured);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_install_detected_clients_with_mock_home() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_detected_clients_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let mock_home = temp_dir.join("home");
+    fs::create_dir_all(mock_home.join(".cursor")).unwrap();
+
+    let results = install_detected_clients_with_home(&mock_home)
+        .expect("auto detection with mock home should succeed");
+
+    assert!(!results.is_empty());
+    let has_cursor = results.iter().any(|c| c.client == TargetClient::Cursor);
+    assert!(has_cursor);
+
+    let cursor_config = mock_home.join(".cursor").join("mcp.json");
+    assert!(cursor_config.exists());
+    let content = fs::read_to_string(&cursor_config).unwrap();
+    assert!(content.contains("agent-mem"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

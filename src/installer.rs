@@ -750,9 +750,13 @@ pub fn install_detected_clients() -> Result<Vec<InstallResult>> {
         .map(PathBuf::from)
         .map_err(|_| Error::Usage("Could not determine user HOME directory".to_string()))?;
 
+    install_detected_clients_with_home(&home)
+}
+
+pub fn install_detected_clients_with_home(home: &Path) -> Result<Vec<InstallResult>> {
     let mut results = Vec::new();
     for &client in ALL_CLIENTS {
-        let status = check_client_status_with_home(client, &home);
+        let status = check_client_status_with_home(client, home);
         if (status.installed || status.configured)
             && let Some(config_path) = status.path
             && let Ok(res) = install_to_path(&config_path, client)
