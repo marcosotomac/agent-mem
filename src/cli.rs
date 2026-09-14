@@ -66,6 +66,9 @@ pub enum Command {
     Projects {
         prune: bool,
     },
+    Clean {
+        dry_run: bool,
+    },
     HookPostCommit {
         dry_run: bool,
     },
@@ -84,6 +87,7 @@ impl Command {
                 | Command::Del { .. }
                 | Command::Archive { .. }
                 | Command::Unarchive { .. }
+                | Command::Clean { dry_run: false }
                 | Command::SessionAdd { .. }
                 | Command::Sync { export: false, .. }
                 | Command::HookPostCommit { dry_run: false }
@@ -206,6 +210,10 @@ where
             })
         }
         "dump" | "list" | "ls" => Ok(Command::Dump),
+        "clean" => {
+            let dry_run = args.iter().skip(2).any(|a| a == "--dry-run" || a == "-n");
+            Ok(Command::Clean { dry_run })
+        }
         "find" | "search" => {
             if args.len() < 3 {
                 return Err(Error::Usage("Usage: agent-mem find <query>".to_string()));
@@ -536,6 +544,16 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 Command::Dump => {
                     let entries = store.dump()?;
                     print_dump(&entries);
+                }
+                Command::Clean { dry_run } => {
+                    let report = store.clean_zombies(root, dry_run)?;
+                    if !dry_run && !report.is_empty() {
+                        let rules_file = root.join(".agent-rules");
+                        if rules_file.exists() {
+                            let _ = store.export_to_file(&rules_file);
+                        }
+                    }
+                    print_clean(&report, dry_run);
                 }
                 Command::Find { query } => {
                     let entries = store.find(&query)?;

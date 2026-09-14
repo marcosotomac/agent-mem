@@ -44,6 +44,32 @@ pub struct ParsedRules {
     pub relations: Vec<(String, String, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZombieReport {
+    pub key: String,
+    pub missing_paths: Vec<String>,
+    pub archived: bool,
+}
+
+/// Extract file paths from an anchor string (e.g. "@ src/auth/jwt.rs:42, src/models/user.rs:10").
+pub fn extract_anchor_paths(raw: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let cleaned = raw.trim().trim_start_matches('@').trim();
+    for part in cleaned.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let file_part = trimmed.split(':').next().unwrap_or("").trim();
+        let normalized = file_part.replace('\\', "/");
+        let without_prefix = normalized.trim_start_matches("./");
+        if !without_prefix.is_empty() && !paths.iter().any(|p| p == without_prefix) {
+            paths.push(without_prefix.to_string());
+        }
+    }
+    paths
+}
+
 pub fn infer_kind(key: &str) -> &'static str {
     let lower = key.to_lowercase();
     if lower.starts_with("decision/")
@@ -466,6 +492,138 @@ impl Store {
 
         tx.commit()?;
         Ok(changes > 0)
+    }
+
+    /// Dump active (non-archived) memories ordered by key.
+    pub fn dump_active(&self) -> Result<Vec<RuleRecord>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key, val, anchor, archived_at, archive_reason, kind
+             FROM memories
+             WHERE archived_at IS NULL
+             ORDER BY key ASC;",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut list = Vec::new();
+        while let Some(row) = rows.next()? {
+            list.push(RuleRecord {
+                key: row.get(0)?,
+                val: row.get(1)?,
+                anchor: row.get(2)?,
+                archived_at: row.get(3)?,
+                archive_reason: row.get(4)?,
+                kind: row.get(5)?,
+            });
+        }
+        Ok(list)
+    }
+
+    fn archive_zombies_tx(&mut self, zombies: &[ZombieReport]) -> Result<()> {
+        if zombies.is_empty() {
+            return Ok(());
+        }
+        let now = now_epoch();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        for z in zombies {
+            let reason = format!("file_deleted: {}", z.missing_paths.join(", "));
+            tx.execute(
+                "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?3 WHERE key = ?4;",
+                params![now, reason, now, z.key],
+            )?;
+            let _ = tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![z.key]);
+            tx.execute(
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) 
+                 SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
+                params![z.key],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Inspect all active anchored memories against project filesystem.
+    /// If an anchored file no longer exists, archives the memory with reason `file_deleted: <paths>`.
+    /// If dry_run is true, returns which memories would be archived without mutating the database.
+    pub fn clean_zombies(
+        &mut self,
+        project_root: &Path,
+        dry_run: bool,
+    ) -> Result<Vec<ZombieReport>> {
+        let active = self.dump_active()?;
+        let mut zombies = Vec::new();
+
+        for m in active {
+            if let Some(anchor_raw) = m.anchor {
+                let paths = extract_anchor_paths(&anchor_raw);
+                if paths.is_empty() {
+                    continue;
+                }
+
+                let missing: Vec<String> = paths
+                    .into_iter()
+                    .filter(|p| !project_root.join(p).exists())
+                    .collect();
+
+                if !missing.is_empty() {
+                    zombies.push(ZombieReport {
+                        key: m.key.clone(),
+                        missing_paths: missing,
+                        archived: !dry_run,
+                    });
+                }
+            }
+        }
+
+        if !dry_run {
+            self.archive_zombies_tx(&zombies)?;
+        }
+
+        Ok(zombies)
+    }
+
+    /// Prune active memories whose anchors reference any of the specified deleted files.
+    pub fn clean_deleted_files(
+        &mut self,
+        deleted_files: &[String],
+        dry_run: bool,
+    ) -> Result<Vec<ZombieReport>> {
+        if deleted_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let active = self.dump_active()?;
+        let mut zombies = Vec::new();
+
+        for m in active {
+            if let Some(anchor_raw) = m.anchor {
+                let paths = extract_anchor_paths(&anchor_raw);
+                if paths.is_empty() {
+                    continue;
+                }
+
+                let missing: Vec<String> = paths
+                    .into_iter()
+                    .filter(|p| deleted_files.iter().any(|d| d == p))
+                    .collect();
+
+                if !missing.is_empty() {
+                    zombies.push(ZombieReport {
+                        key: m.key.clone(),
+                        missing_paths: missing,
+                        archived: !dry_run,
+                    });
+                }
+            }
+        }
+
+        if !dry_run {
+            self.archive_zombies_tx(&zombies)?;
+        }
+
+        Ok(zombies)
     }
 
     /// Retrieve a memory rule record with anchor, archival metadata, and entity kind.
