@@ -38,6 +38,7 @@ pub struct GitCommitInfo {
     pub subject: String,
     pub body: String,
     pub modified_files: Vec<String>,
+    pub deleted_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +84,7 @@ pub struct HookReport {
     pub session_id: Option<i64>,
     pub rules_synced: bool,
     pub dry_run: bool,
+    pub zombies: Vec<crate::store::ZombieReport>,
 }
 
 /// Filter out agent-mem internal files, git metadata, and lockfiles from source anchors.
@@ -448,11 +450,37 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
         _ => Vec::new(),
     };
 
+    let deleted_output = Command::new("git")
+        .args([
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "--diff-filter=D",
+            "-r",
+            "HEAD",
+        ])
+        .current_dir(root)
+        .output();
+
+    let deleted_files = match deleted_output {
+        Ok(out) if out.status.success() => {
+            let diff_str = String::from_utf8_lossy(&out.stdout);
+            diff_str
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     Ok(Some(GitCommitInfo {
         hash,
         subject,
         body,
         modified_files,
+        deleted_files,
     }))
 }
 
@@ -490,6 +518,14 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     };
 
     if dry_run {
+        let db_path = root.join(".agent-mem").join("mem.db");
+        let zombies = if db_path.exists() && !commit_info.deleted_files.is_empty() {
+            let mut store = Store::open(&db_path, false)?;
+            store.clean_deleted_files(&commit_info.deleted_files, true)?
+        } else {
+            Vec::new()
+        };
+
         return Ok(Some(HookReport {
             commit_hash: commit_info.hash,
             commit_subject: commit_info.subject,
@@ -498,6 +534,7 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
             session_id: None,
             rules_synced: false,
             dry_run: true,
+            zombies,
         }));
     }
 
@@ -520,14 +557,22 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
 
     let session_id = store.capture_commit(entity_tuple, &rel_tuples, &commit_info.subject)?;
 
+    let zombies = if !commit_info.deleted_files.is_empty() {
+        store.clean_deleted_files(&commit_info.deleted_files, false)?
+    } else {
+        Vec::new()
+    };
+    let zombies_cleaned = !zombies.is_empty();
+
     let rules_file = root.join(".agent-rules");
-    let rules_synced =
-        if rules_file.exists() && (entity_captured.is_some() || !relations.is_empty()) {
-            let _ = store.export_to_file(&rules_file);
-            true
-        } else {
-            false
-        };
+    let rules_synced = if rules_file.exists()
+        && (entity_captured.is_some() || !relations.is_empty() || zombies_cleaned)
+    {
+        let _ = store.export_to_file(&rules_file);
+        true
+    } else {
+        false
+    };
 
     Ok(Some(HookReport {
         commit_hash: commit_info.hash,
@@ -537,6 +582,7 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
         session_id,
         rules_synced,
         dry_run: false,
+        zombies,
     }))
 }
 

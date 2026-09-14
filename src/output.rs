@@ -582,13 +582,16 @@ pub fn print_help() {
             "    {ACCENT}hook{RESET}     {MUTED}post-commit [--dry-run]{RESET} Ephemeral git lifecycle auto-capture"
         );
         println!(
+            "    {ACCENT}clean{RESET}    {MUTED}[--dry-run]{RESET}              Prune zombie rules whose anchor files were deleted"
+        );
+        println!(
             "    {ACCENT}projects{RESET} {MUTED}[prune]{RESET}        List canonical project registry & anti-collision status"
         );
         println!("    {ACCENT}tui{RESET}                     Launch interactive terminal explorer");
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, find, dump, context, session add, session list, hook post-commit, sync, mcp, mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, clean, find, dump, context, session add, session list, hook post-commit, sync, mcp, mcp install, doctor, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }
@@ -888,6 +891,74 @@ pub fn print_hook_report(report: &crate::hook::HookReport) {
             );
         } else {
             println!("linked {} -> {} -> {}", s, r, t);
+        }
+    }
+
+    for z in &report.zombies {
+        let prefix = if report.dry_run { "[dry-run] " } else { "" };
+        let action = if report.dry_run {
+            "would archive"
+        } else {
+            "archived"
+        };
+        if is_tty {
+            println!(
+                "  {AMBER}!{RESET}  {MUTED}{}clean: {} zombie rule {ACCENT}{}{RESET} {MUTED}(missing: {}){RESET}",
+                prefix,
+                action,
+                z.key,
+                z.missing_paths.join(", ")
+            );
+        } else {
+            println!(
+                "{}clean: {} zombie rule {} (missing: {})",
+                prefix,
+                action,
+                z.key,
+                z.missing_paths.join(", ")
+            );
+        }
+    }
+}
+
+pub fn print_clean(report: &[crate::store::ZombieReport], dry_run: bool) {
+    let is_tty = io::stdout().is_terminal();
+
+    if report.is_empty() {
+        if is_tty {
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}clean: 0 zombie rules found (all anchor files exist){RESET}"
+            );
+        } else {
+            println!("clean: 0 zombie rules found (all anchor files exist)");
+        }
+    } else {
+        let prefix = if dry_run { "[dry-run] " } else { "" };
+        let action = if dry_run { "would archive" } else { "archived" };
+        if is_tty {
+            println!(
+                "  {AMBER}!{RESET}  {MUTED}{}clean: {} {} zombie rule(s){RESET}",
+                prefix,
+                action,
+                report.len()
+            );
+            for z in report {
+                println!(
+                    "    {SUBTLE}·{RESET}  {ACCENT}{}{RESET}  {MUTED}missing: {}{RESET}",
+                    z.key,
+                    z.missing_paths.join(", ")
+                );
+            }
+        } else {
+            println!(
+                "{}clean: {} {} zombie rule(s)",
+                prefix,
+                action,
+                report.len()
+            );
+            for z in report {
+                println!("  [{}] missing: {}", z.key, z.missing_paths.join(", "));
+            }
         }
     }
 }
