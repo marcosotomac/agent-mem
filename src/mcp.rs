@@ -266,6 +266,24 @@ impl McpServer {
                             "scope": { "type": "string", "enum": ["all", "project", "global"] }
                         }
                     }
+                },
+                {
+                    "name": "mem_manage",
+                    "description": "Archive, unarchive, delete, or link memories.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["archive", "unarchive", "delete", "relate", "unrelate"]
+                            },
+                            "key": { "type": "string" },
+                            "reason": { "type": "string" },
+                            "rel": { "type": "string", "description": "rel_type:target" },
+                            "scope": { "type": "string", "enum": ["project", "global"] }
+                        },
+                        "required": ["action", "key"]
+                    }
                 }
             ]
         });
@@ -600,6 +618,122 @@ impl McpServer {
                 } else {
                     Ok(lines.join("\n"))
                 }
+            }
+
+            "mem_manage" => {
+                let action = args.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
+                    crate::error::Error::Usage("Missing required argument 'action'".into())
+                })?;
+                let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+                    crate::error::Error::Usage("Missing required argument 'key'".into())
+                })?;
+                let scope = args
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("project");
+
+                let mut store = self.open_store(scope, true)?;
+
+                let msg = match action {
+                    "archive" => {
+                        let reason = args.get("reason").and_then(|v| v.as_str());
+                        let archived = store.archive(key, reason)?;
+                        if !archived {
+                            return Err(crate::error::Error::NotFound(key.to_string()));
+                        }
+                        if scope == "project" {
+                            let rules_file = self.project_root.join(".agent-rules");
+                            if rules_file.exists() {
+                                store.export_to_file(&rules_file)?;
+                            }
+                        }
+                        match reason {
+                            Some(r) => format!("archived [{}] {} (reason: {})", scope, key, r),
+                            None => format!("archived [{}] {}", scope, key),
+                        }
+                    }
+                    "unarchive" => {
+                        let unarchived = store.unarchive(key)?;
+                        if !unarchived {
+                            return Err(crate::error::Error::NotFound(key.to_string()));
+                        }
+                        if scope == "project" {
+                            let rules_file = self.project_root.join(".agent-rules");
+                            if rules_file.exists() {
+                                store.export_to_file(&rules_file)?;
+                            }
+                        }
+                        format!("unarchived [{}] {}", scope, key)
+                    }
+                    "delete" | "del" | "rm" => {
+                        let deleted = store.del(key)?;
+                        if !deleted {
+                            return Err(crate::error::Error::NotFound(key.to_string()));
+                        }
+                        if scope == "project" {
+                            let rules_file = self.project_root.join(".agent-rules");
+                            if rules_file.exists() {
+                                store.export_to_file(&rules_file)?;
+                            }
+                        }
+                        format!("deleted [{}] {}", scope, key)
+                    }
+                    "relate" | "link" => {
+                        let rel = args.get("rel").and_then(|v| v.as_str()).ok_or_else(|| {
+                            crate::error::Error::Usage(
+                                "Missing required argument 'rel' for relate action. Expected 'rel_type:target'".into(),
+                            )
+                        })?;
+                        let (rel_type, target) = rel.split_once(':').ok_or_else(|| {
+                            crate::error::Error::Usage(format!(
+                                "Invalid rel format '{}'. Expected 'rel_type:target' (e.g. 'supersedes:old_key')",
+                                rel
+                            ))
+                        })?;
+                        store.relate(key, rel_type, target)?;
+                        if scope == "project" {
+                            let rules_file = self.project_root.join(".agent-rules");
+                            if rules_file.exists() {
+                                store.export_to_file(&rules_file)?;
+                            }
+                        }
+                        format!("linked [{}] {} -> {} -> {}", scope, key, rel_type, target)
+                    }
+                    "unrelate" | "unlink" => {
+                        let rel = args.get("rel").and_then(|v| v.as_str()).ok_or_else(|| {
+                            crate::error::Error::Usage(
+                                "Missing required argument 'rel' for unrelate action. Expected 'rel_type:target'".into(),
+                            )
+                        })?;
+                        let (rel_type, target) = rel.split_once(':').ok_or_else(|| {
+                            crate::error::Error::Usage(format!(
+                                "Invalid rel format '{}'. Expected 'rel_type:target' (e.g. 'supersedes:old_key')",
+                                rel
+                            ))
+                        })?;
+                        let unlinked = store.unrelate(key, rel_type, target)?;
+                        if !unlinked {
+                            return Err(crate::error::Error::NotFound(format!(
+                                "relation {} -> {} -> {}",
+                                key, rel_type, target
+                            )));
+                        }
+                        if scope == "project" {
+                            let rules_file = self.project_root.join(".agent-rules");
+                            if rules_file.exists() {
+                                store.export_to_file(&rules_file)?;
+                            }
+                        }
+                        format!("unlinked [{}] {} -> {} -> {}", scope, key, rel_type, target)
+                    }
+                    unknown => {
+                        return Err(crate::error::Error::Usage(format!(
+                            "Unknown manage action '{}'. Supported actions: 'archive', 'unarchive', 'delete', 'relate', 'unrelate'",
+                            unknown
+                        )));
+                    }
+                };
+                Ok(msg)
             }
 
             unknown => Err(crate::error::Error::Usage(format!(
