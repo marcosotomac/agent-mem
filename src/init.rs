@@ -199,7 +199,7 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
 
     // 3. Configure git hooks idempotently (post-commit, post-merge, post-checkout, post-rewrite)
     if let Some(git_hooks_dir) = resolve_git_hooks_dir(root) {
-        let session_cmd = "agent-mem session add \"$(git log -1 --pretty=%s)\" 2>/dev/null || true";
+        let session_cmd = "agent-mem hook post-commit 2>/dev/null || true";
         let sync_cmd = "agent-mem sync 2>/dev/null || true";
 
         report.hook_configured = install_git_hook(&git_hooks_dir, "post-commit", session_cmd)?;
@@ -333,7 +333,8 @@ pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
             .unwrap_or(false)
     };
 
-    let post_commit_active = check_hook("post-commit", "agent-mem session add");
+    let post_commit_active = check_hook("post-commit", "agent-mem hook post-commit")
+        || check_hook("post-commit", "agent-mem session add");
     let post_merge_active = check_hook("post-merge", "agent-mem sync");
     let post_checkout_active = check_hook("post-checkout", "agent-mem sync");
     let post_rewrite_active = check_hook("post-rewrite", "agent-mem sync");

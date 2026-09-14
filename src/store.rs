@@ -718,6 +718,92 @@ impl Store {
         Ok(id)
     }
 
+    /// Atomically capture a git commit: optionally upsert an entity, relations, and append to sessions ring buffer in a single transaction.
+    pub fn capture_commit(
+        &mut self,
+        entity: Option<(&str, &str, Option<&str>, Option<&str>)>,
+        relations: &[(&str, &str, &str)],
+        session_summary: &str,
+    ) -> Result<Option<i64>> {
+        let now = now_epoch();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if let Some((key, val, anchor, kind)) = entity {
+            let trimmed_key = key.trim();
+            let trimmed_val = val.trim();
+            if trimmed_key.is_empty() {
+                return Err(crate::error::Error::Usage(
+                    "Memory key cannot be empty".into(),
+                ));
+            }
+            if trimmed_val.is_empty() {
+                return Err(crate::error::Error::Usage(
+                    "Memory value cannot be empty".into(),
+                ));
+            }
+            let trimmed_anchor = anchor.map(|a| a.trim()).filter(|a| !a.is_empty());
+            let effective_kind = kind
+                .map(|k| k.trim())
+                .filter(|k| !k.is_empty())
+                .unwrap_or_else(|| infer_kind(trimmed_key));
+
+            tx.execute(
+                "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind)
+                 VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
+                 ON CONFLICT(key) DO UPDATE SET
+                     val = excluded.val,
+                     updated_at = excluded.updated_at,
+                     anchor = excluded.anchor,
+                     archived_at = NULL,
+                     archive_reason = NULL,
+                     kind = excluded.kind;",
+                params![trimmed_key, trimmed_val, now, trimmed_anchor, effective_kind],
+            )?;
+
+            tx.execute(
+                "DELETE FROM memories_fts WHERE key = ?1;",
+                params![trimmed_key],
+            )?;
+
+            tx.execute(
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
+                params![trimmed_key, trimmed_val, trimmed_anchor, effective_kind],
+            )?;
+        }
+
+        for (source, rel_type, target) in relations {
+            let s = source.trim();
+            let r = rel_type.trim();
+            let t = target.trim();
+            if !s.is_empty() && !r.is_empty() && !t.is_empty() {
+                tx.execute(
+                    "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+                    params![s, r, t, now],
+                )?;
+            }
+        }
+
+        let mut session_id = None;
+        let trimmed_session = session_summary.trim();
+        if !trimmed_session.is_empty() {
+            tx.execute(
+                "INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);",
+                params![trimmed_session, now],
+            )?;
+            session_id = Some(tx.last_insert_rowid());
+            tx.execute(
+                "DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY id DESC LIMIT 20);",
+                [],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(session_id)
+    }
+
     /// List recent session checkpoints.
     pub fn session_list(&self, limit: usize) -> Result<Vec<SessionEntry>> {
         let mut stmt = self

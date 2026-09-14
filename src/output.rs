@@ -579,13 +579,16 @@ pub fn print_help() {
             "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
         );
         println!(
+            "    {ACCENT}hook{RESET}     {MUTED}post-commit [--dry-run]{RESET} Ephemeral git lifecycle auto-capture"
+        );
+        println!(
             "    {ACCENT}projects{RESET} {MUTED}[prune]{RESET}        List canonical project registry & anti-collision status"
         );
         println!("    {ACCENT}tui{RESET}                     Launch interactive terminal explorer");
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, find, dump, context, session add, session list, sync, mcp, mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, find, dump, context, session add, session list, hook post-commit, sync, mcp, mcp install, doctor, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }
@@ -828,6 +831,63 @@ pub fn print_projects(projects: &[crate::registry::ProjectRecord]) {
                 p.canonical_path,
                 p.git_remote.as_deref().unwrap_or("-")
             );
+        }
+    }
+}
+
+pub fn print_hook_report(report: &crate::hook::HookReport) {
+    let is_tty = io::stdout().is_terminal();
+
+    if report.dry_run {
+        if let Some(ent) = &report.entity_captured {
+            let anchor_str = ent
+                .anchor
+                .as_deref()
+                .map(|a| format!(" (@ {})", a))
+                .unwrap_or_default();
+            println!(
+                "[dry-run] [{}] {} = {}{}",
+                ent.kind, ent.key, ent.val, anchor_str
+            );
+        } else {
+            println!("[dry-run] (skipped hypergraph entity)");
+        }
+        for (s, r, t) in &report.relations {
+            println!("[dry-run] relation: {} -> {} -> {}", s, r, t);
+        }
+        println!("[dry-run] session: {}", report.commit_subject);
+        return;
+    }
+
+    if let Some(ent) = &report.entity_captured {
+        if is_tty {
+            let anchor_str = ent
+                .anchor
+                .as_deref()
+                .map(|a| format!("  {SUBTLE}·{RESET}  {MUTED}{}{RESET}", a))
+                .unwrap_or_default();
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}captured{RESET}  {MUTED}[{}]{RESET} {ACCENT}{}{RESET}{}",
+                ent.kind, ent.key, anchor_str
+            );
+        } else {
+            let anchor_str = ent
+                .anchor
+                .as_deref()
+                .map(|a| format!(" ({})", a))
+                .unwrap_or_default();
+            println!("captured [{}] {}{}", ent.kind, ent.key, anchor_str);
+        }
+    }
+
+    for (s, r, t) in &report.relations {
+        if is_tty {
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}linked{RESET}  {ACCENT}{}{RESET} {SUBTLE}-> {} ->{RESET} {ACCENT}{}{RESET}",
+                s, r, t
+            );
+        } else {
+            println!("linked {} -> {} -> {}", s, r, t);
         }
     }
 }

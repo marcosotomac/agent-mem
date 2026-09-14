@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod error;
+pub mod hook;
 pub mod init;
 pub mod installer;
 pub mod mcp;

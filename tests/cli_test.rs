@@ -541,7 +541,10 @@ fn test_init_git_worktree_hook_resolution_and_commondir() {
     let post_commit = main_hooks.join("post-commit");
     assert!(post_commit.exists());
     let hook_content = fs::read_to_string(&post_commit).unwrap();
-    assert!(hook_content.contains("agent-mem session add"));
+    assert!(
+        hook_content.contains("agent-mem hook post-commit")
+            || hook_content.contains("agent-mem session add")
+    );
 
     let post_rewrite = main_hooks.join("post-rewrite");
     assert!(post_rewrite.exists());

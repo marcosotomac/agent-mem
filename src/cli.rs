@@ -64,6 +64,9 @@ pub enum Command {
     Projects {
         prune: bool,
     },
+    HookPostCommit {
+        dry_run: bool,
+    },
     Tui,
     Help,
     Version,
@@ -81,6 +84,7 @@ impl Command {
                 | Command::Unarchive { .. }
                 | Command::SessionAdd { .. }
                 | Command::Sync { export: false, .. }
+                | Command::HookPostCommit { dry_run: false }
         )
     }
 }
@@ -297,6 +301,23 @@ where
                 .is_some_and(|s| s == "prune" || s == "--prune" || s == "-p");
             Ok(Command::Projects { prune })
         }
+        "hook" => {
+            if args.len() < 3 {
+                return Err(Error::Usage(
+                    "Usage: agent-mem hook post-commit [--dry-run]".to_string(),
+                ));
+            }
+            match args[2].as_str() {
+                "post-commit" => {
+                    let dry_run = args.iter().skip(3).any(|a| a == "--dry-run" || a == "-n");
+                    Ok(Command::HookPostCommit { dry_run })
+                }
+                other => Err(Error::Usage(format!(
+                    "Unknown hook subcommand '{}'. Usage: agent-mem hook post-commit [--dry-run]",
+                    other
+                ))),
+            }
+        }
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
         unknown => Err(Error::Usage(format!(
@@ -399,6 +420,12 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 println!("Pruned {} dead project(s)", pruned);
             } else {
                 crate::output::print_projects(&reg.projects);
+            }
+            Ok(())
+        }
+        Command::HookPostCommit { dry_run } => {
+            if let Some(report) = crate::hook::run_post_commit(root, dry_run)? {
+                crate::output::print_hook_report(&report);
             }
             Ok(())
         }
@@ -525,6 +552,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 | Command::Version
                 | Command::Doctor
                 | Command::Projects { .. }
+                | Command::HookPostCommit { .. }
                 | Command::Tui
                 | Command::Mcp
                 | Command::McpInstall { .. } => unreachable!(),
