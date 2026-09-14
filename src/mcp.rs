@@ -6,6 +6,26 @@ use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+pub const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
+pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+
+const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
+const CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
+const CACHE_TTL_MS: u64 = 86_400_000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProtocolEra {
+    Legacy,
+    Modern,
+}
+
+enum ProtocolError {
+    MissingMeta,
+    MissingProtocolVersion,
+    MissingClientCapabilities,
+    UnsupportedProtocolVersion(String),
+}
+
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -29,6 +49,8 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 pub struct McpServer {
@@ -64,91 +86,246 @@ impl McpServer {
     fn open_store(&self, scope: &str, need_write: bool) -> Result<Store> {
         match scope {
             "global" => Store::open(&self.global_path, need_write),
-            _ => Store::open(&self.project_db_path(), need_write),
+            "project" => Store::open(&self.project_db_path(), need_write),
+            other => Err(crate::error::Error::Usage(format!(
+                "Invalid scope '{}'. Supported scopes: 'project', 'global'",
+                other
+            ))),
         }
     }
 
+    fn open_read_store(&self, scope: &str) -> Result<Option<Store>> {
+        match self.open_store(scope, false) {
+            Ok(store) => Ok(Some(store)),
+            Err(crate::error::Error::NotInitialized) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[inline]
+    fn response(id: Value, result: Value) -> JsonRpcResponse {
+        JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    #[inline]
+    fn error(
+        id: Value,
+        code: i32,
+        message: impl Into<String>,
+        data: Option<Value>,
+    ) -> JsonRpcResponse {
+        JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data,
+            }),
+        }
+    }
+
+    #[inline]
+    fn server_info() -> Value {
+        json!({
+            "name": "agent-mem",
+            "version": env!("CARGO_PKG_VERSION")
+        })
+    }
+
+    #[inline]
+    fn supported_versions() -> Value {
+        json!([MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION])
+    }
+
+    #[cold]
+    fn protocol_error(id: Value, error: ProtocolError) -> JsonRpcResponse {
+        match error {
+            ProtocolError::MissingMeta => {
+                Self::error(id, -32602, "Missing required request _meta", None)
+            }
+            ProtocolError::MissingProtocolVersion => Self::error(
+                id,
+                -32602,
+                format!("Missing required _meta.{}", PROTOCOL_VERSION_META),
+                None,
+            ),
+            ProtocolError::MissingClientCapabilities => Self::error(
+                id,
+                -32602,
+                format!("Missing required _meta.{}", CLIENT_CAPABILITIES_META),
+                None,
+            ),
+            ProtocolError::UnsupportedProtocolVersion(requested) => Self::error(
+                id,
+                -32022,
+                "Unsupported protocol version",
+                Some(json!({
+                    "supported": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+                    "requested": requested
+                })),
+            ),
+        }
+    }
+
+    /// Detect modern requests without adding connection state. Legacy requests remain
+    /// byte-compatible; modern requests validate their mandatory per-request metadata.
+    #[inline]
+    fn protocol_era(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> std::result::Result<ProtocolEra, ProtocolError> {
+        if req.method == "initialize" {
+            return Ok(ProtocolEra::Legacy);
+        }
+
+        let meta = req.params.get("_meta");
+        let modern_candidate = req.method == "server/discover"
+            || meta.is_some_and(|m| {
+                m.as_object().is_none_or(|o| {
+                    o.contains_key(PROTOCOL_VERSION_META)
+                        || o.contains_key(CLIENT_CAPABILITIES_META)
+                })
+            });
+
+        if !modern_candidate {
+            return Ok(ProtocolEra::Legacy);
+        }
+
+        let Some(meta) = meta.and_then(Value::as_object) else {
+            return Err(ProtocolError::MissingMeta);
+        };
+        let Some(version) = meta.get(PROTOCOL_VERSION_META).and_then(Value::as_str) else {
+            return Err(ProtocolError::MissingProtocolVersion);
+        };
+
+        if version != MODERN_PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedProtocolVersion(
+                version.to_owned(),
+            ));
+        }
+
+        if !meta
+            .get(CLIENT_CAPABILITIES_META)
+            .is_some_and(Value::is_object)
+        {
+            return Err(ProtocolError::MissingClientCapabilities);
+        }
+
+        Ok(ProtocolEra::Modern)
+    }
+
+    fn tools_list_result(era: ProtocolEra) -> Value {
+        let mut result = json!({
+            "tools": [
+                {
+                    "name": "mem_set",
+                    "description": "Store rule, decision, or gotcha.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string" },
+                            "val": { "type": "string" },
+                            "anchor": { "type": "string", "description": "Code anchor" },
+                            "kind": { "type": "string", "description": "rule|decision|gotcha|pattern" },
+                            "rel": { "type": "string", "description": "rel_type:target" },
+                            "scope": { "type": "string", "enum": ["project", "global"] }
+                        },
+                        "required": ["key", "val"]
+                    }
+                },
+                {
+                    "name": "mem_find",
+                    "description": "Search memories by BM25 keyword.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" },
+                            "scope": { "type": "string", "enum": ["all", "project", "global"] }
+                        },
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "mem_context",
+                    "description": "Export dense memory context block.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "diff": { "type": "boolean" },
+                            "files": { "type": "string" },
+                            "anchor": { "type": "string" },
+                            "topic": { "type": "string" },
+                            "limit": { "type": "integer" },
+                            "scope": { "type": "string", "enum": ["all", "project", "global"] }
+                        }
+                    }
+                }
+            ]
+        });
+
+        if era == ProtocolEra::Modern {
+            let object = result.as_object_mut().expect("tools result is an object");
+            object.insert("resultType".into(), json!("complete"));
+            object.insert("ttlMs".into(), json!(CACHE_TTL_MS));
+            object.insert("cacheScope".into(), json!("public"));
+        }
+
+        result
+    }
+
     pub fn handle_request(&self, req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
-        let id = req.id.clone().unwrap_or(Value::Null);
+        // JSON-RPC notifications never receive a response per specification.
+        if req.id.as_ref().is_none_or(Value::is_null) || req.method.starts_with("notifications/") {
+            return None;
+        }
+
+        let id = req.id.clone()?;
+        let era = match self.protocol_era(req) {
+            Ok(era) => era,
+            Err(error) => return Some(Self::protocol_error(id, error)),
+        };
 
         match req.method.as_str() {
-            "initialize" => Some(JsonRpcResponse {
-                jsonrpc: "2.0",
+            "initialize" => Some(Self::response(
                 id,
-                result: Some(json!({
-                    "protocolVersion": "2024-11-05",
+                json!({
+                    "protocolVersion": LEGACY_PROTOCOL_VERSION,
                     "capabilities": {
                         "tools": {}
                     },
-                    "serverInfo": {
-                        "name": "agent-mem",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                })),
-                error: None,
-            }),
+                    "serverInfo": Self::server_info()
+                }),
+            )),
 
-            "notifications/initialized" => None,
-
-            "ping" => Some(JsonRpcResponse {
-                jsonrpc: "2.0",
+            "server/discover" => Some(Self::response(
                 id,
-                result: Some(json!({})),
-                error: None,
-            }),
+                json!({
+                    "resultType": "complete",
+                    "supportedVersions": Self::supported_versions(),
+                    "capabilities": { "tools": {} },
+                    "_meta": { "io.modelcontextprotocol/serverInfo": Self::server_info() },
+                    "ttlMs": CACHE_TTL_MS,
+                    "cacheScope": "public"
+                }),
+            )),
 
-            "tools/list" => Some(JsonRpcResponse {
-                jsonrpc: "2.0",
+            "ping" => Some(Self::response(
                 id,
-                result: Some(json!({
-                    "tools": [
-                        {
-                            "name": "mem_set",
-                            "description": "Store rule, decision, or gotcha.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "key": { "type": "string" },
-                                    "val": { "type": "string" },
-                                    "anchor": { "type": "string", "description": "Code anchor" },
-                                    "kind": { "type": "string", "description": "rule|decision|gotcha|pattern" },
-                                    "rel": { "type": "string", "description": "rel_type:target" },
-                                    "scope": { "type": "string", "enum": ["project", "global"] }
-                                },
-                                "required": ["key", "val"]
-                            }
-                        },
-                        {
-                            "name": "mem_find",
-                            "description": "Search memories by BM25 keyword.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "query": { "type": "string" },
-                                    "scope": { "type": "string", "enum": ["all", "project", "global"] }
-                                },
-                                "required": ["query"]
-                            }
-                        },
-                        {
-                            "name": "mem_context",
-                            "description": "Export dense memory context block.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "diff": { "type": "boolean" },
-                                    "files": { "type": "string" },
-                                    "anchor": { "type": "string" },
-                                    "topic": { "type": "string" },
-                                    "limit": { "type": "integer" },
-                                    "scope": { "type": "string", "enum": ["all", "project", "global"] }
-                                }
-                            }
-                        }
-                    ]
-                })),
-                error: None,
-            }),
+                if era == ProtocolEra::Modern {
+                    json!({ "resultType": "complete" })
+                } else {
+                    json!({})
+                },
+            )),
+
+            "tools/list" => Some(Self::response(id, Self::tools_list_result(era))),
 
             "tools/call" => {
                 let name = req
@@ -159,23 +336,22 @@ impl McpServer {
                 let args = req.params.get("arguments").cloned().unwrap_or(json!({}));
 
                 match self.dispatch_tool(name, &args) {
-                    Ok(text) => Some(JsonRpcResponse {
-                        jsonrpc: "2.0",
-                        id,
-                        result: Some(json!({
+                    Ok(text) => {
+                        let mut result = json!({
                             "content": [
                                 {
                                     "type": "text",
                                     "text": text
                                 }
                             ]
-                        })),
-                        error: None,
-                    }),
-                    Err(err) => Some(JsonRpcResponse {
-                        jsonrpc: "2.0",
-                        id,
-                        result: Some(json!({
+                        });
+                        if era == ProtocolEra::Modern {
+                            result["resultType"] = json!("complete");
+                        }
+                        Some(Self::response(id, result))
+                    }
+                    Err(err) => {
+                        let mut result = json!({
                             "content": [
                                 {
                                     "type": "text",
@@ -183,21 +359,21 @@ impl McpServer {
                                 }
                             ],
                             "isError": true
-                        })),
-                        error: None,
-                    }),
+                        });
+                        if era == ProtocolEra::Modern {
+                            result["resultType"] = json!("complete");
+                        }
+                        Some(Self::response(id, result))
+                    }
                 }
             }
 
-            _ => Some(JsonRpcResponse {
-                jsonrpc: "2.0",
+            _ => Some(Self::error(
                 id,
-                result: None,
-                error: Some(JsonRpcError {
-                    code: -32601,
-                    message: format!("Method '{}' not found", req.method),
-                }),
-            }),
+                -32601,
+                format!("Method '{}' not found", req.method),
+                None,
+            )),
         }
     }
 
@@ -220,16 +396,20 @@ impl McpServer {
 
                 let mut store = self.open_store(scope, true)?;
                 store.set_entry(key, val, anchor, kind)?;
-                if let Some(r) = rel
-                    && let Some((rel_type, target)) = r.split_once(':')
-                {
-                    let _ = store.relate(key, rel_type, target);
+                if let Some(r) = rel {
+                    if let Some((rel_type, target)) = r.split_once(':') {
+                        store.relate(key, rel_type, target)?;
+                    } else {
+                        return Err(crate::error::Error::Usage(format!(
+                            "Invalid rel format '{}'. Expected 'rel_type:target' (e.g. 'relates_to:target_key')",
+                            r
+                        )));
+                    }
                 }
                 if scope == "project" {
-                    let root = crate::init::find_project_root();
-                    let rules_file = root.join(".agent-rules");
+                    let rules_file = self.project_root.join(".agent-rules");
                     if rules_file.exists() {
-                        let _ = store.export_to_file(&rules_file);
+                        store.export_to_file(&rules_file)?;
                     }
                 }
                 let effective_kind = kind.unwrap_or_else(|| crate::store::infer_kind(key));
@@ -249,13 +429,19 @@ impl McpServer {
                     crate::error::Error::Usage("Missing required argument 'query'".into())
                 })?;
                 let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
+                if !matches!(scope, "all" | "project" | "global") {
+                    return Err(crate::error::Error::Usage(format!(
+                        "Invalid scope '{}'. Supported scopes: 'all', 'project', 'global'",
+                        scope
+                    )));
+                }
 
                 let mut lines = Vec::new();
 
                 if (scope == "all" || scope == "project")
-                    && let Ok(store) = self.open_store("project", false)
-                    && let Ok(results) = store.find(query)
+                    && let Some(store) = self.open_read_store("project")?
                 {
+                    let results = store.find(query)?;
                     for r in results {
                         let kind_tag = if r.kind != "rule" {
                             format!("[{}] ", r.kind)
@@ -284,9 +470,9 @@ impl McpServer {
                 }
 
                 if (scope == "all" || scope == "global")
-                    && let Ok(store) = self.open_store("global", false)
-                    && let Ok(results) = store.find(query)
+                    && let Some(store) = self.open_read_store("global")?
                 {
+                    let results = store.find(query)?;
                     for r in results {
                         let kind_tag = if r.kind != "rule" {
                             format!("[{}] ", r.kind)
@@ -324,6 +510,12 @@ impl McpServer {
             "mem_context" => {
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
+                if !matches!(scope, "all" | "project" | "global") {
+                    return Err(crate::error::Error::Usage(format!(
+                        "Invalid scope '{}'. Supported scopes: 'all', 'project', 'global'",
+                        scope
+                    )));
+                }
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
                 let topic = args.get("topic").and_then(|v| v.as_str());
                 let diff = args.get("diff").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -349,16 +541,12 @@ impl McpServer {
                 let mut lines = Vec::new();
 
                 if (scope == "all" || scope == "project")
-                    && let Ok(store) = self.open_store("project", false)
+                    && let Some(store) = self.open_read_store("project")?
                 {
                     let (rules, rels, sessions) = if !files.is_empty() {
-                        store
-                            .context_for_files(&files, topic, limit)
-                            .unwrap_or_default()
+                        store.context_for_files(&files, topic, limit)?
                     } else {
-                        store
-                            .context_filtered(anchor, topic, limit)
-                            .unwrap_or_default()
+                        store.context_filtered(anchor, topic, limit)?
                     };
                     if !rules.is_empty() {
                         lines.push("== PROJECT RULES ==".to_string());
@@ -393,15 +581,16 @@ impl McpServer {
                 }
 
                 if (scope == "all" || scope == "global")
-                    && let Ok(store) = self.open_store("global", false)
-                    && let Ok(rules) = store.dump()
-                    && !rules.is_empty()
+                    && let Some(store) = self.open_read_store("global")?
                 {
-                    lines.push("== GLOBAL PREFERENCES ==".to_string());
-                    for (k, v, a) in rules.into_iter().take(limit) {
-                        match a {
-                            Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
-                            None => lines.push(format!("{}: {}", k, v)),
+                    let rules = store.dump()?;
+                    if !rules.is_empty() {
+                        lines.push("== GLOBAL PREFERENCES ==".to_string());
+                        for (k, v, a) in rules.into_iter().take(limit) {
+                            match a {
+                                Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
+                                None => lines.push(format!("{}: {}", k, v)),
+                            }
                         }
                     }
                 }
@@ -440,6 +629,7 @@ impl McpServer {
                     error: Some(JsonRpcError {
                         code: -32700,
                         message: format!("Parse error: {}", err),
+                        data: None,
                     }),
                 }),
             };

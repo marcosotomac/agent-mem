@@ -1,6 +1,195 @@
-use agent_mem::mcp::{JsonRpcRequest, McpServer};
+use agent_mem::mcp::{JsonRpcRequest, LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, McpServer};
 use serde_json::json;
 use std::fs;
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+fn modern_meta(version: &str) -> serde_json::Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": version,
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
+}
+
+#[test]
+fn test_mcp_dual_era_discovery_and_modern_tools() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_modern_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+
+    let discover = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!("discover-1")),
+        method: "server/discover".into(),
+        params: json!({ "_meta": modern_meta(MODERN_PROTOCOL_VERSION) }),
+    };
+    let result = server.handle_request(&discover).unwrap().result.unwrap();
+    assert_eq!(result["resultType"], "complete");
+    assert_eq!(
+        result["supportedVersions"],
+        json!([MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION])
+    );
+    assert!(result["capabilities"]["tools"].is_object());
+    assert_eq!(
+        result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "agent-mem"
+    );
+    assert_eq!(result["cacheScope"], "public");
+    assert!(result["ttlMs"].as_u64().unwrap() > 0);
+
+    let list = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/list".into(),
+        params: json!({ "_meta": modern_meta(MODERN_PROTOCOL_VERSION) }),
+    };
+    let result = server.handle_request(&list).unwrap().result.unwrap();
+    assert_eq!(result["resultType"], "complete");
+    assert_eq!(result["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(result["cacheScope"], "public");
+
+    let call = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(3)),
+        method: "tools/call".into(),
+        params: json!({
+            "_meta": modern_meta(MODERN_PROTOCOL_VERSION),
+            "name": "mem_find",
+            "arguments": { "query": "missing", "scope": "project" }
+        }),
+    };
+    let result = server.handle_request(&call).unwrap().result.unwrap();
+    assert_eq!(result["resultType"], "complete");
+    assert!(result["content"][0]["text"].is_string());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcp_modern_metadata_validation_and_version_error() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_version_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+
+    let unsupported = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "server/discover".into(),
+        params: json!({ "_meta": modern_meta("2099-01-01") }),
+    };
+    let response = server.handle_request(&unsupported).unwrap();
+    let error = response.error.unwrap();
+    assert_eq!(error.code, -32022);
+    assert_eq!(error.data.as_ref().unwrap()["requested"], "2099-01-01");
+    assert_eq!(
+        error.data.unwrap()["supported"],
+        json!([MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION])
+    );
+
+    let missing_capabilities = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/list".into(),
+        params: json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION
+            }
+        }),
+    };
+    let error = server
+        .handle_request(&missing_capabilities)
+        .unwrap()
+        .error
+        .unwrap();
+    assert_eq!(error.code, -32602);
+
+    let missing_meta = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(3)),
+        method: "server/discover".into(),
+        params: json!({}),
+    };
+    assert_eq!(
+        server
+            .handle_request(&missing_meta)
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        -32602
+    );
+
+    let notification = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: None,
+        method: "notifications/cancelled".into(),
+        params: json!({ "requestId": 42 }),
+    };
+    assert!(server.handle_request(&notification).is_none());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcp_modern_discovery_over_stdio() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_stdio_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-mem"))
+        .arg("mcp")
+        .current_dir(&temp_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start MCP stdio server");
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": "discover-stdio",
+        "method": "server/discover",
+        "params": { "_meta": modern_meta(MODERN_PROTOCOL_VERSION) }
+    });
+    writeln!(child.stdin.as_mut().unwrap(), "{request}").unwrap();
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("MCP process exits on EOF");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout must contain exactly one JSON-RPC message"
+    );
+    let response: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(response["id"], "discover-stdio");
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(
+        response["result"]["supportedVersions"][0],
+        MODERN_PROTOCOL_VERSION
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
 
 #[test]
 fn test_mcp_initialize_and_tools_list() {
@@ -42,10 +231,8 @@ fn test_mcp_initialize_and_tools_list() {
         params: json!({}),
     };
     let list_resp = server.handle_request(&list_req).expect("response expected");
-    let tools = list_resp.result.unwrap()["tools"]
-        .as_array()
-        .unwrap()
-        .clone();
+    let list_result = list_resp.result.unwrap();
+    let tools = list_result["tools"].as_array().unwrap().clone();
     assert_eq!(
         tools.len(),
         3,
@@ -54,6 +241,7 @@ fn test_mcp_initialize_and_tools_list() {
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(tool_names, vec!["mem_set", "mem_find", "mem_context"]);
+    assert!(list_result["resultType"].is_null());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -70,6 +258,7 @@ fn test_mcp_tool_execution_and_dual_scopes() {
     fs::create_dir_all(&temp_dir).unwrap();
     let global_dir = temp_dir.join("global");
     fs::create_dir_all(&global_dir).unwrap();
+    fs::write(temp_dir.join(".agent-rules"), "# isolated MCP test rules\n").unwrap();
 
     let server = McpServer::with_paths(temp_dir.clone(), global_dir.join("global.db"));
 
@@ -96,6 +285,11 @@ fn test_mcp_tool_execution_and_dual_scopes() {
     assert_eq!(
         text,
         "saved [project] architecture/auth (src/auth/jwt.rs:42)"
+    );
+    assert!(
+        fs::read_to_string(temp_dir.join(".agent-rules"))
+            .unwrap()
+            .contains("architecture/auth")
     );
 
     // 2. mem_set into global scope
@@ -267,6 +461,101 @@ fn test_mcp_exceptions_and_errors() {
             .as_str()
             .unwrap()
             .contains("Memory key cannot be empty")
+    );
+
+    // 5. notifications with id: null never receive a response
+    let notif_null_id = serde_json::from_str::<JsonRpcRequest>(
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","id":null}"#,
+    )
+    .unwrap();
+    assert!(server.handle_request(&notif_null_id).is_none());
+
+    // 6. mem_set with invalid rel format returns isError: true
+    let invalid_rel_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(103)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "k", "val": "v", "rel": "malformed_rel" }
+        }),
+    };
+    let resp = server.handle_request(&invalid_rel_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid rel format")
+    );
+
+    // 7. mem_set with invalid scope returns isError: true
+    let invalid_scope_set = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(104)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "k", "val": "v", "scope": "invalid_scope" }
+        }),
+    };
+    let resp = server.handle_request(&invalid_scope_set).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid scope")
+    );
+
+    // 8. mem_find with invalid scope returns isError: true
+    let invalid_scope_find = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(105)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_find",
+            "arguments": { "query": "test", "scope": "invalid_scope" }
+        }),
+    };
+    let resp = server.handle_request(&invalid_scope_find).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid scope")
+    );
+
+    // 9. Storage error propagation: corrupted database in mem_find returns isError: true, NOT empty results
+    let corrupted_db = temp_dir.join(".agent-mem").join("mem.db");
+    fs::create_dir_all(corrupted_db.parent().unwrap()).unwrap();
+    fs::write(&corrupted_db, b"THIS IS NOT A VALID SQLITE DATABASE").unwrap();
+
+    let find_corrupted_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(106)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_find",
+            "arguments": { "query": "auth", "scope": "project" }
+        }),
+    };
+    let resp = server.handle_request(&find_corrupted_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    let err_msg = res["content"][0]["text"].as_str().unwrap();
+    assert!(
+        err_msg.contains("Error:"),
+        "Expected error message on corrupted DB, got: {}",
+        err_msg
+    );
+    assert!(
+        !err_msg.contains("No memories found"),
+        "Must not hide corruption as 'No memories found'"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

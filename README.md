@@ -157,6 +157,11 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 
 ## Model Context Protocol (MCP) Setup
 
+`agent-mem` is dual-era compatible: it preserves the legacy `2024-11-05`
+`initialize` handshake and supports stateless `2026-07-28` requests with
+per-request `_meta` plus `server/discover`. Modern protocol metadata is emitted
+only for modern clients, so legacy clients keep the same minimal token footprint.
+
 Add `agent-mem` to your agent's MCP configuration (e.g., Claude Desktop, Cursor, Antigravity, or Cline):
 
 ### Option A: Native binary (recommended for maximum speed)
