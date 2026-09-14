@@ -568,7 +568,7 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     let rules_synced = if rules_file.exists()
         && (entity_captured.is_some() || !relations.is_empty() || zombies_cleaned)
     {
-        let _ = store.export_to_file(&rules_file);
+        store.export_to_file(&rules_file)?;
         true
     } else {
         false

@@ -1,8 +1,13 @@
 use crate::error::Result;
 use rusqlite::{Connection, TransactionBehavior, params};
-use std::fs;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static EXPORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn now_epoch() -> i64 {
     SystemTime::now()
@@ -118,28 +123,27 @@ impl Store {
             }
         }
 
-        let conn = Connection::open(db_path)?;
-        Self::configure_conn(&conn, need_write)?;
+        let mut conn = Connection::open(db_path)?;
+        Self::configure_conn(&mut conn, need_write)?;
         Ok(Self { conn })
     }
 
     /// Open an in-memory database instance (ideal for isolated unit tests).
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        Self::configure_conn(&conn, true)?;
+        let mut conn = Connection::open_in_memory()?;
+        Self::configure_conn(&mut conn, true)?;
         Ok(Self { conn })
     }
 
-    fn configure_conn(conn: &Connection, need_write: bool) -> Result<()> {
-        let mut pragma_stmt = "PRAGMA busy_timeout = 10000; PRAGMA mmap_size = 268435456;";
-        if need_write {
-            pragma_stmt = "PRAGMA busy_timeout = 10000; PRAGMA synchronous = NORMAL; PRAGMA mmap_size = 268435456;";
-        }
-        conn.execute_batch(pragma_stmt)?;
+    fn configure_conn(conn: &mut Connection, need_write: bool) -> Result<()> {
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 10000;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA mmap_size = 268435456;
+             PRAGMA temp_store = MEMORY;",
+        )?;
 
-        let user_version: u32 = conn
-            .query_row("PRAGMA user_version;", [], |r| r.get(0))
-            .unwrap_or(0);
+        let user_version: u32 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
 
         if user_version >= 3 {
             // Fast path: schema and migrations already initialized to v3. Bypasses DDL and table scans completely!
@@ -157,12 +161,9 @@ impl Store {
                 return Err(crate::error::Error::NotInitialized);
             }
 
-            conn.execute_batch(
-                "PRAGMA journal_mode = WAL;
-                 PRAGMA temp_store = MEMORY;",
-            )?;
-
-            conn.execute(
+            conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS memories (
                     key TEXT PRIMARY KEY,
                     val TEXT NOT NULL,
@@ -171,111 +172,79 @@ impl Store {
                     archived_at INTEGER,
                     archive_reason TEXT,
                     kind TEXT NOT NULL DEFAULT 'rule'
-                ) WITHOUT ROWID;",
-                [],
-            )?;
-
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memories_anchor ON memories(anchor);",
-                [],
-            )?;
-
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS relations (
+                ) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_memories_anchor ON memories(anchor);
+                CREATE TABLE IF NOT EXISTS relations (
                     source_key TEXT NOT NULL,
                     rel_type TEXT NOT NULL,
                     target_key TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     PRIMARY KEY (source_key, rel_type, target_key)
-                ) WITHOUT ROWID;",
-                [],
-            )?;
-
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_key, rel_type);",
-                [],
-            )?;
-
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS sessions (
+                ) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_key, rel_type);
+                CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     summary TEXT NOT NULL,
                     created_at INTEGER NOT NULL
-                );",
-                [],
-            )?;
-
-            conn.execute(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                     key, val, anchor, archive_reason, kind, tokenize='porter unicode61'
                 );",
+            )?;
+            tx.execute("PRAGMA user_version = 3;", [])?;
+            tx.commit()?;
+        } else {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Migrations check: ensure anchor, archived_at, archive_reason, and kind columns exist
+            let has_anchor: bool = tx.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'anchor';",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? > 0;
+
+            if !has_anchor {
+                tx.execute("ALTER TABLE memories ADD COLUMN anchor TEXT;", [])?;
+            }
+
+            let has_archived_at: bool = tx.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'archived_at';",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? > 0;
+
+            if !has_archived_at {
+                tx.execute("ALTER TABLE memories ADD COLUMN archived_at INTEGER;", [])?;
+            }
+
+            let has_archive_reason: bool = tx.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'archive_reason';",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? > 0;
+
+            if !has_archive_reason {
+                tx.execute("ALTER TABLE memories ADD COLUMN archive_reason TEXT;", [])?;
+            }
+
+            let has_kind: bool = tx.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'kind';",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? > 0;
+
+            if !has_kind {
+                tx.execute(
+                    "ALTER TABLE memories ADD COLUMN kind TEXT NOT NULL DEFAULT 'rule';",
+                    [],
+                )?;
+            }
+
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_anchor ON memories(anchor);",
                 [],
             )?;
 
-            conn.execute("PRAGMA user_version = 3;", [])?;
-        } else {
-            // Migrations check: ensure anchor, archived_at, archive_reason, and kind columns exist
-            let has_anchor: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'anchor';",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0)
-                > 0;
-
-            if !has_anchor {
-                let _ = conn.execute("ALTER TABLE memories ADD COLUMN anchor TEXT;", []);
-            }
-
-            let has_archived_at: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'archived_at';",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0)
-                > 0;
-
-            if !has_archived_at {
-                let _ = conn.execute("ALTER TABLE memories ADD COLUMN archived_at INTEGER;", []);
-            }
-
-            let has_archive_reason: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'archive_reason';",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0)
-                > 0;
-
-            if !has_archive_reason {
-                let _ = conn.execute("ALTER TABLE memories ADD COLUMN archive_reason TEXT;", []);
-            }
-
-            let has_kind: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'kind';",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0)
-                > 0;
-
-            if !has_kind {
-                let _ = conn.execute(
-                    "ALTER TABLE memories ADD COLUMN kind TEXT NOT NULL DEFAULT 'rule';",
-                    [],
-                );
-            }
-
-            let _ = conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memories_anchor ON memories(anchor);",
-                [],
-            );
-
-            let _ = conn.execute(
+            tx.execute(
                 "CREATE TABLE IF NOT EXISTS relations (
                     source_key TEXT NOT NULL,
                     rel_type TEXT NOT NULL,
@@ -284,25 +253,26 @@ impl Store {
                     PRIMARY KEY (source_key, rel_type, target_key)
                 ) WITHOUT ROWID;",
                 [],
-            );
+            )?;
 
-            let _ = conn.execute(
+            tx.execute(
                 "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_key, rel_type);",
                 [],
-            );
+            )?;
 
-            let _ = conn.execute("DROP TABLE IF EXISTS memories_fts;", []);
-            let _ = conn.execute(
+            tx.execute("DROP TABLE IF EXISTS memories_fts;", [])?;
+            tx.execute(
                 "CREATE VIRTUAL TABLE memories_fts USING fts5(
                     key, val, anchor, archive_reason, kind, tokenize='porter unicode61'
                 );",
                 [],
-            );
-            let _ = conn.execute(
+            )?;
+            tx.execute(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) SELECT key, val, anchor, archive_reason, kind FROM memories;",
                 [],
-            );
-            conn.execute("PRAGMA user_version = 3;", [])?;
+            )?;
+            tx.execute("PRAGMA user_version = 3;", [])?;
+            tx.commit()?;
         }
 
         Ok(())
@@ -315,6 +285,18 @@ impl Store {
         val: &str,
         anchor: Option<&str>,
         kind: Option<&str>,
+    ) -> Result<()> {
+        self.set_entry_with_relation(key, val, anchor, kind, None)
+    }
+
+    /// Atomically set a memory and, optionally, one directed relation.
+    pub fn set_entry_with_relation(
+        &mut self,
+        key: &str,
+        val: &str,
+        anchor: Option<&str>,
+        kind: Option<&str>,
+        relation: Option<(&str, &str)>,
     ) -> Result<()> {
         let trimmed_key = key.trim();
         let trimmed_val = val.trim();
@@ -334,6 +316,19 @@ impl Store {
             .map(|k| k.trim())
             .filter(|k| !k.is_empty())
             .unwrap_or_else(|| infer_kind(trimmed_key));
+        let relation = match relation {
+            Some((rel_type, target)) => {
+                let rel_type = rel_type.trim();
+                let target = target.trim();
+                if rel_type.is_empty() || target.is_empty() {
+                    return Err(crate::error::Error::Usage(
+                        "Relation type and target cannot be empty".into(),
+                    ));
+                }
+                Some((rel_type, target))
+            }
+            None => None,
+        };
 
         let now = now_epoch();
         let tx = self
@@ -352,6 +347,13 @@ impl Store {
             "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
             params![trimmed_key, trimmed_val, trimmed_anchor, effective_kind],
         )?;
+        if let Some((rel_type, target)) = relation {
+            tx.execute(
+                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+                params![trimmed_key, rel_type, target, now],
+            )?;
+        }
         tx.commit()?;
 
         Ok(())
@@ -426,6 +428,46 @@ impl Store {
         Ok(list)
     }
 
+    fn get_relations_touching(&self, keys: &[&str], limit: usize) -> Result<Vec<RelationRecord>> {
+        if keys.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source_key, rel_type, target_key, created_at
+             FROM relations
+             WHERE source_key = ?1 OR target_key = ?1
+             ORDER BY source_key, rel_type, target_key
+             LIMIT ?2;",
+        )?;
+        let mut relations = Vec::with_capacity(limit.min(64));
+        for key in keys {
+            let mut rows = stmt.query(params![key, sql_limit])?;
+            while let Some(row) = rows.next()? {
+                relations.push(RelationRecord {
+                    source_key: row.get(0)?,
+                    rel_type: row.get(1)?,
+                    target_key: row.get(2)?,
+                    created_at: row.get(3)?,
+                });
+            }
+        }
+
+        relations.sort_unstable_by(|a, b| {
+            (&a.source_key, &a.rel_type, &a.target_key).cmp(&(
+                &b.source_key,
+                &b.rel_type,
+                &b.target_key,
+            ))
+        });
+        relations.dedup_by(|a, b| {
+            a.source_key == b.source_key && a.rel_type == b.rel_type && a.target_key == b.target_key
+        });
+        relations.truncate(limit);
+        Ok(relations)
+    }
+
     /// Archive a key-value memory rule with an optional deprecation or migration reason.
     pub fn archive(&mut self, key: &str, reason: Option<&str>) -> Result<bool> {
         let trimmed_key = key.trim();
@@ -446,10 +488,10 @@ impl Store {
         )?;
 
         if changes > 0 {
-            let _ = tx.execute(
+            tx.execute(
                 "DELETE FROM memories_fts WHERE key = ?1;",
                 params![trimmed_key],
-            );
+            )?;
             tx.execute(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) 
                  SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
@@ -479,10 +521,10 @@ impl Store {
         )?;
 
         if changes > 0 {
-            let _ = tx.execute(
+            tx.execute(
                 "DELETE FROM memories_fts WHERE key = ?1;",
                 params![trimmed_key],
-            );
+            )?;
             tx.execute(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) 
                  SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
@@ -532,7 +574,7 @@ impl Store {
                 "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?3 WHERE key = ?4;",
                 params![now, reason, now, z.key],
             )?;
-            let _ = tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![z.key]);
+            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![z.key])?;
             tx.execute(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) 
                  SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
@@ -705,6 +747,24 @@ impl Store {
         Ok(list)
     }
 
+    /// Dump at most `limit` active memories ordered by key without materializing the full store.
+    pub fn dump_limited(&self, limit: usize) -> Result<Vec<RuleEntry>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key, val, anchor FROM memories
+             WHERE archived_at IS NULL ORDER BY key ASC LIMIT ?1;",
+        )?;
+        let mut rows = stmt.query(params![sql_limit])?;
+        let mut list = Vec::with_capacity(limit.min(64));
+        while let Some(row) = rows.next()? {
+            list.push((row.get(0)?, row.get(1)?, row.get(2)?));
+        }
+        Ok(list)
+    }
+
     /// Dump all memories (including archived) ordered by key.
     pub fn dump_all(&self) -> Result<Vec<RuleRecord>> {
         let mut stmt = self.conn.prepare_cached(
@@ -782,7 +842,7 @@ impl Store {
         }
     }
 
-    /// Search rules via BM25 full-text search with fallback to LIKE pattern if FTS fails.
+    /// Search rules via BM25 full-text search.
     pub fn find(&self, query: &str) -> Result<Vec<RuleRecord>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -790,49 +850,14 @@ impl Store {
         }
 
         let fts_query = Self::sanitize_fts_query(trimmed);
-        let fts_res = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT m.key, m.val, m.anchor, m.archived_at, m.archive_reason, m.kind 
              FROM memories_fts 
              JOIN memories m ON m.key = memories_fts.key 
              WHERE memories_fts MATCH ?1 
              ORDER BY rank LIMIT 10;",
-        );
-
-        if let Ok(results) = fts_res.and_then(|mut stmt| {
-            let mut rows = stmt.query(params![fts_query])?;
-            let mut results = Vec::new();
-            while let Some(row) = rows.next()? {
-                results.push(RuleRecord {
-                    key: row.get(0)?,
-                    val: row.get(1)?,
-                    anchor: row.get(2)?,
-                    archived_at: row.get(3)?,
-                    archive_reason: row.get(4)?,
-                    kind: row.get(5)?,
-                });
-            }
-            Ok::<_, rusqlite::Error>(results)
-        }) {
-            return Ok(results);
-        }
-
-        // Fallback to substring matching only if FTS query failed to execute
-        let escaped = trimmed
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let like_pattern = format!("%{}%", escaped);
-        let mut stmt = self.conn.prepare(
-            "SELECT key, val, anchor, archived_at, archive_reason, kind 
-             FROM memories 
-             WHERE key LIKE ?1 ESCAPE '\\' 
-                OR val LIKE ?1 ESCAPE '\\' 
-                OR anchor LIKE ?1 ESCAPE '\\' 
-                OR archive_reason LIKE ?1 ESCAPE '\\' 
-                OR kind LIKE ?1 ESCAPE '\\' 
-             ORDER BY key ASC LIMIT 10;",
         )?;
-        let mut rows = stmt.query(params![like_pattern])?;
+        let mut rows = stmt.query(params![fts_query])?;
         let mut results = Vec::new();
 
         while let Some(row) = rows.next()? {
@@ -883,6 +908,26 @@ impl Store {
         relations: &[(&str, &str, &str)],
         session_summary: &str,
     ) -> Result<Option<i64>> {
+        if let Some((key, val, _, _)) = entity {
+            if key.trim().is_empty() {
+                return Err(crate::error::Error::Usage(
+                    "Memory key cannot be empty".into(),
+                ));
+            }
+            if val.trim().is_empty() {
+                return Err(crate::error::Error::Usage(
+                    "Memory value cannot be empty".into(),
+                ));
+            }
+        }
+        for (source, rel_type, target) in relations {
+            if source.trim().is_empty() || rel_type.trim().is_empty() || target.trim().is_empty() {
+                return Err(crate::error::Error::Usage(
+                    "Relation source, type, and target cannot be empty".into(),
+                ));
+            }
+        }
+
         let now = now_epoch();
         let tx = self
             .conn
@@ -891,16 +936,6 @@ impl Store {
         if let Some((key, val, anchor, kind)) = entity {
             let trimmed_key = key.trim();
             let trimmed_val = val.trim();
-            if trimmed_key.is_empty() {
-                return Err(crate::error::Error::Usage(
-                    "Memory key cannot be empty".into(),
-                ));
-            }
-            if trimmed_val.is_empty() {
-                return Err(crate::error::Error::Usage(
-                    "Memory value cannot be empty".into(),
-                ));
-            }
             let trimmed_anchor = anchor.map(|a| a.trim()).filter(|a| !a.is_empty());
             let effective_kind = kind
                 .map(|k| k.trim())
@@ -935,13 +970,11 @@ impl Store {
             let s = source.trim();
             let r = rel_type.trim();
             let t = target.trim();
-            if !s.is_empty() && !r.is_empty() && !t.is_empty() {
-                tx.execute(
-                    "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
-                    params![s, r, t, now],
-                )?;
-            }
+            tx.execute(
+                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+                params![s, r, t, now],
+            )?;
         }
 
         let mut session_id = None;
@@ -1076,12 +1109,7 @@ impl Store {
         let mut rels = Vec::new();
         if !rules.is_empty() {
             let keys: Vec<&str> = rules.iter().map(|r| r.key.as_str()).collect();
-            let all_rels = self.get_all_relations().unwrap_or_default();
-            for r in all_rels {
-                if keys.contains(&r.source_key.as_str()) || keys.contains(&r.target_key.as_str()) {
-                    rels.push(r);
-                }
-            }
+            rels = self.get_relations_touching(&keys, max_limit.saturating_mul(4))?;
         }
 
         let sessions = self.session_list(3)?;
@@ -1117,35 +1145,24 @@ impl Store {
             })
             .collect();
 
-        // 1. Fetch all active memories
+        // 1. Scan only lightweight routing fields. Full values are fetched for the
+        // bounded result set after direct/related/universal keys are selected.
         let mut stmt = self.conn.prepare_cached(
-            "SELECT key, val, anchor, archived_at, archive_reason, kind
+            "SELECT key, anchor
              FROM memories
              WHERE archived_at IS NULL
              ORDER BY key ASC;",
         )?;
         let mut rows = stmt.query([])?;
-        let mut all_memories = Vec::new();
+        let mut direct_keys = Vec::with_capacity(max_limit.min(64));
+        let mut direct_key_set = std::collections::HashSet::new();
+        let mut universal_keys = Vec::with_capacity(max_limit.min(64));
         while let Some(row) = rows.next()? {
-            all_memories.push(RuleRecord {
-                key: row.get(0)?,
-                val: row.get(1)?,
-                anchor: row.get(2)?,
-                archived_at: row.get(3)?,
-                archive_reason: row.get(4)?,
-                kind: row.get(5)?,
-            });
-        }
-
-        // 2. Classify: direct match vs universal rule
-        let mut direct_matches = Vec::new();
-        let mut direct_keys = std::collections::HashSet::new();
-        let mut universal_rules = Vec::new();
-
-        for m in all_memories {
+            let key: String = row.get(0)?;
+            let anchor: Option<String> = row.get(1)?;
             let has_topic_match = if let Some(t) = topic.filter(|s| !s.trim().is_empty()) {
                 let clean_t = t.trim();
-                m.key.starts_with(clean_t) || m.key == clean_t
+                key.starts_with(clean_t) || key == clean_t
             } else {
                 true
             };
@@ -1153,10 +1170,12 @@ impl Store {
                 continue;
             }
 
-            let is_universal = m.anchor.is_none() || m.anchor.as_deref().unwrap().trim().is_empty();
+            let is_universal = anchor
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty());
 
             let mut is_matched = false;
-            if let Some(anchor_raw) = &m.anchor {
+            if let Some(anchor_raw) = &anchor {
                 let anchor_norm = anchor_raw.replace('\\', "/");
                 for (file_path, file_basename) in &clean_files {
                     let anchor_path_part = anchor_norm
@@ -1175,82 +1194,71 @@ impl Store {
                 }
             }
 
-            if is_matched {
-                direct_keys.insert(m.key.clone());
-                direct_matches.push(m);
-            } else if is_universal {
-                universal_rules.push(m);
+            if is_matched && direct_keys.len() < max_limit {
+                direct_key_set.insert(key.clone());
+                direct_keys.push(key);
+            } else if is_universal && universal_keys.len() < max_limit {
+                universal_keys.push(key);
             }
         }
+        drop(rows);
+        drop(stmt);
 
-        // 3. 1-hop hypergraph expansion from direct matches
-        let mut related_keys = std::collections::HashSet::new();
+        // 2. Expand one graph hop through indexed source/target lookups.
+        let mut related_keys = std::collections::BTreeSet::new();
         if !direct_keys.is_empty() {
-            let all_rels = self.get_all_relations().unwrap_or_default();
-            for rel in all_rels {
-                if direct_keys.contains(&rel.source_key) {
-                    related_keys.insert(rel.target_key.clone());
-                } else if direct_keys.contains(&rel.target_key) {
-                    related_keys.insert(rel.source_key.clone());
+            let keys: Vec<&str> = direct_keys.iter().map(String::as_str).collect();
+            let touching = self.get_relations_touching(&keys, max_limit.saturating_mul(4))?;
+            for rel in touching {
+                if direct_key_set.contains(&rel.source_key) {
+                    related_keys.insert(rel.target_key);
+                } else if direct_key_set.contains(&rel.target_key) {
+                    related_keys.insert(rel.source_key);
                 }
             }
         }
 
-        // 4. Combine: direct matches + 1-hop related + universal rules
-        let mut combined_rules = Vec::new();
+        // 3. Select a bounded, deterministic key set: direct, related, universal.
+        let mut selected_keys = Vec::with_capacity(max_limit.min(64));
         let mut seen_keys = std::collections::HashSet::new();
-
-        // Add direct matches first (highest relevance)
-        for r in direct_matches {
-            if seen_keys.insert(r.key.clone()) {
-                combined_rules.push(r);
-            }
-        }
-
-        // Add 1-hop related memories
-        if !related_keys.is_empty() {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT key, val, anchor, archived_at, archive_reason, kind
-                 FROM memories
-                 WHERE archived_at IS NULL;",
-            )?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let key: String = row.get(0)?;
-                if related_keys.contains(&key) && seen_keys.insert(key.clone()) {
-                    combined_rules.push(RuleRecord {
-                        key,
-                        val: row.get(1)?,
-                        anchor: row.get(2)?,
-                        archived_at: row.get(3)?,
-                        archive_reason: row.get(4)?,
-                        kind: row.get(5)?,
-                    });
+        for key in direct_keys
+            .into_iter()
+            .chain(related_keys)
+            .chain(universal_keys)
+        {
+            if seen_keys.insert(key.clone()) {
+                selected_keys.push(key);
+                if selected_keys.len() == max_limit {
+                    break;
                 }
             }
         }
 
-        // Add universal rules up to limit
-        for r in universal_rules {
-            if seen_keys.insert(r.key.clone()) {
-                combined_rules.push(r);
+        // 4. Materialize only selected records.
+        let mut combined_rules = Vec::with_capacity(selected_keys.len());
+        let mut fetch = self.conn.prepare_cached(
+            "SELECT key, val, anchor, archived_at, archive_reason, kind
+             FROM memories WHERE key = ?1 AND archived_at IS NULL LIMIT 1;",
+        )?;
+        for key in &selected_keys {
+            let mut rows = fetch.query(params![key])?;
+            if let Some(row) = rows.next()? {
+                combined_rules.push(RuleRecord {
+                    key: row.get(0)?,
+                    val: row.get(1)?,
+                    anchor: row.get(2)?,
+                    archived_at: row.get(3)?,
+                    archive_reason: row.get(4)?,
+                    kind: row.get(5)?,
+                });
             }
         }
+        drop(fetch);
 
-        if combined_rules.len() > max_limit {
-            combined_rules.truncate(max_limit);
-        }
-
-        // Collect relevant relations
         let mut rels = Vec::new();
         if !combined_rules.is_empty() {
             let keys: Vec<&str> = combined_rules.iter().map(|r| r.key.as_str()).collect();
-            let all_rels = self.get_all_relations().unwrap_or_default();
-            for r in all_rels {
-                if keys.contains(&r.source_key.as_str()) || keys.contains(&r.target_key.as_str()) {
-                    rels.push(r);
-                }
-            }
+            rels = self.get_relations_touching(&keys, max_limit.saturating_mul(4))?;
         }
 
         let sessions = self.session_list(3)?;
@@ -1402,8 +1410,29 @@ impl Store {
     /// Export all rules and relations formatted as deterministic plain text sorted by key.
     pub fn export_rules_text(&self) -> Result<String> {
         let all_rules = self.dump_all()?;
-        let all_relations = self.get_all_relations().unwrap_or_default();
-        let mut out = String::new();
+        let all_relations = self.get_all_relations()?;
+        let estimated_bytes = 128
+            + all_rules
+                .iter()
+                .map(|rule| {
+                    rule.key.len()
+                        + rule.val.len()
+                        + rule.anchor.as_ref().map_or(0, String::len)
+                        + rule.archive_reason.as_ref().map_or(0, String::len)
+                        + rule.kind.len()
+                        + 24
+                })
+                .sum::<usize>()
+            + all_relations
+                .iter()
+                .map(|relation| {
+                    relation.source_key.len()
+                        + relation.rel_type.len()
+                        + relation.target_key.len()
+                        + 16
+                })
+                .sum::<usize>();
+        let mut out = String::with_capacity(estimated_bytes);
         out.push_str("# .agent-rules - agent-mem shared team memory\n");
         out.push_str("# Track this file in git to share rules across your team without SQLite binary conflicts.\n\n");
 
@@ -1419,48 +1448,58 @@ impl Store {
         }
 
         for r in active {
-            let kind_prefix = if r.kind != "rule" {
-                format!("[{}] ", r.kind)
-            } else {
-                String::new()
-            };
-            if let Some(anchor) = &r.anchor {
-                out.push_str(&format!(
-                    "{}{} = {} (@ {})\n",
-                    kind_prefix, r.key, r.val, anchor
-                ));
-            } else {
-                out.push_str(&format!("{}{} = {}\n", kind_prefix, r.key, r.val));
+            if r.kind != "rule" {
+                out.push('[');
+                out.push_str(&r.kind);
+                out.push_str("] ");
             }
+            out.push_str(&r.key);
+            out.push_str(" = ");
+            out.push_str(&r.val);
+            if let Some(anchor) = &r.anchor {
+                out.push_str(" (@ ");
+                out.push_str(anchor);
+                out.push(')');
+            }
+            out.push('\n');
         }
 
         if !all_relations.is_empty() {
             out.push_str("\n# Relations\n");
             for rel in all_relations {
-                out.push_str(&format!(
-                    "[rel] {} -> {} -> {}\n",
-                    rel.source_key, rel.rel_type, rel.target_key
-                ));
+                out.push_str("[rel] ");
+                out.push_str(&rel.source_key);
+                out.push_str(" -> ");
+                out.push_str(&rel.rel_type);
+                out.push_str(" -> ");
+                out.push_str(&rel.target_key);
+                out.push('\n');
             }
         }
 
         if !archived.is_empty() {
             out.push_str("\n# Archived Rules\n");
             for r in archived {
-                let kind_tag = if r.kind != "rule" {
-                    format!(" [{}]", r.kind)
-                } else {
-                    String::new()
-                };
-                let mut line = format!("[archived]{} {} = {}", kind_tag, r.key, r.val);
+                out.push_str("[archived]");
+                if r.kind != "rule" {
+                    out.push_str(" [");
+                    out.push_str(&r.kind);
+                    out.push(']');
+                }
+                out.push(' ');
+                out.push_str(&r.key);
+                out.push_str(" = ");
+                out.push_str(&r.val);
                 if let Some(anchor) = &r.anchor {
-                    line.push_str(&format!(" (@ {})", anchor));
+                    out.push_str(" (@ ");
+                    out.push_str(anchor);
+                    out.push(')');
                 }
                 if let Some(reason) = &r.archive_reason {
-                    line.push_str(&format!(" --reason: {}", reason));
+                    out.push_str(" --reason: ");
+                    out.push_str(reason);
                 }
-                line.push('\n');
-                out.push_str(&line);
+                out.push('\n');
             }
         }
 
@@ -1469,22 +1508,58 @@ impl Store {
 
     /// Export current rules to a file on disk.
     pub fn export_to_file(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-            && !parent.exists()
-        {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
             fs::create_dir_all(parent)?;
         }
         let content = self.export_rules_text()?;
-        fs::write(path, content)?;
-        Ok(())
+        let file_name = path.file_name().ok_or_else(|| {
+            crate::error::Error::Usage(format!("Export path '{}' has no file name", path.display()))
+        })?;
+
+        let (mut temp, temp_path) = loop {
+            let mut temp_name = OsString::from(".");
+            temp_name.push(file_name);
+            temp_name.push(format!(
+                ".tmp-{}-{}",
+                std::process::id(),
+                EXPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let candidate = parent.join(temp_name);
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => break (file, candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        };
+
+        let result = (|| -> Result<()> {
+            temp.write_all(content.as_bytes())?;
+            drop(temp);
+            fs::rename(&temp_path, path)?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
     }
 
     /// Reconcile SQLite database with a plain-text rules file (.agent-rules).
     pub fn sync_with_file(&mut self, path: &Path) -> Result<SyncReport> {
         if !path.exists() {
             self.export_to_file(path)?;
-            let total = self.dump_all()?.len();
+            let total = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
             return Ok(SyncReport {
                 path: path.to_path_buf(),
                 imported: 0,
@@ -1583,7 +1658,9 @@ impl Store {
     pub fn sync_export(&self, path: &Path) -> Result<SyncReport> {
         let exists = path.exists();
         self.export_to_file(path)?;
-        let total = self.dump_all()?.len();
+        let total = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
         Ok(SyncReport {
             path: path.to_path_buf(),
             imported: 0,

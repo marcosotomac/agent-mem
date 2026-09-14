@@ -112,9 +112,9 @@ impl App {
     pub fn reload_data(&mut self) -> Result<()> {
         if self.db_path.exists() {
             let store = Store::open(&self.db_path, false)?;
-            self.rules = store.dump_all().unwrap_or_default();
-            self.relations = store.get_all_relations().unwrap_or_default();
-            self.sessions = store.session_list(100).unwrap_or_default();
+            self.rules = store.dump_all()?;
+            self.relations = store.get_all_relations()?;
+            self.sessions = store.session_list(100)?;
         } else {
             self.rules.clear();
             self.relations.clear();
@@ -194,7 +194,7 @@ impl App {
             }
             let rules_file = self.root.join(".agent-rules");
             if rules_file.exists() {
-                let _ = store.export_to_file(&rules_file);
+                store.export_to_file(&rules_file)?;
             }
         }
         self.reload_data()
@@ -211,7 +211,7 @@ impl App {
             store.del(&rule_key)?;
             let rules_file = self.root.join(".agent-rules");
             if rules_file.exists() {
-                let _ = store.export_to_file(&rules_file);
+                store.export_to_file(&rules_file)?;
             }
             self.set_toast(format!("Deleted rule: {}", rule_key));
         }
@@ -232,7 +232,7 @@ impl App {
         )?;
         let rules_file = self.root.join(".agent-rules");
         if rules_file.exists() {
-            let _ = store.export_to_file(&rules_file);
+            store.export_to_file(&rules_file)?;
         }
         self.set_toast(format!("Saved rule: {}", key.trim()));
         self.reload_data()?;

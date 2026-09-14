@@ -11,7 +11,7 @@ Ultra-fast, local-first, zero-daemon knowledge hypergraph and memory engine for 
 - **Sub-millisecond latency**: Embedded SQLite in WAL mode with clustered B-tree index (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`). Sub-60µs point reads, <15µs relation traversal.
 - **Clustered Knowledge Hypergraph**: Evolve beyond flat key-value pairs into engineering entities (`rule`, `decision`, `gotcha`, `pattern`) linked with typed directed edges (`mitigates`, `supersedes`, `depends_on`, `relates_to`).
 - **Anchor-Aware Context Filtering**: Surgical prompt retrieval by repository anchor (`context --anchor src/auth.rs:10`) with 1-hop graph expansion, slashing token waste by >95% (from ~1,500 tokens down to <60 tokens).
-- **Minimal token footprint**: Surgical 3-tool MCP schema consuming <150 tokens (982 characters vs ~3,000+ tokens in other memory tools). Raw plain text output with zero Markdown overhead.
+- **Minimal token footprint**: Four consolidated MCP tools in 1,376 schema characters (~344 tokens by the documented 4-char estimate), with bounded plain-text results and anchor-aware retrieval.
 - **Zero background daemons**: Direct stdio communication without background HTTP processes or port collisions.
 - **Dual scopes**: Seamless access to isolated `project` memory (`.agent-mem/mem.db`) and user-level `global` preferences (`~/.config/agent-mem/global.db`).
 - **BM25 search**: Full-text search powered by SQLite FTS5 with Porter stemming indexing keys, values, anchors, reasons, and entity kinds.
@@ -23,15 +23,18 @@ Ultra-fast, local-first, zero-daemon knowledge hypergraph and memory engine for 
 
 | Metric | agent-mem | agentmemory | mem0 | Static (CLAUDE.md) |
 |---|---|---|---|---|
-| **Point Lookup Latency (p50)** | **1.38 µs** | ~14 ms | ~150 ms | N/A |
-| **BM25 Search Latency (p50)** | **294.75 µs** | ~14 ms | N/A (vector) | ~5 ms (grep) |
-| **Graph 1-Hop Traversal (p50)**| **1.00 µs** | ~25 ms | ~200 ms | N/A |
-| **MCP Schema Overhead** | **982 chars (~245 tok)** | 54 tools (~5,000 tok) | ~3,500 tok | 0 tok |
+| **Point Lookup Latency (p50)** | **1.25 µs** | ~14 ms | ~150 ms | N/A |
+| **BM25 Search Latency (p50)** | **289.96 µs** | ~14 ms | N/A (vector) | ~5 ms (grep) |
+| **MCP `mem_find` Dispatch (p50)** | **1.10 ms** | N/A | N/A | N/A |
+| **Graph 1-Hop Traversal (p50)**| **0.96 µs** | ~25 ms | ~200 ms | N/A |
+| **MCP Schema Overhead** | **1,376 chars (~344 tok)** | 54 tools (~5,000 tok) | ~3,500 tok | 0 tok |
 | **Anchor Token Savings** | **99.0% reduction** | 0% (dump/vector) | 0% | N/A |
-| **Architecture** | **Single static binary (2.5MB)** | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
-| **Runtime Memory (RSS)** | **~3 MB** | ~250 MB | ~500 MB+ | 0 MB |
+| **Architecture** | **Single binary (2.4–2.7 MB)** | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
+| **Runtime Memory (RSS)** | **~2 MB** | ~250 MB | ~500 MB+ | 0 MB |
 | **Daemon Requirement** | **Zero daemons** | Pinned iii background engine | Docker / Python server | None |
 | **Git / Team Sync** | **Native `.agent-rules` (union merge)** | None (local state only) | Cloud / API only | Manual git merge |
+
+*Only the agent-mem performance column is measured by the local suite; competitor values are historical reference estimates.*
 
 *Run the benchmark locally on your machine:*
 ```bash
@@ -188,7 +191,8 @@ Add `agent-mem` to your agent's MCP configuration (e.g., Claude Desktop, Cursor,
 }
 ```
 
-### Surgical MCP Tools (<150 tokens total schema)
+### Surgical MCP Tools (~344 estimated tokens total schema)
 - `mem_set`: Store rules, decisions, or gotchas with optional code anchor, kind, relation, and scope (`project` or `global`).
 - `mem_find`: Search memories via BM25 keywords across `project`, `global`, or `all` scopes.
 - `mem_context`: Retrieve dense context block with optional `anchor` or `topic` filter for surgical LLM prompt injection.
+- `mem_manage`: Archive, reactivate, delete, link, or unlink memories without expanding the tool surface.

@@ -3,6 +3,7 @@ use crate::init::{find_project_root, global_db_path};
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::cell::{RefCell, RefMut};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -12,6 +13,9 @@ pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
 const CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 const CACHE_TTL_MS: u64 = 86_400_000;
+const DEFAULT_CONTEXT_LIMIT: usize = 10;
+const MAX_CONTEXT_LIMIT: usize = 50;
+const MAX_TEXT_RESULT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProtocolEra {
@@ -56,6 +60,8 @@ pub struct JsonRpcError {
 pub struct McpServer {
     project_root: PathBuf,
     global_path: PathBuf,
+    project_store: RefCell<Option<Store>>,
+    global_store: RefCell<Option<Store>>,
 }
 
 impl Default for McpServer {
@@ -69,6 +75,8 @@ impl McpServer {
         Self {
             project_root: find_project_root(),
             global_path: global_db_path(),
+            project_store: RefCell::new(None),
+            global_store: RefCell::new(None),
         }
     }
 
@@ -76,6 +84,8 @@ impl McpServer {
         Self {
             project_root,
             global_path,
+            project_store: RefCell::new(None),
+            global_store: RefCell::new(None),
         }
     }
 
@@ -83,23 +93,63 @@ impl McpServer {
         self.project_root.join(".agent-mem").join("mem.db")
     }
 
-    fn open_store(&self, scope: &str, need_write: bool) -> Result<Store> {
-        match scope {
-            "global" => Store::open(&self.global_path, need_write),
-            "project" => Store::open(&self.project_db_path(), need_write),
+    fn open_store(&self, scope: &str, need_write: bool) -> Result<RefMut<'_, Store>> {
+        let (slot, path) = match scope {
+            "global" => (&self.global_store, self.global_path.clone()),
+            "project" => (&self.project_store, self.project_db_path()),
             other => Err(crate::error::Error::Usage(format!(
                 "Invalid scope '{}'. Supported scopes: 'project', 'global'",
                 other
-            ))),
+            )))?,
+        };
+
+        let mut cached = slot.borrow_mut();
+        if cached.is_none() {
+            *cached = Some(Store::open(&path, need_write)?);
         }
+        Ok(RefMut::map(cached, |store| {
+            store.as_mut().expect("store cache was initialized")
+        }))
     }
 
-    fn open_read_store(&self, scope: &str) -> Result<Option<Store>> {
+    fn open_read_store(&self, scope: &str) -> Result<Option<RefMut<'_, Store>>> {
         match self.open_store(scope, false) {
             Ok(store) => Ok(Some(store)),
             Err(crate::error::Error::NotInitialized) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    #[inline]
+    fn parse_relation(raw: &str) -> Result<(&str, &str)> {
+        let (rel_type, target) = raw.split_once(':').ok_or_else(|| {
+            crate::error::Error::Usage(format!(
+                "Invalid rel format '{}'. Expected 'rel_type:target'",
+                raw
+            ))
+        })?;
+        let rel_type = rel_type.trim();
+        let target = target.trim();
+        if rel_type.is_empty() || target.is_empty() {
+            return Err(crate::error::Error::Usage(
+                "Relation type and target cannot be empty".into(),
+            ));
+        }
+        Ok((rel_type, target))
+    }
+
+    fn bounded_text(mut text: String) -> String {
+        if text.len() <= MAX_TEXT_RESULT_BYTES {
+            return text;
+        }
+        const NOTICE: &str = "\n...[truncated: output budget]";
+        let mut end = MAX_TEXT_RESULT_BYTES.saturating_sub(NOTICE.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(NOTICE);
+        text
     }
 
     #[inline]
@@ -226,15 +276,15 @@ impl McpServer {
             "tools": [
                 {
                     "name": "mem_set",
-                    "description": "Store rule, decision, or gotcha.",
+                    "description": "Store a memory.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "key": { "type": "string" },
                             "val": { "type": "string" },
-                            "anchor": { "type": "string", "description": "Code anchor" },
-                            "kind": { "type": "string", "description": "rule|decision|gotcha|pattern" },
-                            "rel": { "type": "string", "description": "rel_type:target" },
+                            "anchor": { "type": "string", "description": "path[:line]" },
+                            "kind": { "type": "string", "enum": ["rule", "decision", "gotcha", "pattern"] },
+                            "rel": { "type": "string", "description": "type:target" },
                             "scope": { "type": "string", "enum": ["project", "global"] }
                         },
                         "required": ["key", "val"]
@@ -242,7 +292,7 @@ impl McpServer {
                 },
                 {
                     "name": "mem_find",
-                    "description": "Search memories by BM25 keyword.",
+                    "description": "Search memories.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -254,22 +304,22 @@ impl McpServer {
                 },
                 {
                     "name": "mem_context",
-                    "description": "Export dense memory context block.",
+                    "description": "Get relevant context.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "diff": { "type": "boolean" },
-                            "files": { "type": "string" },
+                            "files": { "type": "string", "description": "Comma-separated paths" },
                             "anchor": { "type": "string" },
                             "topic": { "type": "string" },
-                            "limit": { "type": "integer" },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
                             "scope": { "type": "string", "enum": ["all", "project", "global"] }
                         }
                     }
                 },
                 {
                     "name": "mem_manage",
-                    "description": "Archive, unarchive, delete, or link memories.",
+                    "description": "Archive, delete, or link memories.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -279,7 +329,7 @@ impl McpServer {
                             },
                             "key": { "type": "string" },
                             "reason": { "type": "string" },
-                            "rel": { "type": "string", "description": "rel_type:target" },
+                            "rel": { "type": "string", "description": "type:target" },
                             "scope": { "type": "string", "enum": ["project", "global"] }
                         },
                         "required": ["action", "key"]
@@ -412,18 +462,9 @@ impl McpServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("project");
 
+                let relation = rel.map(Self::parse_relation).transpose()?;
                 let mut store = self.open_store(scope, true)?;
-                store.set_entry(key, val, anchor, kind)?;
-                if let Some(r) = rel {
-                    if let Some((rel_type, target)) = r.split_once(':') {
-                        store.relate(key, rel_type, target)?;
-                    } else {
-                        return Err(crate::error::Error::Usage(format!(
-                            "Invalid rel format '{}'. Expected 'rel_type:target' (e.g. 'relates_to:target_key')",
-                            r
-                        )));
-                    }
-                }
+                store.set_entry_with_relation(key, val, anchor, kind, relation)?;
                 if scope == "project" {
                     let rules_file = self.project_root.join(".agent-rules");
                     if rules_file.exists() {
@@ -521,12 +562,18 @@ impl McpServer {
                 if lines.is_empty() {
                     Ok(format!("No memories found for '{}'", query))
                 } else {
-                    Ok(lines.join("\n"))
+                    Ok(Self::bounded_text(lines.join("\n")))
                 }
             }
 
             "mem_context" => {
-                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|value| usize::try_from(value).ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(DEFAULT_CONTEXT_LIMIT)
+                    .min(MAX_CONTEXT_LIMIT);
                 let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
                 if !matches!(scope, "all" | "project" | "global") {
                     return Err(crate::error::Error::Usage(format!(
@@ -557,6 +604,7 @@ impl McpServer {
                 }
 
                 let mut lines = Vec::new();
+                let mut remaining_rules = limit;
 
                 if (scope == "all" || scope == "project")
                     && let Some(store) = self.open_read_store("project")?
@@ -566,6 +614,7 @@ impl McpServer {
                     } else {
                         store.context_filtered(anchor, topic, limit)?
                     };
+                    remaining_rules = remaining_rules.saturating_sub(rules.len());
                     if !rules.is_empty() {
                         lines.push("== PROJECT RULES ==".to_string());
                         for r in rules {
@@ -598,13 +647,14 @@ impl McpServer {
                     }
                 }
 
-                if (scope == "all" || scope == "global")
+                if remaining_rules > 0
+                    && (scope == "all" || scope == "global")
                     && let Some(store) = self.open_read_store("global")?
                 {
-                    let rules = store.dump()?;
+                    let rules = store.dump_limited(remaining_rules)?;
                     if !rules.is_empty() {
                         lines.push("== GLOBAL PREFERENCES ==".to_string());
-                        for (k, v, a) in rules.into_iter().take(limit) {
+                        for (k, v, a) in rules {
                             match a {
                                 Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
                                 None => lines.push(format!("{}: {}", k, v)),
@@ -616,7 +666,7 @@ impl McpServer {
                 if lines.is_empty() {
                     Ok("No active context recorded.".to_string())
                 } else {
-                    Ok(lines.join("\n"))
+                    Ok(Self::bounded_text(lines.join("\n")))
                 }
             }
 
@@ -631,6 +681,25 @@ impl McpServer {
                     .get("scope")
                     .and_then(|v| v.as_str())
                     .unwrap_or("project");
+
+                let parsed_relation = match action {
+                    "archive" | "unarchive" | "delete" | "del" | "rm" => None,
+                    "relate" | "link" | "unrelate" | "unlink" => {
+                        let rel = args.get("rel").and_then(|v| v.as_str()).ok_or_else(|| {
+                            crate::error::Error::Usage(
+                                "Missing required argument 'rel'. Expected 'rel_type:target'"
+                                    .into(),
+                            )
+                        })?;
+                        Some(Self::parse_relation(rel)?)
+                    }
+                    unknown => {
+                        return Err(crate::error::Error::Usage(format!(
+                            "Unknown manage action '{}'. Supported actions: 'archive', 'unarchive', 'delete', 'relate', 'unrelate'",
+                            unknown
+                        )));
+                    }
+                };
 
                 let mut store = self.open_store(scope, true)?;
 
@@ -679,17 +748,7 @@ impl McpServer {
                         format!("deleted [{}] {}", scope, key)
                     }
                     "relate" | "link" => {
-                        let rel = args.get("rel").and_then(|v| v.as_str()).ok_or_else(|| {
-                            crate::error::Error::Usage(
-                                "Missing required argument 'rel' for relate action. Expected 'rel_type:target'".into(),
-                            )
-                        })?;
-                        let (rel_type, target) = rel.split_once(':').ok_or_else(|| {
-                            crate::error::Error::Usage(format!(
-                                "Invalid rel format '{}'. Expected 'rel_type:target' (e.g. 'supersedes:old_key')",
-                                rel
-                            ))
-                        })?;
+                        let (rel_type, target) = parsed_relation.expect("relation was validated");
                         store.relate(key, rel_type, target)?;
                         if scope == "project" {
                             let rules_file = self.project_root.join(".agent-rules");
@@ -700,17 +759,7 @@ impl McpServer {
                         format!("linked [{}] {} -> {} -> {}", scope, key, rel_type, target)
                     }
                     "unrelate" | "unlink" => {
-                        let rel = args.get("rel").and_then(|v| v.as_str()).ok_or_else(|| {
-                            crate::error::Error::Usage(
-                                "Missing required argument 'rel' for unrelate action. Expected 'rel_type:target'".into(),
-                            )
-                        })?;
-                        let (rel_type, target) = rel.split_once(':').ok_or_else(|| {
-                            crate::error::Error::Usage(format!(
-                                "Invalid rel format '{}'. Expected 'rel_type:target' (e.g. 'supersedes:old_key')",
-                                rel
-                            ))
-                        })?;
+                        let (rel_type, target) = parsed_relation.expect("relation was validated");
                         let unlinked = store.unrelate(key, rel_type, target)?;
                         if !unlinked {
                             return Err(crate::error::Error::NotFound(format!(
@@ -726,12 +775,7 @@ impl McpServer {
                         }
                         format!("unlinked [{}] {} -> {} -> {}", scope, key, rel_type, target)
                     }
-                    unknown => {
-                        return Err(crate::error::Error::Usage(format!(
-                            "Unknown manage action '{}'. Supported actions: 'archive', 'unarchive', 'delete', 'relate', 'unrelate'",
-                            unknown
-                        )));
-                    }
+                    _ => unreachable!("action was validated before opening the store"),
                 };
                 Ok(msg)
             }
