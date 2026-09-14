@@ -455,12 +455,10 @@ impl App {
                     self.reload_data()?;
                     self.set_toast("Database and diagnostics reloaded");
                 }
-                KeyCode::Esc => {
-                    if !self.filter_query.is_empty() {
-                        self.filter_query.clear();
-                        self.apply_filter();
-                        self.set_toast("Filter cleared");
-                    }
+                KeyCode::Esc if !self.filter_query.is_empty() => {
+                    self.filter_query.clear();
+                    self.apply_filter();
+                    self.set_toast("Filter cleared");
                 }
                 _ => {}
             },

@@ -87,21 +87,15 @@ impl ProjectRegistry {
         let config_file = if git_dir.is_dir() {
             git_dir.join("config")
         } else if git_dir.is_file() {
-            if let Ok(content) = fs::read_to_string(&git_dir) {
-                if let Some(gitdir_line) = content.lines().find(|l| l.starts_with("gitdir:")) {
-                    let rel_or_abs = gitdir_line.trim_start_matches("gitdir:").trim();
-                    let path = if Path::new(rel_or_abs).is_absolute() {
-                        PathBuf::from(rel_or_abs)
-                    } else {
-                        root.join(rel_or_abs)
-                    };
-                    path.join("config")
-                } else {
-                    return None;
-                }
+            let content = fs::read_to_string(&git_dir).ok()?;
+            let gitdir_line = content.lines().find(|l| l.starts_with("gitdir:"))?;
+            let rel_or_abs = gitdir_line.trim_start_matches("gitdir:").trim();
+            let path = if Path::new(rel_or_abs).is_absolute() {
+                PathBuf::from(rel_or_abs)
             } else {
-                return None;
-            }
+                root.join(rel_or_abs)
+            };
+            path.join("config")
         } else {
             return None;
         };
@@ -218,7 +212,7 @@ impl ProjectRegistry {
 
         // Sort most recently accessed first
         self.projects
-            .sort_by(|a, b| b.last_accessed.cmp(&a.last_accessed));
+            .sort_by_key(|a| std::cmp::Reverse(a.last_accessed));
 
         self.save()?;
         Ok(record)
