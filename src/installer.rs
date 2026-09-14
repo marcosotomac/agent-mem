@@ -879,3 +879,169 @@ pub fn check_all_clients() -> Vec<ClientStatus> {
         .map(|&c| check_client_status_with_home(c, home_path))
         .collect()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UninstallResult {
+    pub client: TargetClient,
+    pub path: PathBuf,
+    pub removed: bool,
+}
+
+pub fn uninstall_from_path(config_path: &Path, client: TargetClient) -> Result<UninstallResult> {
+    if !config_path.exists() {
+        return Ok(UninstallResult {
+            client,
+            path: config_path.to_path_buf(),
+            removed: false,
+        });
+    }
+
+    if client == TargetClient::Codex {
+        let raw = fs::read_to_string(config_path)?;
+        let mut lines = Vec::new();
+        let mut in_agent_mem_section = false;
+        let mut removed = false;
+
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed == "[mcp_servers.agent-mem]" || trimmed == "[mcp_servers.\"agent-mem\"]" {
+                in_agent_mem_section = true;
+                removed = true;
+                continue;
+            } else if in_agent_mem_section && trimmed.starts_with('[') {
+                in_agent_mem_section = false;
+            }
+
+            if !in_agent_mem_section {
+                lines.push(line);
+            }
+        }
+
+        if removed {
+            let mut new_content = lines.join("\n");
+            if !new_content.is_empty() && !new_content.ends_with('\n') {
+                new_content.push('\n');
+            }
+            fs::write(config_path, new_content)?;
+        }
+
+        return Ok(UninstallResult {
+            client,
+            path: config_path.to_path_buf(),
+            removed,
+        });
+    }
+
+    let raw = fs::read_to_string(config_path)?;
+    let clean = strip_json_comments(&raw);
+    let mut root_json: Value = match serde_json::from_str(&clean) {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(UninstallResult {
+                client,
+                path: config_path.to_path_buf(),
+                removed: false,
+            });
+        }
+    };
+
+    let mut removed = false;
+
+    if let Some(obj) = root_json.as_object_mut() {
+        // 1. VS Code: "servers"
+        if let Some(servers) = obj.get_mut("servers").and_then(|v| v.as_object_mut())
+            && servers.remove("agent-mem").is_some()
+        {
+            removed = true;
+        }
+
+        // 2. Zed: "context_servers"
+        if let Some(servers) = obj
+            .get_mut("context_servers")
+            .and_then(|v| v.as_object_mut())
+            && servers.remove("agent-mem").is_some()
+        {
+            removed = true;
+        }
+
+        // 3. OpenCode / KiloCode: "mcp"
+        if let Some(servers) = obj.get_mut("mcp").and_then(|v| v.as_object_mut())
+            && servers.remove("agent-mem").is_some()
+        {
+            removed = true;
+        }
+
+        // 4. Standard: "mcpServers" (object or array)
+        if let Some(mcp_servers) = obj.get_mut("mcpServers") {
+            if let Some(servers_obj) = mcp_servers.as_object_mut() {
+                if servers_obj.remove("agent-mem").is_some() {
+                    removed = true;
+                }
+            } else if let Some(arr) = mcp_servers.as_array_mut() {
+                let orig_len = arr.len();
+                arr.retain(|item| item.get("name").and_then(|n| n.as_str()) != Some("agent-mem"));
+                if arr.len() < orig_len {
+                    removed = true;
+                }
+            }
+        }
+    }
+
+    if removed {
+        let formatted =
+            serde_json::to_string_pretty(&root_json).map_err(|e| Error::Usage(e.to_string()))?;
+        fs::write(config_path, formatted)?;
+    }
+
+    Ok(UninstallResult {
+        client,
+        path: config_path.to_path_buf(),
+        removed,
+    })
+}
+
+pub fn uninstall_client(client: TargetClient) -> Result<UninstallResult> {
+    let home = env::var("AGENT_MEM_TEST_HOME")
+        .or_else(|_| env::var("HOME"))
+        .or_else(|_| env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .map_err(|_| Error::Usage("Could not determine user HOME directory".to_string()))?;
+
+    let path = client
+        .config_path_with_home(&home)
+        .ok_or_else(|| Error::Usage(format!("No config path for {}", client.display_name())))?;
+
+    uninstall_from_path(&path, client)
+}
+
+pub fn uninstall_clients(target: Option<&str>) -> Result<Vec<UninstallResult>> {
+    let home = env::var("AGENT_MEM_TEST_HOME")
+        .or_else(|_| env::var("HOME"))
+        .or_else(|_| env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .map_err(|_| Error::Usage("Could not determine user HOME directory".to_string()))?;
+
+    match target {
+        Some("all") | None => {
+            let mut results = Vec::new();
+            for &client in ALL_CLIENTS {
+                let status = check_client_status_with_home(client, &home);
+                if status.configured
+                    && let Some(config_path) = status.path
+                {
+                    results.push(uninstall_from_path(&config_path, client)?);
+                }
+            }
+            Ok(results)
+        }
+        Some(name) => {
+            let client = TargetClient::parse(name).ok_or_else(|| {
+                Error::Usage(format!(
+                    "Unknown client '{}'. Supported clients: claude, claude-code, codex, cursor, antigravity, gemini, windsurf, vscode, trae, zed, opencode, roocode, cline, continue, kiro, qwen, kilocode, all",
+                    name
+                ))
+            })?;
+            Ok(vec![uninstall_client(client)?])
+        }
+    }
+}

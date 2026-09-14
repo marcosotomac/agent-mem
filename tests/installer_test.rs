@@ -1,6 +1,6 @@
 use agent_mem::installer::{
     ALL_CLIENTS, TargetClient, install_detected_clients_with_home, install_to_path,
-    strip_json_comments,
+    strip_json_comments, uninstall_from_path,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -406,6 +406,110 @@ fn test_install_detected_clients_with_mock_home() {
     assert!(cursor_config.exists());
     let content = fs::read_to_string(&cursor_config).unwrap();
     assert!(content.contains("agent-mem"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_uninstall_from_path_json_and_toml() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_uninstall_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    // 1. Test standard mcpServers object (Cursor)
+    let cursor_path = temp_dir.join("cursor_mcp.json");
+    let initial_cursor = json!({
+        "mcpServers": {
+            "agent-mem": { "command": "agent-mem", "args": ["mcp"] },
+            "other-server": { "command": "other", "args": ["serve"] }
+        }
+    });
+    fs::write(
+        &cursor_path,
+        serde_json::to_string_pretty(&initial_cursor).unwrap(),
+    )
+    .unwrap();
+
+    let un_res = uninstall_from_path(&cursor_path, TargetClient::Cursor).unwrap();
+    assert!(un_res.removed);
+
+    let parsed_cursor: Value =
+        serde_json::from_str(&fs::read_to_string(&cursor_path).unwrap()).unwrap();
+    assert!(parsed_cursor["mcpServers"]["agent-mem"].is_null());
+    assert!(parsed_cursor["mcpServers"]["other-server"].is_object());
+
+    // Idempotent uninstall
+    let un_res2 = uninstall_from_path(&cursor_path, TargetClient::Cursor).unwrap();
+    assert!(!un_res2.removed);
+
+    // 2. Test Zed context_servers
+    let zed_path = temp_dir.join("zed_settings.json");
+    let initial_zed = json!({
+        "context_servers": {
+            "agent-mem": { "command": "agent-mem", "args": ["mcp"] },
+            "keep-me": { "command": "keep" }
+        }
+    });
+    fs::write(
+        &zed_path,
+        serde_json::to_string_pretty(&initial_zed).unwrap(),
+    )
+    .unwrap();
+
+    let un_zed = uninstall_from_path(&zed_path, TargetClient::Zed).unwrap();
+    assert!(un_zed.removed);
+    let parsed_zed: Value = serde_json::from_str(&fs::read_to_string(&zed_path).unwrap()).unwrap();
+    assert!(parsed_zed["context_servers"]["agent-mem"].is_null());
+    assert!(parsed_zed["context_servers"]["keep-me"].is_object());
+
+    // 3. Test Continue mcpServers array
+    let cont_path = temp_dir.join("continue_config.json");
+    let initial_cont = json!({
+        "mcpServers": [
+            { "name": "agent-mem", "command": "agent-mem", "args": ["mcp"] },
+            { "name": "preserve-this", "command": "preserve" }
+        ]
+    });
+    fs::write(
+        &cont_path,
+        serde_json::to_string_pretty(&initial_cont).unwrap(),
+    )
+    .unwrap();
+
+    let un_cont = uninstall_from_path(&cont_path, TargetClient::Continue).unwrap();
+    assert!(un_cont.removed);
+    let parsed_cont: Value =
+        serde_json::from_str(&fs::read_to_string(&cont_path).unwrap()).unwrap();
+    let arr = parsed_cont["mcpServers"].as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "preserve-this");
+
+    // 4. Test Codex TOML
+    let codex_path = temp_dir.join("codex_config.toml");
+    let toml_initial = "\
+[editor]
+theme = \"dark\"
+
+[mcp_servers.agent-mem]
+command = \"agent-mem\"
+args = [\"mcp\"]
+
+[mcp_servers.other]
+command = \"other\"
+";
+    fs::write(&codex_path, toml_initial).unwrap();
+
+    let un_codex = uninstall_from_path(&codex_path, TargetClient::Codex).unwrap();
+    assert!(un_codex.removed);
+    let toml_after = fs::read_to_string(&codex_path).unwrap();
+    assert!(!toml_after.contains("[mcp_servers.agent-mem]"));
+    assert!(toml_after.contains("[editor]"));
+    assert!(toml_after.contains("[mcp_servers.other]"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
