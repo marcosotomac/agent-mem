@@ -51,7 +51,7 @@ fn test_mcp_dual_era_discovery_and_modern_tools() {
     };
     let result = server.handle_request(&list).unwrap().result.unwrap();
     assert_eq!(result["resultType"], "complete");
-    assert_eq!(result["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(result["tools"].as_array().unwrap().len(), 4);
     assert_eq!(result["cacheScope"], "public");
 
     let call = JsonRpcRequest {
@@ -235,12 +235,15 @@ fn test_mcp_initialize_and_tools_list() {
     let tools = list_result["tools"].as_array().unwrap().clone();
     assert_eq!(
         tools.len(),
-        3,
-        "must have exactly 3 surgical tools to preserve token budget"
+        4,
+        "must have exactly 4 surgical tools to preserve token budget"
     );
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(tool_names, vec!["mem_set", "mem_find", "mem_context"]);
+    assert_eq!(
+        tool_names,
+        vec!["mem_set", "mem_find", "mem_context", "mem_manage"]
+    );
     assert!(list_result["resultType"].is_null());
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -557,6 +560,218 @@ fn test_mcp_exceptions_and_errors() {
         !err_msg.contains("No memories found"),
         "Must not hide corruption as 'No memories found'"
     );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcp_manage_lifecycle_and_file_sync() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_manage_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let global_dir = temp_dir.join("global");
+    fs::create_dir_all(&global_dir).unwrap();
+
+    let server = McpServer::with_paths(temp_dir.clone(), global_dir.join("global.db"));
+
+    // 1. Initialize project with .agent-rules
+    agent_mem::init::init_project(&temp_dir).unwrap();
+
+    // 2. Set base rules
+    let set_req1 = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {
+                "key": "decision/auth-v1",
+                "val": "Use legacy JWT",
+                "scope": "project"
+            }
+        }),
+    };
+    assert!(
+        !server.handle_request(&set_req1).unwrap().result.unwrap()["isError"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+
+    let set_req2 = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {
+                "key": "decision/auth-v2",
+                "val": "Use Paseto tokens",
+                "scope": "project"
+            }
+        }),
+    };
+    assert!(
+        !server.handle_request(&set_req2).unwrap().result.unwrap()["isError"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+
+    // 3. Relate auth-v2 -> supersedes -> auth-v1 via mem_manage
+    let link_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(3)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_manage",
+            "arguments": {
+                "action": "relate",
+                "key": "decision/auth-v2",
+                "rel": "supersedes:decision/auth-v1"
+            }
+        }),
+    };
+    let resp = server.handle_request(&link_req).unwrap();
+    let res = resp.result.unwrap();
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("linked [project] decision/auth-v2 -> supersedes -> decision/auth-v1")
+    );
+
+    let rules = fs::read_to_string(temp_dir.join(".agent-rules")).unwrap();
+    assert!(rules.contains("[rel] decision/auth-v2 -> supersedes -> decision/auth-v1"));
+
+    // 4. Archive auth-v1 via mem_manage
+    let archive_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(4)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_manage",
+            "arguments": {
+                "action": "archive",
+                "key": "decision/auth-v1",
+                "reason": "superseded by auth-v2"
+            }
+        }),
+    };
+    let resp = server.handle_request(&archive_req).unwrap();
+    let res = resp.result.unwrap();
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("archived [project] decision/auth-v1 (reason: superseded by auth-v2)")
+    );
+
+    let rules = fs::read_to_string(temp_dir.join(".agent-rules")).unwrap();
+    assert!(rules.contains(
+        "[archived] [decision] decision/auth-v1 = Use legacy JWT --reason: superseded by auth-v2"
+    ));
+
+    // 5. Unarchive auth-v1 via mem_manage
+    let unarchive_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(5)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_manage",
+            "arguments": {
+                "action": "unarchive",
+                "key": "decision/auth-v1"
+            }
+        }),
+    };
+    let resp = server.handle_request(&unarchive_req).unwrap();
+    let res = resp.result.unwrap();
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unarchived [project] decision/auth-v1")
+    );
+
+    // 6. Unrelate via mem_manage
+    let unlink_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(6)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_manage",
+            "arguments": {
+                "action": "unrelate",
+                "key": "decision/auth-v2",
+                "rel": "supersedes:decision/auth-v1"
+            }
+        }),
+    };
+    let resp = server.handle_request(&unlink_req).unwrap();
+    let res = resp.result.unwrap();
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unlinked [project] decision/auth-v2 -> supersedes -> decision/auth-v1")
+    );
+
+    let rules = fs::read_to_string(temp_dir.join(".agent-rules")).unwrap();
+    assert!(!rules.contains("[rel] decision/auth-v2 -> supersedes -> decision/auth-v1"));
+
+    // 7. Delete auth-v1 via mem_manage
+    let del_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(7)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_manage",
+            "arguments": {
+                "action": "delete",
+                "key": "decision/auth-v1"
+            }
+        }),
+    };
+    let resp = server.handle_request(&del_req).unwrap();
+    let res = resp.result.unwrap();
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("deleted [project] decision/auth-v1")
+    );
+
+    let rules = fs::read_to_string(temp_dir.join(".agent-rules")).unwrap();
+    assert!(!rules.contains("decision/auth-v1"));
+
+    // 8. Delete nonexistent returns error
+    let del_again = server.handle_request(&del_req).unwrap();
+    assert_eq!(del_again.result.unwrap()["isError"], true);
+
+    // 9. Unknown action returns error
+    let unknown_action = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(8)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_manage",
+            "arguments": {
+                "action": "destroy",
+                "key": "decision/auth-v2"
+            }
+        }),
+    };
+    let resp = server.handle_request(&unknown_action).unwrap();
+    assert_eq!(resp.result.unwrap()["isError"], true);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

@@ -33,8 +33,8 @@ fn test_mcp_schema_token_budget_ratchet() {
     );
 
     assert!(
-        char_count < 1050,
-        "MCP schema footprint regressed! Current: {} chars (limit: 1050 chars / ~160 tokens)",
+        char_count < 1450,
+        "MCP schema footprint regressed! Current: {} chars (limit: 1450 chars / ~220 tokens)",
         char_count
     );
 
