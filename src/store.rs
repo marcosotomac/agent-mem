@@ -930,6 +930,175 @@ impl Store {
         Ok((rules, rels, sessions))
     }
 
+    /// Retrieve context specifically tailored to a set of active or modified files.
+    /// Matches rules anchored to any of the files, expands their 1-hop graph relations,
+    /// and includes universal rules (rules without an anchor or tagged as core architecture/rule).
+    pub fn context_for_files(
+        &self,
+        files: &[String],
+        topic: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<RuleRecord>, Vec<RelationRecord>, Vec<SessionEntry>)> {
+        if files.is_empty() {
+            return self.context_filtered(None, topic, limit);
+        }
+
+        let max_limit = if limit == 0 { 20 } else { limit };
+
+        // Normalize input file paths and extract basenames
+        let clean_files: Vec<(String, String)> = files
+            .iter()
+            .map(|f| {
+                let p = f.replace('\\', "/");
+                let trimmed = p.trim_start_matches("./").to_string();
+                let basename = std::path::Path::new(&trimmed)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| trimmed.clone());
+                (trimmed, basename)
+            })
+            .collect();
+
+        // 1. Fetch all active memories
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key, val, anchor, archived_at, archive_reason, kind
+             FROM memories
+             WHERE archived_at IS NULL
+             ORDER BY key ASC;",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut all_memories = Vec::new();
+        while let Some(row) = rows.next()? {
+            all_memories.push(RuleRecord {
+                key: row.get(0)?,
+                val: row.get(1)?,
+                anchor: row.get(2)?,
+                archived_at: row.get(3)?,
+                archive_reason: row.get(4)?,
+                kind: row.get(5)?,
+            });
+        }
+
+        // 2. Classify: direct match vs universal rule
+        let mut direct_matches = Vec::new();
+        let mut direct_keys = std::collections::HashSet::new();
+        let mut universal_rules = Vec::new();
+
+        for m in all_memories {
+            let has_topic_match = if let Some(t) = topic.filter(|s| !s.trim().is_empty()) {
+                let clean_t = t.trim();
+                m.key.starts_with(clean_t) || m.key == clean_t
+            } else {
+                true
+            };
+            if !has_topic_match {
+                continue;
+            }
+
+            let is_universal = m.anchor.is_none() || m.anchor.as_deref().unwrap().trim().is_empty();
+
+            let mut is_matched = false;
+            if let Some(anchor_raw) = &m.anchor {
+                let anchor_norm = anchor_raw.replace('\\', "/");
+                for (file_path, file_basename) in &clean_files {
+                    let anchor_path_part = anchor_norm
+                        .trim_start_matches('@')
+                        .trim()
+                        .split(':')
+                        .next()
+                        .unwrap_or("");
+                    if anchor_norm.contains(file_path)
+                        || (!anchor_path_part.is_empty() && file_path.contains(anchor_path_part))
+                        || anchor_norm.contains(file_basename)
+                    {
+                        is_matched = true;
+                        break;
+                    }
+                }
+            }
+
+            if is_matched {
+                direct_keys.insert(m.key.clone());
+                direct_matches.push(m);
+            } else if is_universal {
+                universal_rules.push(m);
+            }
+        }
+
+        // 3. 1-hop hypergraph expansion from direct matches
+        let mut related_keys = std::collections::HashSet::new();
+        if !direct_keys.is_empty() {
+            let all_rels = self.get_all_relations().unwrap_or_default();
+            for rel in all_rels {
+                if direct_keys.contains(&rel.source_key) {
+                    related_keys.insert(rel.target_key.clone());
+                } else if direct_keys.contains(&rel.target_key) {
+                    related_keys.insert(rel.source_key.clone());
+                }
+            }
+        }
+
+        // 4. Combine: direct matches + 1-hop related + universal rules
+        let mut combined_rules = Vec::new();
+        let mut seen_keys = std::collections::HashSet::new();
+
+        // Add direct matches first (highest relevance)
+        for r in direct_matches {
+            if seen_keys.insert(r.key.clone()) {
+                combined_rules.push(r);
+            }
+        }
+
+        // Add 1-hop related memories
+        if !related_keys.is_empty() {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT key, val, anchor, archived_at, archive_reason, kind
+                 FROM memories
+                 WHERE archived_at IS NULL;",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let key: String = row.get(0)?;
+                if related_keys.contains(&key) && seen_keys.insert(key.clone()) {
+                    combined_rules.push(RuleRecord {
+                        key,
+                        val: row.get(1)?,
+                        anchor: row.get(2)?,
+                        archived_at: row.get(3)?,
+                        archive_reason: row.get(4)?,
+                        kind: row.get(5)?,
+                    });
+                }
+            }
+        }
+
+        // Add universal rules up to limit
+        for r in universal_rules {
+            if seen_keys.insert(r.key.clone()) {
+                combined_rules.push(r);
+            }
+        }
+
+        if combined_rules.len() > max_limit {
+            combined_rules.truncate(max_limit);
+        }
+
+        // Collect relevant relations
+        let mut rels = Vec::new();
+        if !combined_rules.is_empty() {
+            let keys: Vec<&str> = combined_rules.iter().map(|r| r.key.as_str()).collect();
+            let all_rels = self.get_all_relations().unwrap_or_default();
+            for r in all_rels {
+                if keys.contains(&r.source_key.as_str()) || keys.contains(&r.target_key.as_str()) {
+                    rels.push(r);
+                }
+            }
+        }
+
+        let sessions = self.session_list(3)?;
+        Ok((combined_rules, rels, sessions))
+    }
+
     /// Parse plain-text rules and graph relations (from .agent-rules).
     pub fn parse_rules_and_relations(content: &str) -> ParsedRules {
         let mut rules = Vec::new();

@@ -136,8 +136,10 @@ impl McpServer {
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "anchor": { "type": "string", "description": "Code anchor filter" },
-                                    "topic": { "type": "string", "description": "Topic filter" },
+                                    "diff": { "type": "boolean" },
+                                    "files": { "type": "string" },
+                                    "anchor": { "type": "string" },
+                                    "topic": { "type": "string" },
                                     "limit": { "type": "integer" },
                                     "scope": { "type": "string", "enum": ["all", "project", "global"] }
                                 }
@@ -324,15 +326,40 @@ impl McpServer {
                 let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
                 let topic = args.get("topic").and_then(|v| v.as_str());
+                let diff = args.get("diff").and_then(|v| v.as_bool()).unwrap_or(false);
+                let files_arg = args.get("files").and_then(|v| v.as_str()).unwrap_or("");
+                let mut files = Vec::new();
+                if !files_arg.is_empty() {
+                    for f in files_arg.split(',') {
+                        let t = f.trim();
+                        if !t.is_empty() {
+                            files.push(t.to_string());
+                        }
+                    }
+                }
+                if diff {
+                    let diff_files = crate::hook::get_diff_files(&self.project_root);
+                    for df in diff_files {
+                        if !files.contains(&df) {
+                            files.push(df);
+                        }
+                    }
+                }
 
                 let mut lines = Vec::new();
 
                 if (scope == "all" || scope == "project")
                     && let Ok(store) = self.open_store("project", false)
                 {
-                    let (rules, rels, sessions) = store
-                        .context_filtered(anchor, topic, limit)
-                        .unwrap_or_default();
+                    let (rules, rels, sessions) = if !files.is_empty() {
+                        store
+                            .context_for_files(&files, topic, limit)
+                            .unwrap_or_default()
+                    } else {
+                        store
+                            .context_filtered(anchor, topic, limit)
+                            .unwrap_or_default()
+                    };
                     if !rules.is_empty() {
                         lines.push("== PROJECT RULES ==".to_string());
                         for r in rules {

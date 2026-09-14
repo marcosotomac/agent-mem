@@ -539,3 +539,61 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
         dry_run: false,
     }))
 }
+
+/// Extract all files modified in the working tree (staged, unstaged, untracked)
+/// or fallback to files touched in HEAD commit.
+pub fn get_diff_files(root: &Path) -> Vec<String> {
+    if resolve_git_dir(root).is_none() {
+        return Vec::new();
+    }
+
+    let mut files = Vec::new();
+
+    // 1. Inspect uncommitted changes: git status --porcelain -uall
+    if let Ok(out) = Command::new("git")
+        .args(["status", "--porcelain", "-uall"])
+        .current_dir(root)
+        .output()
+        && out.status.success()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if line.len() > 3 {
+                let path_part = line[3..].trim();
+                let clean_path = if let Some((_, new_p)) = path_part.split_once(" -> ") {
+                    new_p.trim()
+                } else {
+                    path_part
+                };
+                let trimmed = clean_path.trim_matches('"');
+                if !trimmed.is_empty() && !files.iter().any(|f| f == trimmed) {
+                    files.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    // 2. If working tree is clean, fallback to files touched in HEAD commit
+    if files.is_empty()
+        && let Ok(out) = Command::new("git")
+            .args([
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "HEAD",
+            ])
+            .current_dir(root)
+            .output()
+        && out.status.success()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let trimmed = line.trim().trim_matches('"');
+            if !trimmed.is_empty() && !files.iter().any(|f| f == trimmed) {
+                files.push(trimmed.to_string());
+            }
+        }
+    }
+
+    files
+}
