@@ -500,7 +500,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())?;
                     let rules_file = root.join(".agent-rules");
                     if rules_file.exists() {
-                        let _ = store.export_to_file(&rules_file);
+                        store.export_to_file(&rules_file)?;
                     }
                     print_set(&key, anchor.as_deref(), kind.as_deref());
                 }
@@ -512,7 +512,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     store.relate(&source, &rel_type, &target)?;
                     let rules_file = root.join(".agent-rules");
                     if rules_file.exists() {
-                        let _ = store.export_to_file(&rules_file);
+                        store.export_to_file(&rules_file)?;
                     }
                     print_relate(&source, &rel_type, &target);
                 }
@@ -524,7 +524,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     let unlinked = store.unrelate(&source, &rel_type, &target)?;
                     let rules_file = root.join(".agent-rules");
                     if rules_file.exists() {
-                        let _ = store.export_to_file(&rules_file);
+                        store.export_to_file(&rules_file)?;
                     }
                     print_unrelate(&source, &rel_type, &target, unlinked);
                 }
@@ -532,7 +532,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     let deleted = store.del(&key)?;
                     let rules_file = root.join(".agent-rules");
                     if rules_file.exists() {
-                        let _ = store.export_to_file(&rules_file);
+                        store.export_to_file(&rules_file)?;
                     }
                     print_del(&key, deleted);
                 }
@@ -543,7 +543,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     }
                     let rules_file = root.join(".agent-rules");
                     if rules_file.exists() {
-                        let _ = store.export_to_file(&rules_file);
+                        store.export_to_file(&rules_file)?;
                     }
                     print_archive(&key, reason.as_deref());
                 }
@@ -554,7 +554,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     }
                     let rules_file = root.join(".agent-rules");
                     if rules_file.exists() {
-                        let _ = store.export_to_file(&rules_file);
+                        store.export_to_file(&rules_file)?;
                     }
                     print_unarchive(&key);
                 }
@@ -567,7 +567,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     if !dry_run && !report.is_empty() {
                         let rules_file = root.join(".agent-rules");
                         if rules_file.exists() {
-                            let _ = store.export_to_file(&rules_file);
+                            store.export_to_file(&rules_file)?;
                         }
                     }
                     print_clean(&report, dry_run);

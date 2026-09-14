@@ -36,9 +36,9 @@ fn main() {
             .as_nanos()
     ));
     fs::create_dir_all(&temp_dir).expect("failed to create temp bench dir");
-    let db_path = temp_dir.join("bench.db");
+    let db_path = temp_dir.join(".agent-mem").join("mem.db");
 
-    println!("[1/5] Seeding 2,000 realistic engineering rules & knowledge graph...");
+    println!("[1/6] Seeding 2,000 realistic engineering rules & knowledge graph...");
     let mut store = Store::open(&db_path, true).expect("failed to open store");
 
     let topics = [
@@ -96,7 +96,7 @@ fn main() {
     // ---------------------------------------------------------
     // Benchmark 1: Point Lookup Latency (Clustered B-tree)
     // ---------------------------------------------------------
-    println!("[2/5] Benchmarking Clustered B-Tree Point Lookups (5,000 iterations)...");
+    println!("[2/6] Benchmarking Clustered B-Tree Point Lookups (5,000 iterations)...");
     let mut lookup_times = Vec::with_capacity(5000);
     for i in 0..5000 {
         let topic = topics[i % topics.len()];
@@ -130,7 +130,7 @@ fn main() {
     // ---------------------------------------------------------
     // Benchmark 2: Full-Text Search (FTS5 BM25)
     // ---------------------------------------------------------
-    println!("[3/5] Benchmarking FTS5 BM25 Search (1,000 iterations)...");
+    println!("[3/6] Benchmarking FTS5 BM25 Search (1,000 iterations)...");
     let search_queries = [
         "zero-allocation buffers",
         "WAL mode isolation",
@@ -166,12 +166,12 @@ fn main() {
     // ---------------------------------------------------------
     // Benchmark 3: Knowledge Hypergraph 1-Hop Traversal
     // ---------------------------------------------------------
-    println!("[4/5] Benchmarking Knowledge Hypergraph 1-Hop Traversal (1,000 iterations)...");
+    println!("[4/6] Benchmarking Knowledge Hypergraph 1-Hop Traversal (1,000 iterations)...");
     let mut graph_times = Vec::with_capacity(1000);
     for i in 0..1000 {
         let key = format!("auth/rule_{:04}", (i * 3) % 2000);
         let t0 = Instant::now();
-        let _ = store.get_relations(&key);
+        store.get_relations(&key).expect("graph traversal");
         let elapsed = t0.elapsed().as_secs_f64() * 1_000_000.0;
         graph_times.push(elapsed);
     }
@@ -190,10 +190,39 @@ fn main() {
     println!("      Throughput: {:.0} traversals/sec\n", graph_ops);
 
     // ---------------------------------------------------------
-    // Benchmark 4: Token Budget & Context Filtering Efficiency
+    // Benchmark 4: MCP dispatch including connection setup, query, and result construction
     // ---------------------------------------------------------
-    println!("[5/5] Auditing Token Budget & Context Reduction...");
     let mcp = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+    println!("[5/6] Benchmarking MCP mem_find Dispatch (1,000 iterations)...");
+    let find_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_find",
+            "arguments": { "query": "zero-allocation buffers", "scope": "project" }
+        }),
+    };
+    let mut mcp_times = Vec::with_capacity(1000);
+    for _ in 0..1000 {
+        let t0 = Instant::now();
+        let response = mcp.handle_request(&find_req).expect("mcp response");
+        let elapsed = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        mcp_times.push(elapsed);
+        assert!(response.error.is_none());
+    }
+    mcp_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mcp_p50 = percentile(&mcp_times, 50.0);
+    let mcp_p95 = percentile(&mcp_times, 95.0);
+    let mcp_p99 = percentile(&mcp_times, 99.0);
+    println!("      p50:    {}", format_us(mcp_p50));
+    println!("      p95:    {}", format_us(mcp_p95));
+    println!("      p99:    {}\n", format_us(mcp_p99));
+
+    // ---------------------------------------------------------
+    // Benchmark 5: Token Budget & Context Filtering Efficiency
+    // ---------------------------------------------------------
+    println!("[6/6] Auditing Token Budget & Context Reduction...");
     let list_req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         id: Some(json!(1)),
@@ -223,7 +252,7 @@ fn main() {
     };
 
     println!(
-        "      MCP Tool Schema: {} chars (~{} tokens across 3 tools)",
+        "      MCP Tool Schema: {} chars (~{} tokens across 4 tools)",
         schema_chars, schema_tokens
     );
     println!(
@@ -255,15 +284,19 @@ fn main() {
 |---|---|---|---|---|
 | **Point Lookup Latency** | **{}** | ~14 ms | ~150 ms | N/A |
 | **BM25 Search Latency** | **{}** | ~14 ms | N/A (vector) | ~5 ms (grep) |
+| **MCP `mem_find` Dispatch** | **{}** | N/A | N/A | N/A |
 | **Graph 1-Hop Traversal** | **{}** | ~25 ms | ~200 ms | N/A |
 | **MCP Schema Overhead** | **{} chars (~{} tokens)** | 54 tools (~5,000 tok) | ~3,500 tok | 0 tok |
 | **Anchor Token Savings** | **{:.1}% reduction** | 0% (dump/vector) | 0% | N/A |
-| **Architecture** | **Single static binary (2.5MB)** | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
-| **Runtime Memory (RSS)** | **~3 MB** | ~250 MB | ~500 MB+ | 0 MB |
+| **Architecture** | **Single binary (2.4–2.7 MB)** | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
+| **Runtime Memory (RSS)** | **~2 MB** | ~250 MB | ~500 MB+ | 0 MB |
 | **Daemon Requirement** | **Zero daemons** | Pinned iii background engine | Docker / Python server | None |
-| **Git / Team Sync** | **Native `.agent-rules` (union merge)** | None (local state only) | Cloud / API only | Manual git merge |"#,
+| **Git / Team Sync** | **Native `.agent-rules` (union merge)** | None (local state only) | Cloud / API only | Manual git merge |
+
+*Only the agent-mem performance column is measured by this suite; competitor values are historical reference estimates.*"#,
         format_us(lookup_p50),
         format_us(fts_p50),
+        format_us(mcp_p50),
         format_us(graph_p50),
         schema_chars,
         schema_tokens,
@@ -285,6 +318,7 @@ fn main() {
         - **BM25 FTS5 Search (p50):** {}\n\
         - **BM25 FTS5 Search (p99):** {}\n\
         - **Graph 1-Hop Traversal (p50):** {}\n\
+        - **MCP `mem_find` Dispatch (p50):** {}\n\
         - **MCP Tool Schema:** {} characters (~{} tokens)\n\
         - **Anchor Context Reduction:** {:.1}%\n\n\
         ## Competitive Comparison\n\n\
@@ -299,6 +333,7 @@ fn main() {
         format_us(fts_p50),
         format_us(fts_p99),
         format_us(graph_p50),
+        format_us(mcp_p50),
         schema_chars,
         schema_tokens,
         token_reduction_pct,

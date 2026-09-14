@@ -1,4 +1,5 @@
 use agent_mem::mcp::{JsonRpcRequest, LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, McpServer};
+use agent_mem::store::Store;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
@@ -492,6 +493,16 @@ fn test_mcp_exceptions_and_errors() {
             .unwrap()
             .contains("Invalid rel format")
     );
+    let store = Store::open(&temp_dir.join(".agent-mem").join("mem.db"), false).unwrap();
+    assert!(
+        store.get_entry("k").unwrap().is_none(),
+        "a rejected relation must roll back its memory"
+    );
+    assert!(
+        store.get_all_relations().unwrap().is_empty(),
+        "a rejected relation must not leave an edge"
+    );
+    drop(store);
 
     // 7. mem_set with invalid scope returns isError: true
     let invalid_scope_set = JsonRpcRequest {
@@ -534,6 +545,7 @@ fn test_mcp_exceptions_and_errors() {
     );
 
     // 9. Storage error propagation: corrupted database in mem_find returns isError: true, NOT empty results
+    drop(server);
     let corrupted_db = temp_dir.join(".agent-mem").join("mem.db");
     fs::create_dir_all(corrupted_db.parent().unwrap()).unwrap();
     fs::write(&corrupted_db, b"THIS IS NOT A VALID SQLITE DATABASE").unwrap();
@@ -547,7 +559,10 @@ fn test_mcp_exceptions_and_errors() {
             "arguments": { "query": "auth", "scope": "project" }
         }),
     };
-    let resp = server.handle_request(&find_corrupted_req).unwrap();
+    let corrupted_server = McpServer::with_paths(temp_dir.clone(), global_dir.join("global.db"));
+    let resp = corrupted_server
+        .handle_request(&find_corrupted_req)
+        .unwrap();
     let res = resp.result.unwrap();
     assert_eq!(res["isError"], true);
     let err_msg = res["content"][0]["text"].as_str().unwrap();
@@ -772,6 +787,100 @@ fn test_mcp_manage_lifecycle_and_file_sync() {
     };
     let resp = server.handle_request(&unknown_action).unwrap();
     assert_eq!(resp.result.unwrap()["isError"], true);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcp_context_enforces_rule_and_output_budgets() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_budget_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let db_path = temp_dir.join(".agent-mem").join("mem.db");
+    let mut store = Store::open(&db_path, true).unwrap();
+    for i in 0..60 {
+        store
+            .set(&format!("rule/{i:03}"), &format!("compact value {i}"))
+            .unwrap();
+    }
+    drop(store);
+
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+    let capped_limit = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_context",
+            "arguments": { "scope": "project", "limit": u64::MAX }
+        }),
+    };
+    let result = server
+        .handle_request(&capped_limit)
+        .unwrap()
+        .result
+        .unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("rule/"))
+            .count(),
+        50
+    );
+
+    let mut store = Store::open(&db_path, true).unwrap();
+    store.set("rule/000", &"x".repeat(32 * 1024)).unwrap();
+    drop(store);
+    let capped_bytes = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_context",
+            "arguments": { "scope": "project", "limit": 1 }
+        }),
+    };
+    let result = server
+        .handle_request(&capped_bytes)
+        .unwrap()
+        .result
+        .unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.len() <= 16 * 1024);
+    assert!(text.ends_with("...[truncated: output budget]"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcp_invalid_relation_is_rejected_before_storage_io() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_prevalidate_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "k", "val": "v", "rel": "malformed" }
+        }),
+    };
+
+    let result = server.handle_request(&request).unwrap().result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(!temp_dir.join(".agent-mem").join("mem.db").exists());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

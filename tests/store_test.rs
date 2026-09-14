@@ -45,7 +45,7 @@ fn test_crud_lifecycle() {
 }
 
 #[test]
-fn test_fts_and_fallback() {
+fn test_fts_search_and_safe_query_sanitization() {
     let mut store = Store::open_in_memory().expect("open in memory db");
 
     store
@@ -444,6 +444,166 @@ feature/auth = Use Passkeys WebAuthn (@ src/webauthn.rs:20)
         store.get("feature/auth").unwrap().as_deref(),
         Some("Use Passkeys WebAuthn")
     );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_set_with_relation_rolls_back_on_relation_error() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_relation_rollback_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db_path = temp_dir.join("mem.db");
+
+    drop(Store::open(&db_path, true).unwrap());
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_relation_insert
+         BEFORE INSERT ON relations
+         BEGIN
+             SELECT RAISE(ABORT, 'forced relation failure');
+         END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = Store::open(&db_path, true).unwrap();
+    let result = store.set_entry_with_relation(
+        "decision/atomic",
+        "memory and edge commit together",
+        None,
+        Some("decision"),
+        Some(("depends_on", "architecture/storage")),
+    );
+    assert!(result.is_err());
+    assert!(store.get_entry("decision/atomic").unwrap().is_none());
+    assert!(store.get_all_relations().unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_relation_read_errors_are_never_silenced() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_relation_errors_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db_path = temp_dir.join("mem.db");
+
+    let mut store = Store::open(&db_path, true).unwrap();
+    store
+        .set_with_anchor("anchored", "matched rule", Some("src/matched.rs:1"))
+        .unwrap();
+    store.set("universal", "always relevant").unwrap();
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute("DROP TABLE relations;", []).unwrap();
+    drop(conn);
+
+    let store = Store::open(&db_path, false).unwrap();
+    assert!(store.context_filtered(None, None, 10).is_err());
+    assert!(
+        store
+            .context_for_files(&["src/matched.rs".into()], None, 10)
+            .is_err()
+    );
+    assert!(
+        store
+            .context_for_files(&["src/unmatched.rs".into()], None, 10)
+            .is_err()
+    );
+    assert!(store.export_rules_text().is_err());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_export_replaces_file_without_leaving_temporary_artifacts() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_atomic_export_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let rules_path = temp_dir.join(".agent-rules");
+    std::fs::write(&rules_path, "old partial-prone content").unwrap();
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set("architecture/atomic", "replace via rename")
+        .unwrap();
+    store.export_to_file(&rules_path).unwrap();
+
+    let exported = std::fs::read_to_string(&rules_path).unwrap();
+    assert!(exported.contains("architecture/atomic = replace via rename"));
+    assert!(!exported.contains("old partial-prone content"));
+    let leftovers: Vec<_> = std::fs::read_dir(&temp_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("..agent-rules.tmp-")
+        })
+        .collect();
+    assert!(leftovers.is_empty());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_failed_migration_rolls_back_schema_and_version() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_migration_rollback_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db_path = temp_dir.join("legacy.db");
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE memories (
+             key TEXT PRIMARY KEY,
+             val TEXT NOT NULL,
+             updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE relations (wrong_column TEXT);
+         PRAGMA user_version = 0;",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert!(Store::open(&db_path, true).is_err());
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .unwrap();
+    let anchor_columns: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'anchor';",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 0);
+    assert_eq!(anchor_columns, 0);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

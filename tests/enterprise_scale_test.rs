@@ -5,16 +5,16 @@ use std::thread;
 use std::time::Instant;
 
 #[test]
-fn test_massive_scale_10k_records_and_sub_millisecond_latency() {
+fn test_massive_scale_5k_records_and_sub_millisecond_latency() {
     let temp_dir = std::env::temp_dir().join(format!(
-        "agent_mem_enterprise_10k_{}",
+        "agent_mem_enterprise_5k_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
     std::fs::create_dir_all(&temp_dir).unwrap();
-    let db_path = temp_dir.join("enterprise_10k.db");
+    let db_path = temp_dir.join("enterprise_5k.db");
 
     let mut store = Store::open(&db_path, true).unwrap();
     let total_records = 5_000;
@@ -101,7 +101,7 @@ fn test_extreme_1mb_payload_handling() {
 }
 
 #[test]
-fn test_enterprise_high_concurrency_50_workers() {
+fn test_enterprise_high_concurrency_20_workers() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_enterprise_concurrency_{}",
         std::time::SystemTime::now()
