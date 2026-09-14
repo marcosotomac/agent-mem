@@ -7,9 +7,11 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 
 fn run_git(dir: &Path, args: &[&str]) -> String {
+    let mut full_args = vec!["-c", "core.hooksPath=/dev/null"];
+    full_args.extend_from_slice(args);
     let output = StdCommand::new("git")
         .current_dir(dir)
-        .args(args)
+        .args(&full_args)
         .output()
         .unwrap_or_else(|e| panic!("Failed to execute git {:?}: {}", args, e));
 
@@ -204,10 +206,19 @@ fn test_clean_in_post_commit_hook() {
     run_git(&temp_dir, &["add", "-A"]);
     run_git(&temp_dir, &["commit", "-m", "refactor: drop legacy code"]);
 
-    // Run post-commit hook
+    // Run post-commit hook (or inspect result if git hook already ran during commit)
     let report = run_post_commit(&temp_dir, false).unwrap().unwrap();
 
-    // Verify post-commit hook caught the zombie rule and cleaned it!
+    // Verify zombie was archived either by git's post-commit hook execution or by run_post_commit
+    let db_path = temp_dir.join(".agent-mem").join("mem.db");
+    let store = Store::open(&db_path, false).unwrap();
+    let entry = store.get_entry("gotcha/legacy").unwrap().unwrap();
+    assert!(entry.archived_at.is_some());
+    assert_eq!(
+        entry.archive_reason.as_deref(),
+        Some("file_deleted: src/legacy.rs")
+    );
+
     assert_eq!(report.zombies.len(), 1);
     assert_eq!(report.zombies[0].key, "gotcha/legacy");
     assert_eq!(report.zombies[0].missing_paths, vec!["src/legacy.rs"]);

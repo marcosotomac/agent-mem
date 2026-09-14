@@ -576,6 +576,9 @@ pub fn print_help() {
             "    {ACCENT}mcp{RESET}     {MUTED}install [client]{RESET} Configure AI editors (Windsurf, Cursor, VS Code, Zed, etc.)"
         );
         println!(
+            "    {ACCENT}mcp{RESET}     {MUTED}uninstall [client]{RESET} Remove from AI editors (or 'all')"
+        );
+        println!(
             "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
         );
         println!(
@@ -959,6 +962,40 @@ pub fn print_clean(report: &[crate::store::ZombieReport], dry_run: bool) {
             for z in report {
                 println!("  [{}] missing: {}", z.key, z.missing_paths.join(", "));
             }
+        }
+    }
+}
+
+pub fn print_mcp_uninstall(results: &[crate::installer::UninstallResult]) {
+    let is_tty = io::stdout().is_terminal();
+    if results.is_empty() {
+        if is_tty {
+            println!("  {MUTED}No configured MCP clients found to uninstall.{RESET}");
+        } else {
+            println!("No configured MCP clients found to uninstall.");
+        }
+        return;
+    }
+
+    for r in results {
+        let display = r.client.display_name();
+        let path_str = r.path.display().to_string();
+        if r.removed {
+            if is_tty {
+                println!(
+                    "  {EMERALD}✓{RESET}  {ACCENT}{}{RESET}  {MUTED}removed from {}{RESET}",
+                    display, path_str
+                );
+            } else {
+                println!("removed from {} ({})", display, path_str);
+            }
+        } else if is_tty {
+            println!(
+                "  {SUBTLE}·{RESET}  {MUTED}{} was not configured in {}{RESET}",
+                display, path_str
+            );
+        } else {
+            println!("{} was not configured in {}", display, path_str);
         }
     }
 }

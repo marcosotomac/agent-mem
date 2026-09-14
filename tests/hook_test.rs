@@ -10,9 +10,11 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 
 fn run_git(dir: &Path, args: &[&str]) -> String {
+    let mut full_args = vec!["-c", "core.hooksPath=/dev/null"];
+    full_args.extend_from_slice(args);
     let output = StdCommand::new("git")
         .current_dir(dir)
-        .args(args)
+        .args(&full_args)
         .output()
         .unwrap_or_else(|e| panic!("Failed to execute git {:?}: {}", args, e));
 

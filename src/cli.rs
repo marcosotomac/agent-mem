@@ -62,6 +62,9 @@ pub enum Command {
     McpInstall {
         client: Option<String>,
     },
+    McpUninstall {
+        client: Option<String>,
+    },
     Doctor,
     Projects {
         prune: bool,
@@ -320,6 +323,15 @@ where
                     None
                 };
                 Ok(Command::McpInstall { client })
+            } else if args.len() >= 3
+                && (args[2] == "uninstall" || args[2] == "remove" || args[2] == "rm")
+            {
+                let client = if args.len() >= 4 {
+                    Some(args[3].clone())
+                } else {
+                    None
+                };
+                Ok(Command::McpUninstall { client })
             } else {
                 Ok(Command::Mcp)
             }
@@ -411,6 +423,11 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     }
                 }
             }
+            Ok(())
+        }
+        Command::McpUninstall { client } => {
+            let results = crate::installer::uninstall_clients(client.as_deref())?;
+            print_mcp_uninstall(&results);
             Ok(())
         }
         Command::Tui => {
@@ -612,7 +629,8 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 | Command::HookPostCommit { .. }
                 | Command::Tui
                 | Command::Mcp
-                | Command::McpInstall { .. } => unreachable!(),
+                | Command::McpInstall { .. }
+                | Command::McpUninstall { .. } => unreachable!(),
             }
             Ok(())
         }
