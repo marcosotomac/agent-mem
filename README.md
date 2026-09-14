@@ -21,20 +21,20 @@ Ultra-fast, local-first, zero-daemon knowledge hypergraph and memory engine for 
 
 `agent-mem` is engineered for extreme sub-millisecond execution, zero daemons, and radical prompt token discipline.
 
-| Metric | agent-mem | agentmemory | mem0 | Static (CLAUDE.md) |
-|---|---|---|---|---|
-| **Point Lookup Latency (p50)** | **1.25 µs** | ~14 ms | ~150 ms | N/A |
-| **BM25 Search Latency (p50)** | **289.96 µs** | ~14 ms | N/A (vector) | ~5 ms (grep) |
-| **MCP `mem_find` Dispatch (p50)** | **1.10 ms** | N/A | N/A | N/A |
-| **Graph 1-Hop Traversal (p50)**| **0.96 µs** | ~25 ms | ~200 ms | N/A |
-| **MCP Schema Overhead** | **1,376 chars (~344 tok)** | 54 tools (~5,000 tok) | ~3,500 tok | 0 tok |
-| **Anchor Token Savings** | **99.0% reduction** | 0% (dump/vector) | 0% | N/A |
-| **Architecture** | **Single binary (2.4–2.7 MB)** | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
-| **Runtime Memory (RSS)** | **~2 MB** | ~250 MB | ~500 MB+ | 0 MB |
-| **Daemon Requirement** | **Zero daemons** | Pinned iii background engine | Docker / Python server | None |
-| **Git / Team Sync** | **Native `.agent-rules` (union merge)** | None (local state only) | Cloud / API only | Manual git merge |
+| Metric | agent-mem | engram 1.20.0 | agentmemory | mem0 | Static (CLAUDE.md) |
+|---|---|---|---|---|---|
+| **Point Lookup Latency (p50)** | **1.33 µs** | ~45 µs | ~14 ms | ~150 ms | N/A |
+| **BM25 Search Latency (p50)** | **293.04 µs** | ~480 µs | ~14 ms | N/A (vector) | ~5 ms (grep) |
+| **MCP Search Dispatch (p50)** | **1.09 ms** | 125.71 µs | N/A | N/A | N/A |
+| **Graph 1-Hop Traversal (p50)**| **1.00 µs** | ~120 µs | ~25 ms | ~200 ms | N/A |
+| **MCP Schema Overhead** | **1,376 chars (~344 tok)** | 20,476 chars (~5,119 tok) | 54 tools (~5,000 tok) | ~3,500 tok | 0 tok |
+| **Anchor Token Savings** | **99.0% reduction** | 0% (dump format) | 0% (dump/vector) | 0% | N/A |
+| **Architecture** | **Single binary (2.4–2.7 MB)** | Single binary (18.0 MB, Go) | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
+| **Runtime Memory (RSS)** | **~2 MB** | ~28 MB | ~250 MB | ~500 MB+ | 0 MB |
+| **Daemon Requirement** | **Zero daemons** | Zero daemons | Pinned iii background engine | Docker / Python server | None |
+| **Git / Team Sync** | **Native `.agent-rules` (union merge)** | Binary chunks / Cloud Sync | None (local state only) | Cloud / API only | Manual git merge |
 
-*Only the agent-mem performance column is measured by the local suite; competitor values are historical reference estimates.*
+*agent-mem and engram performance columns are measured directly on your machine when binaries are present; competitor values are historical reference estimates.*
 
 *Run the benchmark locally on your machine:*
 ```bash
