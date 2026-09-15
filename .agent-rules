@@ -9,8 +9,13 @@ architecture/mcp-de-provisioning = agent-mem mcp uninstall [client|all] provides
 [decision] architecture/mcp-dual-era = Stateless dual-era MCP supports legacy 2024-11-05 initialization and modern 2026-07-28 per-request metadata with server/discover, cold-path validation, cacheable discovery, and no new runtime dependencies. (@ src/mcp.rs:9)
 [decision] architecture/mcp-manage-lifecycle = mem_manage tool provides full lifecycle control (archive, unarchive, delete, relate, unrelate) in a single consolidated schema (<1450 chars ratchet) with atomic SQLite transactions and .agent-rules sync. (@ src/mcp.rs:135)
 architecture/mcp-strict-storage-integrity = agent-mem MCP propagates all SQLite I/O failures (isError: true) instead of swallowing them, enforces write consistency across relations and .agent-rules export, and validates scopes strictly
+[decision] architecture/modular-store-complete = Completed modular refactoring of store.rs into 6 cohesive modules: models, schema, graph, session, sync, and core mod.rs with 100% API compatibility, 0 clippy warnings, and all 19 test suites green. (@ src/store/mod.rs:1)
+[decision] architecture/modular-store-domain = Refactor monolithic store.rs into domain module src/store/ starting with pure models and records in store/models.rs with zero breaking changes and 100% test pass. (@ src/store/models.rs:1)
+[decision] architecture/modular-store-graph = Extract hypergraph traversal, directed relations, anchor-based context filtering with 1-hop expansion, and zombie pruning to src/store/graph.rs. (@ src/store/graph.rs:1)
+[decision] architecture/modular-store-schema = Extract SQLite connection setup, WAL pragmas, v1-v3 migrations, and runtime stats to src/store/schema.rs with transaction rollback safety. (@ src/store/schema.rs:1)
 [decision] architecture/zero-friction-init = Single-command init with auto-configured AI editor MCP clients and robust git worktree/submodule commondir hook resolution (@ src/init.rs:60)
 [decision] benchmark/competitive-suite = Automated benchmark suite (cargo bench) measuring sub-microsecond B-tree reads (1.38µs), BM25 (294µs), hypergraph traversals (1.00µs), and 99% anchor token reduction (@ benches/bench_suite.rs:1)
+[decision] bugfix/registry-tempdir-pollution = Prevent ephemeral temp paths from registering or persisting to projects.json when AGENT_MEM_GLOBAL_DIR is not set. Fixes registry pollution from cargo test runs. (@ src/registry.rs:127)
 [decision] decision/hook = add zero-overhead git lifecycle auto-capture post-commit hook (@ src/cli.rs:1, src/hook.rs:1, src/init.rs:1)
 feature/selective-context = Selective context filtering via git diff or files: matches anchored rules, expands 1-hop hypergraph relations, includes universal rules, 90%+ token reduction
 release/v1.1.0 = Release v1.1.0 published: benchmark suite (cargo bench), AI client auto-setup, thread-safe test isolation, and GitHub release artifacts
@@ -18,6 +23,3 @@ release/v1.1.0 = Release v1.1.0 published: benchmark suite (cargo bench), AI cli
 # Relations
 [rel] architecture/zero-friction-init -> relates_to -> architecture/canonical-project-registry
 [rel] benchmark/competitive-suite -> relates_to -> architecture/zero-friction-init
-
-# Archived Rules
-[archived] architecture/auth = JWT RS256 with key rotation (@ src/auth/jwt.rs:42) --reason: file_deleted: src/auth/jwt.rs

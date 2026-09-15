@@ -123,6 +123,18 @@ impl ProjectRegistry {
         p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
     }
 
+    /// Check if a path is located in a system temporary directory
+    pub fn is_temporary_path(path: &Path) -> bool {
+        let temp = std::env::temp_dir();
+        let canonical_temp = temp.canonicalize().unwrap_or_else(|_| temp.clone());
+        path.starts_with(&temp)
+            || path.starts_with(&canonical_temp)
+            || path.starts_with("/tmp")
+            || path.starts_with("/var/folders")
+            || path.starts_with("/private/var/folders")
+            || path.starts_with("/private/tmp")
+    }
+
     /// Generate deterministic stable ID
     pub fn generate_id(canonical_path: &str, git_remote: Option<&str>) -> String {
         let key = git_remote.unwrap_or(canonical_path);
@@ -204,6 +216,13 @@ impl ProjectRegistry {
             db_size_bytes,
         };
 
+        // If registering to the default global registry (no AGENT_MEM_GLOBAL_DIR set)
+        // and the path is within a temporary directory (e.g. from tests or /tmp),
+        // do not persist it to the global projects.json.
+        if env::var("AGENT_MEM_GLOBAL_DIR").is_err() && Self::is_temporary_path(&canonical) {
+            return Ok(record);
+        }
+
         if let Some(idx) = found_index {
             self.projects[idx] = record.clone();
         } else {
@@ -218,11 +237,15 @@ impl ProjectRegistry {
         Ok(record)
     }
 
-    /// Prune dead projects (directories or databases that no longer exist)
+    /// Prune dead projects (directories or databases that no longer exist, or ephemeral temp paths in global registry)
     pub fn prune(&mut self) -> Result<usize> {
         let before_len = self.projects.len();
+        let is_global_default = env::var("AGENT_MEM_GLOBAL_DIR").is_err();
         self.projects.retain(|p| {
             let path = Path::new(&p.canonical_path);
+            if is_global_default && Self::is_temporary_path(path) {
+                return false;
+            }
             path.exists() && path.join(".agent-mem").join("mem.db").exists()
         });
         let removed = before_len - self.projects.len();
