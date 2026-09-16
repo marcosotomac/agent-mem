@@ -8,38 +8,33 @@
 Ultra-fast, local-first, zero-daemon knowledge hypergraph and memory engine for AI coding agents.
 
 ## Design Principles
-- **Sub-millisecond latency**: Embedded SQLite in WAL mode with clustered B-tree index (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`). Sub-60µs point reads, <15µs relation traversal.
+- **Fast local reads**: Embedded SQLite in WAL mode with a clustered B-tree (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`). See the benchmark for measured operation latencies, including MCP and export costs.
 - **Clustered Knowledge Hypergraph**: Evolve beyond flat key-value pairs into engineering entities (`rule`, `decision`, `gotcha`, `pattern`) linked with typed directed edges (`mitigates`, `supersedes`, `depends_on`, `relates_to`).
-- **Anchor-Aware Context Filtering**: Surgical prompt retrieval by repository anchor (`context --anchor src/auth.rs:10`) with 1-hop graph expansion, slashing token waste by >95% (from ~1,500 tokens down to <60 tokens).
+- **Anchor-Aware Context Filtering**: Retrieve rules by repository anchor (`context --anchor src/auth.rs:10`) with 1-hop graph expansion. The benchmark reports filtering savings separately from truncation and checks relevant-rule retention.
 - **Minimal token footprint**: Four consolidated MCP tools in 1,376 schema characters (~344 tokens by the documented 4-char estimate), with bounded plain-text results and anchor-aware retrieval.
 - **Zero background daemons**: Direct stdio communication without background HTTP processes or port collisions.
 - **Dual scopes**: Seamless access to isolated `project` memory (`.agent-mem/mem.db`) and user-level `global` preferences (`~/.config/agent-mem/global.db`).
 - **BM25 search**: Full-text search powered by SQLite FTS5 with Porter stemming indexing keys, values, anchors, reasons, and entity kinds.
 - **Session ring buffer**: Automatic atomic pruning preserving the latest 20 session checkpoints.
 
-## Benchmarks & Competitor Comparison
+## Benchmarks
 
-`agent-mem` is engineered for extreme sub-millisecond execution, zero daemons, and radical prompt token discipline.
-
-| Metric | agent-mem | engram 1.20.0 | agentmemory | mem0 | Static (CLAUDE.md) |
-|---|---|---|---|---|---|
-| **Point Lookup Latency (p50)** | **1.33 µs** | ~45 µs | ~14 ms | ~150 ms | N/A |
-| **BM25 Search Latency (p50)** | **293.04 µs** | ~480 µs | ~14 ms | N/A (vector) | ~5 ms (grep) |
-| **MCP Search Dispatch (p50)** | **1.09 ms** | 125.71 µs | N/A | N/A | N/A |
-| **Graph 1-Hop Traversal (p50)**| **1.00 µs** | ~120 µs | ~25 ms | ~200 ms | N/A |
-| **MCP Schema Overhead** | **1,376 chars (~344 tok)** | 20,476 chars (~5,119 tok) | 54 tools (~5,000 tok) | ~3,500 tok | 0 tok |
-| **Anchor Token Savings** | **99.0% reduction** | 0% (dump format) | 0% (dump/vector) | 0% | N/A |
-| **Architecture** | **Single binary (2.4–2.7 MB)** | Single binary (18.0 MB, Go) | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
-| **Runtime Memory (RSS)** | **~2 MB** | ~28 MB | ~250 MB | ~500 MB+ | 0 MB |
-| **Daemon Requirement** | **Zero daemons** | Zero daemons | Pinned iii background engine | Docker / Python server | None |
-| **Git / Team Sync** | **Native `.agent-rules` (union merge)** | Binary chunks / Cloud Sync | None (local state only) | Cloud / API only | Manual git merge |
-
-*agent-mem and engram performance columns are measured directly on your machine when binaries are present; competitor values are historical reference estimates.*
-
-*Run the benchmark locally on your machine:*
+Run the reproducible local benchmark in release mode:
 ```bash
-cargo bench
+cargo bench --bench bench_suite
 ```
+
+[Measured results and methodology](BENCHMARK.md) cover point reads, FTS5 search,
+outgoing edge lookup, warm in-process MCP search, selective context, full export,
+and writes with export. The corpus contains 2,000 memories and 666 valid directed edges.
+Results include p50, p95 and p99; they depend on hardware and workload. MCP timings
+exclude process startup and stdio transport.
+
+Context measurements separate filtering from result caps and verify the untruncated
+result against the relevant rules. Byte reduction is not a tokenizer measurement.
+Cross-engine rankings are omitted until datasets, queries, transport and limits match.
+The default report is written to `target/benchmark.md`; use
+`AGENT_MEM_BENCH_REPORT=BENCHMARK.md cargo bench --bench bench_suite` to refresh the tracked report.
 
 ## Installation
 
@@ -79,7 +74,7 @@ agent-mem relate <source_key> <rel_type> <target_key>
 # Remove a hypergraph relation
 agent-mem unrelate <source_key> <rel_type> <target_key>
 
-# Read a rule value in raw text (<0.2ms)
+# Read a rule value in raw text
 agent-mem get <key>
 
 # Delete a rule and all its connected relations
@@ -137,17 +132,17 @@ Engineering memory is not flat. `agent-mem` supports 4 first-class entities and 
 Auto-inference detects key prefixes like `decision/*`, `adr/*`, `gotcha/*`, `bug/*`, `trap/*`, `pattern/*` automatically.
 
 ### Anchor-Aware Retrieval (Token Ratchet)
-Dumping 50+ rules into every agent prompt wastes 1,500+ tokens. With code anchors:
+Prompt size grows with the number of injected rules. Filter by code anchor:
 ```bash
 agent-mem context --anchor src/auth/jwt.rs
 ```
-`agent-mem` retrieves only memories directly anchored to that file path plus their 1-hop hypergraph neighbors (e.g. connected gotchas and ADRs), cutting prompt bloat down to **<60 tokens (>95% reduction)**.
+`agent-mem` retrieves memories directly anchored to that file path plus their outgoing 1-hop neighbors (e.g. connected gotchas and ADRs). Savings depend on the corpus and query. A result limit can omit relevant memories; the benchmark reports that loss separately from filtering savings.
 
 ## Team Git Sync (No Binary Conflicts)
 
 Unlike legacy memory engines that commit binary SQLite databases into Git (causing unresolvable merge conflicts) or require proprietary cloud sync, `agent-mem` uses a deterministic text sync protocol:
 
-- Local `.agent-mem/mem.db` stays in `.gitignore` as an ultra-fast sub-millisecond local cache.
+- Local `.agent-mem/mem.db` stays in `.gitignore` as a local SQLite cache.
 - Project conventions and graph relations are version-controlled in `.agent-rules` as clean, PR-reviewable plain text:
   ```text
   [decision] auth/jwt = Use RS256 with key rotation (@ src/auth/jwt.rs:42)
@@ -155,6 +150,8 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
   [rel] auth/jwt -> mitigates -> gotcha/token-leak
   ```
 - `agent-mem set`, `relate`, `unrelate`, `del`, `archive`, and `unarchive` automatically update `.agent-rules` in real time.
+- `agent-mem init` imports an existing `.agent-rules` before the first local write, including in freshly cloned repositories. Duplicate relations are imported idempotently.
+- Simple rules retain the readable format above. Ambiguous content (multiline text, literal ` @ `, reserved key prefixes or metadata delimiters) uses `[rule-json-v1]` followed by a JSON record on one line. Ambiguous relation fields use `[rel-json-v1]` followed by a three-string JSON array. Escapes preserve the original content; MCP responses remain unchanged. Encoded archive timestamps use the stable marker `1`, like the legacy format. Sync rejects malformed encoded records before changing the database. Team members must use a version supporting these markers before syncing such files.
 - Obsolete conventions are soft-deprecated into an `# Archived Rules` block with migration reasons, preventing AI agents from repeating dead patterns while sparing prompt tokens.
 - `agent-mem init` installs Git hooks (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) that automatically keep `.agent-rules` and local SQLite in sync across rebases and branch switches. Zero binary conflicts, 100% PR visibility!
 

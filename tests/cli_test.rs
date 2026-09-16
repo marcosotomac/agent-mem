@@ -622,3 +622,45 @@ fn test_init_git_submodule_hook_resolution() {
 
     let _ = fs::remove_dir_all(&base_temp);
 }
+
+#[test]
+fn test_init_imports_cloned_rules_before_first_write() {
+    use agent_mem::store::Store;
+    let dir = std::env::temp_dir().join(format!("agent_mem_clone_init_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(".agent-rules");
+    let shared = "team/rule = Preserve convention\n[archived] old = Obsolete --reason: Replaced\n[rel] team/rule -> supersedes -> old\n";
+    fs::write(&path, shared).unwrap();
+    agent_mem::init::init_project(&dir).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), shared);
+    let db = dir.join(".agent-mem/mem.db");
+    {
+        let store = Store::open(&db, false).unwrap();
+        assert_eq!(
+            store.get("team/rule").unwrap().as_deref(),
+            Some("Preserve convention")
+        );
+        assert!(store.get_entry("old").unwrap().unwrap().is_archived());
+        assert_eq!(store.get_all_relations().unwrap().len(), 1);
+    }
+    agent_mem::cli::execute_command(
+        Command::Set {
+            key: "local/rule".into(),
+            val: "New convention".into(),
+            anchor: None,
+            kind: None,
+        },
+        &dir,
+    )
+    .unwrap();
+    let exported = fs::read_to_string(&path).unwrap();
+    assert!(exported.contains("team/rule = Preserve convention"));
+    assert!(exported.contains("local/rule = New convention"));
+    // Reinitializing must be idempotent and import the authoritative team file.
+    agent_mem::init::init_project(&dir).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), exported);
+    let store = Store::open(&db, false).unwrap();
+    assert_eq!(store.dump_all().unwrap().len(), 3);
+    drop(store);
+    fs::remove_dir_all(dir).unwrap();
+}

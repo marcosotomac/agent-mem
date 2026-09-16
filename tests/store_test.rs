@@ -434,12 +434,17 @@ feature/auth = Use OAuth2 PKCE (@ src/auth.rs:10)
 =======
 feature/auth = Use Passkeys WebAuthn (@ src/webauthn.rs:20)
 >>>>>>> branch-b
+[rel] feature/auth -> depends_on -> arch/db
+[rel] feature/auth -> depends_on -> arch/db
 "#;
     std::fs::write(&rules_path, conflict_content).unwrap();
 
     // Sync must not crash with UNIQUE constraint error
     let report = store.sync_with_file(&rules_path).unwrap();
     assert_eq!(report.total, 2); // arch/db and feature/auth (last one wins)
+    assert_eq!(store.get_all_relations().unwrap().len(), 1);
+    store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(store.get_all_relations().unwrap().len(), 1);
     assert_eq!(
         store.get("feature/auth").unwrap().as_deref(),
         Some("Use Passkeys WebAuthn")
@@ -606,4 +611,149 @@ fn test_failed_migration_rolls_back_schema_and_version() {
     assert_eq!(anchor_columns, 0);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_sync_roundtrip_preserves_ambiguous_content_and_metadata() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_escaped_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(".agent-rules");
+    let mut store = Store::open_in_memory().unwrap();
+    let values = [
+        "First line\nSecond line",
+        "Deploy @ staging",
+        "Literal (@ src/example.rs:10)",
+        "Pass --reason: unchanged",
+        "Pass --reason unchanged",
+        "CRLF\r\nTabs\tand Unicode: español 🦀",
+        r#"Quotes "hello" and literal \n stay intact"#,
+        "Text\ninjected/key = must remain inside the value",
+    ];
+    for (i, val) in values.iter().enumerate() {
+        store.set(&format!("case/{i}"), val).unwrap();
+    }
+    for byte in (0u8..32).chain(std::iter::once(127)) {
+        store
+            .set(
+                &format!("control/{byte}"),
+                &format!("before{}after", char::from(byte)),
+            )
+            .unwrap();
+    }
+    for key in [
+        "#comment",
+        "[decision] literal",
+        "key=with=equals",
+        "key\nnewline",
+        "a -> b",
+    ] {
+        store
+            .set_entry(key, "literal", Some("src/a @ b.rs:1"), Some("CustomKind"))
+            .unwrap();
+    }
+    store
+        .set_entry("decision/override", "explicit rule", None, Some("rule"))
+        .unwrap();
+    store
+        .archive("case/0", Some("Replaced\nUse @ next --reason: literal"))
+        .unwrap();
+    store.relate("a -> b", "relates_to", "case/0").unwrap();
+    store.relate("case/1", "depends_on", "case/2").unwrap();
+
+    let exported = store.export_rules_text().unwrap();
+    assert!(exported.contains("[rule-json-v1]"));
+    assert!(exported.contains("[rel-json-v1]"));
+    assert!(exported.contains("[rule] decision/override = explicit rule"));
+    std::fs::write(&path, &exported).unwrap();
+    let mut imported = Store::open_in_memory().unwrap();
+    imported.sync_with_file(&path).unwrap();
+    assert_eq!(imported.export_rules_text().unwrap(), exported);
+    for original in store.dump_all().unwrap() {
+        let restored = imported.get_entry(&original.key).unwrap().unwrap();
+        assert_eq!(restored.val, original.val);
+        assert_eq!(restored.kind, original.kind);
+        assert_eq!(restored.anchor, original.anchor);
+        assert_eq!(restored.archive_reason, original.archive_reason);
+        assert_eq!(restored.is_archived(), original.is_archived());
+    }
+    assert_eq!(imported.get_all_relations().unwrap().len(), 2);
+    assert_eq!(imported.get("injected/key").unwrap(), None);
+    assert!(!imported.find("Second").unwrap().is_empty());
+    // Existing simple rules stay compact and need no format migration.
+    assert!(exported.contains("case/6 = Quotes"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_sync_rejects_malformed_encoded_records_without_mutation() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_bad_encoding_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(".agent-rules");
+    let mut store = Store::open_in_memory().unwrap();
+    store.set("preserved", "original memory").unwrap();
+    store
+        .relate("preserved", "relates_to", "preserved")
+        .unwrap();
+    let before = store.export_rules_text().unwrap();
+    for bad in [
+        "[rule-json-v1] {",
+        "[rule-json-v1]",
+        "[rule-json-v1] {}",
+        "[rel-json-v1] [\"a\"]",
+    ] {
+        std::fs::write(&path, format!("new = must not import\n{bad}\n")).unwrap();
+        let error = store.sync_with_file(&path).unwrap_err().to_string();
+        assert!(error.contains("line 2"), "{error}");
+        assert_eq!(store.export_rules_text().unwrap(), before);
+        assert_eq!(store.find("original").unwrap().len(), 1);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_export_uses_one_snapshot_during_concurrent_archiving() {
+    use std::sync::{Arc, Barrier};
+    let dir =
+        std::env::temp_dir().join(format!("agent_mem_export_snapshot_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mem.db");
+    let mut store = Store::open(&path, true).unwrap();
+    for i in 0..500 {
+        store
+            .set(&format!("rule/{i:04}"), "preserve every rule")
+            .unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    let writer_barrier = Arc::clone(&barrier);
+    let writer = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        writer_barrier.wait();
+        for i in 0..200 {
+            conn.execute(
+                "UPDATE memories SET archived_at = ?1",
+                [if i % 2 == 0 { Some(1i64) } else { None }],
+            )
+            .unwrap();
+            std::thread::yield_now();
+        }
+    });
+    barrier.wait();
+    for _ in 0..100 {
+        let text = store.export_rules_text().unwrap();
+        let rules = Store::parse_rules_text(&text);
+        let keys: std::collections::BTreeSet<_> = rules.iter().map(|r| &r.key).collect();
+        assert_eq!(rules.len(), 500);
+        assert_eq!(keys.len(), 500);
+        // Every atomic writer update archives or activates the entire set.
+        assert!(
+            rules
+                .iter()
+                .all(|r| r.is_archived() == rules[0].is_archived())
+        );
+    }
+    writer.join().unwrap();
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
 }

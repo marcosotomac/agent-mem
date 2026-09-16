@@ -12,6 +12,10 @@ fn test_multi_entity_kind_inference_and_explicit_storage() {
     assert_eq!(infer_kind("pattern/repository"), "pattern");
     assert_eq!(infer_kind("arch/db"), "rule");
     assert_eq!(infer_kind("coding-style"), "rule");
+    assert_eq!(infer_kind("DECISION/auth"), "decision");
+    assert_eq!(infer_kind("GoTcHa:unicode-🦀"), "gotcha");
+    assert_eq!(infer_kind("PATTERN:reuse"), "pattern");
+    assert_eq!(infer_kind("🦀/architecture"), "rule");
 
     let mut store = Store::open_in_memory().unwrap();
 

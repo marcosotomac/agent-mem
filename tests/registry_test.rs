@@ -192,3 +192,40 @@ fn test_registry_atomic_save_and_persistence() {
     }
     let _ = fs::remove_dir_all(&global_dir);
 }
+
+#[test]
+fn test_registry_ignores_temp_paths_when_global_dir_unset() {
+    let _lock = REGISTRY_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    unsafe {
+        std::env::remove_var("AGENT_MEM_GLOBAL_DIR");
+    }
+
+    let temp_repo = std::env::temp_dir().join(format!(
+        "agent_mem_reg_unregistered_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_repo).unwrap();
+
+    let mut reg = ProjectRegistry::load().unwrap();
+    let initial_count = reg.projects.len();
+
+    let record = reg.register(&temp_repo).unwrap();
+    assert_eq!(
+        record.name,
+        temp_repo.file_name().unwrap().to_str().unwrap()
+    );
+
+    // Should not have incremented or saved
+    assert_eq!(reg.projects.len(), initial_count);
+
+    let reloaded = ProjectRegistry::load().unwrap();
+    assert_eq!(reloaded.projects.len(), initial_count);
+
+    let _ = fs::remove_dir_all(&temp_repo);
+}
