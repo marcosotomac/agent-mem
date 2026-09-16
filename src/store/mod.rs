@@ -21,7 +21,6 @@ pub struct Store {
 }
 
 impl Store {
-
     /// Set or update a key-value memory rule with optional repo-relative code anchor and entity kind.
     pub fn set_entry(
         &mut self,
@@ -112,7 +111,6 @@ impl Store {
     pub fn set(&mut self, key: &str, val: &str) -> Result<()> {
         self.set_entry(key, val, None, None)
     }
-
 
     /// Archive a key-value memory rule with an optional deprecation or migration reason.
     pub fn archive(&mut self, key: &str, reason: Option<&str>) -> Result<bool> {

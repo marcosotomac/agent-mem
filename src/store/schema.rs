@@ -175,10 +175,12 @@ impl Store {
 
     /// Read runtime SQLite metadata and record counts.
     pub fn stats(&self, path: &Path) -> Result<StoreStats> {
-        let journal_mode: String =
-            self.conn
-                .query_row("PRAGMA journal_mode;", [], |r| r.get(0))?;
-        let user_version: u32 = self.conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
+        let journal_mode: String = self
+            .conn
+            .query_row("PRAGMA journal_mode;", [], |r| r.get(0))?;
+        let user_version: u32 = self
+            .conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))?;
         let rules_count: usize =
             self.conn
                 .query_row("SELECT COUNT(*) FROM memories;", [], |r| r.get(0))?;

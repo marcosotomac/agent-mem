@@ -216,7 +216,10 @@ fn test_registry_ignores_temp_paths_when_global_dir_unset() {
     let initial_count = reg.projects.len();
 
     let record = reg.register(&temp_repo).unwrap();
-    assert_eq!(record.name, temp_repo.file_name().unwrap().to_str().unwrap());
+    assert_eq!(
+        record.name,
+        temp_repo.file_name().unwrap().to_str().unwrap()
+    );
 
     // Should not have incremented or saved
     assert_eq!(reg.projects.len(), initial_count);
@@ -226,4 +229,3 @@ fn test_registry_ignores_temp_paths_when_global_dir_unset() {
 
     let _ = fs::remove_dir_all(&temp_repo);
 }
-

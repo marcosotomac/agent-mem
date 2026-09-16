@@ -1,7 +1,7 @@
 use super::{Store, now_epoch};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::store::models::{ParsedRules, RuleRecord, SyncReport, infer_kind};
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::{Row, TransactionBehavior, params, types::Type, types::ValueRef};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -11,14 +11,131 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static EXPORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+const JSON_RULE: &str = "[rule-json-v1]";
+const JSON_RELATION: &str = "[rel-json-v1]";
+
+// Borrow SQLite text during export instead of allocating a String per field.
+// This representation is confined to disk serialization, never MCP responses.
+#[derive(serde::Serialize)]
+struct ExportRule<'a> {
+    key: &'a str,
+    val: &'a str,
+    anchor: Option<&'a str>,
+    archived_at: Option<i64>,
+    archive_reason: Option<&'a str>,
+    kind: &'a str,
+}
+
+fn row_text<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<&'a str> {
+    row.get_ref(index)?
+        .as_str()
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(e)))
+}
+
+fn optional_row_text<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<Option<&'a str>> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        _ => row_text(row, index).map(Some),
+    }
+}
+
+fn ambiguous_text(text: &str) -> bool {
+    text.trim() != text
+        // A non-short-circuit reduction lets LLVM vectorize the plain-text scan.
+        || text.bytes().fold(false, |found, b| found | b.is_ascii_control())
+        || (text.contains('@') && (text.contains(" @ ") || text.contains(" (@ ")))
+        || text.contains(" --reason")
+}
+
+fn needs_json(rule: &ExportRule<'_>) -> bool {
+    ambiguous_text(rule.key)
+        || rule.key.contains('=')
+        || ["#", "//", ";", "[", "<<<<<<<", "=======", ">>>>>>>"]
+            .iter()
+            .any(|prefix| rule.key.starts_with(prefix))
+        || ambiguous_text(rule.val)
+        || rule
+            .anchor
+            .is_some_and(|s| s.is_empty() || ambiguous_text(s))
+        || rule
+            .archive_reason
+            .is_some_and(|s| s.is_empty() || ambiguous_text(s))
+        || (rule.archived_at.is_none() && rule.archive_reason.is_some())
+        || rule.kind.is_empty()
+        || !rule.kind.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+fn append_rule(out: &mut String, rule: &ExportRule<'_>) -> Result<()> {
+    if needs_json(rule) {
+        return append_json(out, JSON_RULE, rule);
+    }
+    if rule.archived_at.is_some() {
+        out.push_str("[archived] ");
+    }
+    if rule.kind != "rule" || infer_kind(rule.key) != "rule" {
+        out.push('[');
+        out.push_str(rule.kind);
+        out.push_str("] ");
+    }
+    out.push_str(rule.key);
+    out.push_str(" = ");
+    out.push_str(rule.val);
+    if let Some(anchor) = rule.anchor {
+        out.push_str(" (@ ");
+        out.push_str(anchor);
+        out.push(')');
+    }
+    if let Some(reason) = rule.archive_reason {
+        out.push_str(" --reason: ");
+        out.push_str(reason);
+    }
+    out.push('\n');
+    Ok(())
+}
+
+fn append_json(out: &mut String, prefix: &str, record: &impl serde::Serialize) -> Result<()> {
+    let json = serde_json::to_string(record)
+        .map_err(|e| Error::Usage(format!("Cannot encode shared memory: {e}")))?;
+    out.push_str(prefix);
+    out.push(' ');
+    out.push_str(&json);
+    out.push('\n');
+    Ok(())
+}
+
 impl Store {
-    /// Parse plain-text rules and graph relations (from .agent-rules).
+    /// Best-effort parsing for inspection. Sync rejects malformed encoded records
+    /// before modifying storage; this legacy inspection API skips them.
     pub fn parse_rules_and_relations(content: &str) -> ParsedRules {
+        Self::parse_rules_with_error(content).0
+    }
+
+    fn parse_rules_with_error(content: &str) -> (ParsedRules, Option<Error>) {
         let mut rules = Vec::new();
         let mut relations = Vec::new();
+        let mut parse_error = None;
 
-        for line in content.lines() {
+        for (line_number, line) in content.lines().enumerate() {
             let trimmed = line.trim();
+            let encoded = if let Some(json) = trimmed.strip_prefix(JSON_RULE) {
+                Some(serde_json::from_str::<RuleRecord>(json).map(|rule| rules.push(rule)))
+            } else {
+                trimmed.strip_prefix(JSON_RELATION).map(|json| {
+                    serde_json::from_str::<(String, String, String)>(json)
+                        .map(|relation| relations.push(relation))
+                })
+            };
+            if let Some(result) = encoded {
+                if let Err(error) = result {
+                    parse_error.get_or_insert_with(|| {
+                        Error::Usage(format!(
+                            "Invalid encoded memory at line {}: {error}",
+                            line_number + 1
+                        ))
+                    });
+                }
+                continue;
+            }
             if trimmed.is_empty()
                 || trimmed.starts_with('#')
                 || trimmed.starts_with("//")
@@ -146,7 +263,7 @@ impl Store {
             });
         }
 
-        ParsedRules { rules, relations }
+        (ParsedRules { rules, relations }, parse_error)
     }
 
     /// Parse plain-text rules (e.g. from .agent-rules). Supports active and [archived] rules.
@@ -154,103 +271,77 @@ impl Store {
         Self::parse_rules_and_relations(content).rules
     }
 
-    /// Export all rules and relations formatted as deterministic plain text sorted by key.
+    /// Export deterministically, borrowing row fields instead of materializing
+    /// the entire store and partitioning owned records into temporary vectors.
     pub fn export_rules_text(&self) -> Result<String> {
-        let all_rules = self.dump_all()?;
-        let all_relations = self.get_all_relations()?;
-        let estimated_bytes = 128
-            + all_rules
-                .iter()
-                .map(|rule| {
-                    rule.key.len()
-                        + rule.val.len()
-                        + rule.anchor.as_ref().map_or(0, String::len)
-                        + rule.archive_reason.as_ref().map_or(0, String::len)
-                        + rule.kind.len()
-                        + 24
-                })
-                .sum::<usize>()
-            + all_relations
-                .iter()
-                .map(|relation| {
-                    relation.source_key.len()
-                        + relation.rel_type.len()
-                        + relation.target_key.len()
-                        + 16
-                })
-                .sum::<usize>();
-        let mut out = String::with_capacity(estimated_bytes);
+        // Keep active, archived and relation sections on one WAL read snapshot.
+        // Concurrent archiving must not duplicate or omit a rule between scans.
+        let snapshot = self.conn.unchecked_transaction()?;
+        let mut out = String::with_capacity(4096);
         out.push_str("# .agent-rules - agent-mem shared team memory\n");
         out.push_str("# Track this file in git to share rules across your team without SQLite binary conflicts.\n\n");
 
-        let mut active = Vec::new();
-        let mut archived = Vec::new();
-
-        for r in all_rules {
-            if r.is_archived() {
-                archived.push(r);
+        self.append_rules_section(&mut out, false)?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source_key, rel_type, target_key FROM relations ORDER BY source_key, rel_type, target_key;",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut header_written = false;
+        while let Some(row) = rows.next()? {
+            if !header_written {
+                out.push_str("\n# Relations\n");
+                header_written = true;
+            }
+            let fields = (row_text(row, 0)?, row_text(row, 1)?, row_text(row, 2)?);
+            if [fields.0, fields.1, fields.2].iter().any(|s| {
+                s.trim() != *s || s.contains("->") || s.bytes().any(|b| b.is_ascii_control())
+            }) {
+                append_json(&mut out, JSON_RELATION, &fields)?;
             } else {
-                active.push(r);
-            }
-        }
-
-        for r in active {
-            if r.kind != "rule" {
-                out.push('[');
-                out.push_str(&r.kind);
-                out.push_str("] ");
-            }
-            out.push_str(&r.key);
-            out.push_str(" = ");
-            out.push_str(&r.val);
-            if let Some(anchor) = &r.anchor {
-                out.push_str(" (@ ");
-                out.push_str(anchor);
-                out.push(')');
-            }
-            out.push('\n');
-        }
-
-        if !all_relations.is_empty() {
-            out.push_str("\n# Relations\n");
-            for rel in all_relations {
                 out.push_str("[rel] ");
-                out.push_str(&rel.source_key);
+                out.push_str(fields.0);
                 out.push_str(" -> ");
-                out.push_str(&rel.rel_type);
+                out.push_str(fields.1);
                 out.push_str(" -> ");
-                out.push_str(&rel.target_key);
+                out.push_str(fields.2);
                 out.push('\n');
             }
         }
-
-        if !archived.is_empty() {
-            out.push_str("\n# Archived Rules\n");
-            for r in archived {
-                out.push_str("[archived]");
-                if r.kind != "rule" {
-                    out.push_str(" [");
-                    out.push_str(&r.kind);
-                    out.push(']');
-                }
-                out.push(' ');
-                out.push_str(&r.key);
-                out.push_str(" = ");
-                out.push_str(&r.val);
-                if let Some(anchor) = &r.anchor {
-                    out.push_str(" (@ ");
-                    out.push_str(anchor);
-                    out.push(')');
-                }
-                if let Some(reason) = &r.archive_reason {
-                    out.push_str(" --reason: ");
-                    out.push_str(reason);
-                }
-                out.push('\n');
-            }
-        }
-
+        drop(rows);
+        drop(stmt);
+        self.append_rules_section(&mut out, true)?;
+        snapshot.commit()?;
         Ok(out)
+    }
+
+    fn append_rules_section(&self, out: &mut String, archived: bool) -> Result<()> {
+        let sql = if archived {
+            "SELECT key, val, anchor, archive_reason, kind FROM memories WHERE archived_at IS NOT NULL ORDER BY key;"
+        } else {
+            "SELECT key, val, anchor, archive_reason, kind FROM memories WHERE archived_at IS NULL ORDER BY key;"
+        };
+        let mut stmt = self.conn.prepare_cached(sql)?;
+        let mut rows = stmt.query([])?;
+        let mut header_written = false;
+        while let Some(row) = rows.next()? {
+            if archived && !header_written {
+                out.push_str("\n# Archived Rules\n");
+                header_written = true;
+            }
+            append_rule(
+                out,
+                &ExportRule {
+                    key: row_text(row, 0)?,
+                    val: row_text(row, 1)?,
+                    anchor: optional_row_text(row, 2)?,
+                    // Stable marker: timestamps must not churn in Git.
+                    archived_at: archived.then_some(1),
+                    archive_reason: optional_row_text(row, 3)?,
+                    kind: row_text(row, 4)?,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// Export current rules to a file on disk.
@@ -317,7 +408,10 @@ impl Store {
         }
 
         let content = fs::read_to_string(path)?;
-        let parsed = Self::parse_rules_and_relations(&content);
+        let (parsed, parse_error) = Self::parse_rules_with_error(&content);
+        if let Some(error) = parse_error {
+            return Err(error);
+        }
 
         struct ParsedEntry<'a> {
             val: &'a str,
@@ -358,7 +452,8 @@ impl Store {
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, ?5);",
             )?;
             let mut insert_rel = tx.prepare_cached(
-                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4);",
+                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
             )?;
 
             for (key, entry) in unique_rules {

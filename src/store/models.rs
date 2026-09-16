@@ -3,7 +3,7 @@ use std::path::PathBuf;
 pub type RuleEntry = (String, String, Option<String>);
 pub type SessionEntry = (i64, String);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct RuleRecord {
     pub key: String,
     pub val: String,
@@ -60,21 +60,25 @@ pub fn extract_anchor_paths(raw: &str) -> Vec<String> {
 }
 
 pub fn infer_kind(key: &str) -> &'static str {
-    let lower = key.to_lowercase();
-    if lower.starts_with("decision/")
-        || lower.starts_with("adr/")
-        || lower.starts_with("decision:")
-        || lower.starts_with("adr:")
+    // Prefixes are ASCII; avoid allocating a lowercase copy of every key.
+    let starts_with = |prefix: &str| {
+        key.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    if starts_with("decision/")
+        || starts_with("adr/")
+        || starts_with("decision:")
+        || starts_with("adr:")
     {
         "decision"
-    } else if lower.starts_with("gotcha/")
-        || lower.starts_with("bug/")
-        || lower.starts_with("gotcha:")
-        || lower.starts_with("trap/")
-        || lower.starts_with("postmortem/")
+    } else if starts_with("gotcha/")
+        || starts_with("bug/")
+        || starts_with("gotcha:")
+        || starts_with("trap/")
+        || starts_with("postmortem/")
     {
         "gotcha"
-    } else if lower.starts_with("pattern/") || lower.starts_with("pattern:") {
+    } else if starts_with("pattern/") || starts_with("pattern:") {
         "pattern"
     } else {
         "rule"

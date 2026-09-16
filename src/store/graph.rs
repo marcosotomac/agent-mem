@@ -1,7 +1,7 @@
 use super::{Store, now_epoch};
 use crate::error::Result;
 use crate::store::models::{
-    extract_anchor_paths, RelationRecord, RuleEntry, RuleRecord, SessionEntry, ZombieReport,
+    RelationRecord, RuleEntry, RuleRecord, SessionEntry, ZombieReport, extract_anchor_paths,
 };
 use rusqlite::{TransactionBehavior, params};
 use std::collections::{BTreeSet, HashSet};
@@ -105,9 +105,7 @@ impl Store {
             ))
         });
         relations.dedup_by(|a, b| {
-            a.source_key == b.source_key
-                && a.rel_type == b.rel_type
-                && a.target_key == b.target_key
+            a.source_key == b.source_key && a.rel_type == b.rel_type && a.target_key == b.target_key
         });
         relations.truncate(limit);
         Ok(relations)

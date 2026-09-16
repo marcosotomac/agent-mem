@@ -127,7 +127,7 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
         fs::create_dir_all(&mem_dir)?;
     }
     let db_path = mem_dir.join("mem.db");
-    let _ = Store::open(&db_path, true)?;
+    let mut store = Store::open(&db_path, true)?;
 
     let mut report = InitReport {
         root: root.to_path_buf(),
@@ -213,9 +213,12 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
     // 4. Initialize .agent-rules plain text file for git tracking
     let rules_path = root.join(".agent-rules");
     if !rules_path.exists() {
-        let store = Store::open(&db_path, false)?;
         store.export_to_file(&rules_path)?;
         report.rules_file_created = true;
+    } else {
+        // The tracked file is authoritative, including after cloning or retrying init.
+        // Import before any subsequent write can export an empty/stale local cache.
+        store.sync_with_file(&rules_path)?;
     }
 
     const TRIGGER_BLOCK: &str = "\
