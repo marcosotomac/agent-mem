@@ -92,6 +92,7 @@ pub struct SyncReport {
     pub total: usize,
     pub file_created: bool,
     pub file_updated: bool,
+    pub conflicts_resolved: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

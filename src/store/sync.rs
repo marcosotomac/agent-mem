@@ -404,6 +404,7 @@ impl Store {
                 total,
                 file_created: true,
                 file_updated: false,
+                conflicts_resolved: 0,
             });
         }
 
@@ -421,9 +422,19 @@ impl Store {
             kind: &'a str,
         }
 
-        // Deduplicate in memory: if multiple conflict markers or duplicate lines exist, last one wins
+        // Deduplicate in memory: if multiple conflict markers or duplicate lines exist,
+        // resolve deterministically and detect contradictions for explicit provenance.
         let mut unique_rules: BTreeMap<&str, ParsedEntry> = BTreeMap::new();
+        let mut conflicts: Vec<(&str, &str, &str)> = Vec::new();
+
         for r in &parsed.rules {
+            if let Some(prev) = unique_rules.get(r.key.as_str())
+                && (prev.val != r.val.as_str()
+                    || prev.kind != r.kind.as_str()
+                    || prev.anchor != r.anchor.as_deref())
+            {
+                conflicts.push((r.key.as_str(), prev.val, r.val.as_str()));
+            }
             unique_rules.insert(
                 r.key.as_str(),
                 ParsedEntry {
@@ -436,15 +447,33 @@ impl Store {
             );
         }
 
+        let conflicts_resolved = conflicts.len();
+
+        // 1. Begin immediate transaction for atomic reconciliation and snapshot consistency
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("DELETE FROM memories;", [])?;
-        tx.execute("DELETE FROM memories_fts;", [])?;
-        tx.execute("DELETE FROM relations;", [])?;
 
         let now = now_epoch();
-        {
+
+        // Record conflict provenance in session audit log
+        if !conflicts.is_empty() {
+            let mut insert_sess = tx.prepare_cached(
+                "INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);",
+            )?;
+            for (ckey, old_val, new_val) in &conflicts {
+                let summary = format!(
+                    "[conflict-resolved] '{}': superseded '{}' with '{}'",
+                    ckey, old_val, new_val
+                );
+                insert_sess.execute(params![summary, now])?;
+            }
+        }
+
+        let existing_count: usize = tx.query_row("SELECT COUNT(*) FROM memories;", [], |r| r.get(0))?;
+
+        if existing_count == 0 {
+            // Fast path for initial sync / empty database: direct inserts without diffing overhead
             let mut insert_mem = tx.prepare_cached(
                 "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
             )?;
@@ -456,7 +485,7 @@ impl Store {
                  ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
             )?;
 
-            for (key, entry) in unique_rules {
+            for (key, entry) in &unique_rules {
                 let arc_at = entry.archived_at.map(|_| now);
                 insert_mem.execute(params![
                     key,
@@ -479,7 +508,163 @@ impl Store {
             for (source, rel_type, target) in &parsed.relations {
                 insert_rel.execute(params![source, rel_type, target, now])?;
             }
+        } else {
+            // Incremental reconciliation: preserve timestamps for unmodified rules
+            struct ExistingRule {
+                val: String,
+                anchor: Option<String>,
+                archived_at: Option<i64>,
+                archive_reason: Option<String>,
+                kind: String,
+            }
+
+            let mut existing_map = std::collections::HashMap::with_capacity(existing_count);
+            {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT key, val, anchor, archived_at, archive_reason, kind FROM memories;",
+                )?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let key: String = row.get(0)?;
+                    existing_map.insert(
+                        key,
+                        ExistingRule {
+                            val: row.get(1)?,
+                            anchor: row.get(2)?,
+                            archived_at: row.get(3)?,
+                            archive_reason: row.get(4)?,
+                            kind: row.get(5)?,
+                        },
+                    );
+                }
+            }
+
+            let mut insert_mem = tx.prepare_cached(
+                "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(key) DO UPDATE SET
+                    val = excluded.val,
+                    updated_at = excluded.updated_at,
+                    anchor = excluded.anchor,
+                    archived_at = excluded.archived_at,
+                    archive_reason = excluded.archive_reason,
+                    kind = excluded.kind;",
+            )?;
+            let mut delete_mem = tx.prepare_cached("DELETE FROM memories WHERE key = ?1;")?;
+            let mut delete_fts = tx.prepare_cached("DELETE FROM memories_fts WHERE key = ?1;")?;
+            let mut insert_fts = tx.prepare_cached(
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, ?5);",
+            )?;
+
+            for (key, entry) in &unique_rules {
+                match existing_map.get(*key) {
+                    Some(existing) => {
+                        let is_archived_match =
+                            existing.archived_at.is_some() == entry.archived_at.is_some();
+                        let is_unmodified = existing.val == entry.val
+                            && existing.kind == entry.kind
+                            && existing.anchor.as_deref() == entry.anchor
+                            && is_archived_match
+                            && existing.archive_reason.as_deref() == entry.archive_reason;
+
+                        if !is_unmodified {
+                            let arc = if entry.archived_at.is_some() {
+                                existing.archived_at.or(Some(now))
+                            } else {
+                                None
+                            };
+                            insert_mem.execute(params![
+                                key,
+                                entry.val,
+                                now,
+                                entry.anchor,
+                                arc,
+                                entry.archive_reason,
+                                entry.kind,
+                            ])?;
+                            delete_fts.execute(params![key])?;
+                            insert_fts.execute(params![
+                                key,
+                                entry.val,
+                                entry.anchor,
+                                entry.archive_reason,
+                                entry.kind,
+                            ])?;
+                        }
+                    }
+                    None => {
+                        let arc = entry.archived_at.map(|_| now);
+                        insert_mem.execute(params![
+                            key,
+                            entry.val,
+                            now,
+                            entry.anchor,
+                            arc,
+                            entry.archive_reason,
+                            entry.kind,
+                        ])?;
+                        insert_fts.execute(params![
+                            key,
+                            entry.val,
+                            entry.anchor,
+                            entry.archive_reason,
+                            entry.kind,
+                        ])?;
+                    }
+                }
+            }
+
+            // Remove deleted rules not present in file
+            for key in existing_map.keys() {
+                if !unique_rules.contains_key(key.as_str()) {
+                    delete_mem.execute(params![key])?;
+                    delete_fts.execute(params![key])?;
+                }
+            }
+
+            // Reconcile relations incrementally
+            let mut existing_relations = std::collections::HashSet::new();
+            {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT source_key, rel_type, target_key FROM relations;",
+                )?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let s: String = row.get(0)?;
+                    let r: String = row.get(1)?;
+                    let t: String = row.get(2)?;
+                    existing_relations.insert((s, r, t));
+                }
+            }
+
+            let target_relations: std::collections::HashSet<(String, String, String)> = parsed
+                .relations
+                .iter()
+                .cloned()
+                .collect();
+
+            if existing_relations != target_relations {
+                let mut delete_rel = tx.prepare_cached(
+                    "DELETE FROM relations WHERE source_key = ?1 AND rel_type = ?2 AND target_key = ?3;",
+                )?;
+                let mut insert_rel = tx.prepare_cached(
+                    "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+                )?;
+
+                for rel in &existing_relations {
+                    if !target_relations.contains(rel) {
+                        delete_rel.execute(params![rel.0, rel.1, rel.2])?;
+                    }
+                }
+                for rel in &target_relations {
+                    if !existing_relations.contains(rel) {
+                        insert_rel.execute(params![rel.0, rel.1, rel.2, now])?;
+                    }
+                }
+            }
         }
+
         tx.commit()?;
 
         let total: usize = self
@@ -492,6 +677,7 @@ impl Store {
             total,
             file_created: false,
             file_updated: false,
+            conflicts_resolved,
         })
     }
 
@@ -508,6 +694,7 @@ impl Store {
             total,
             file_created: !exists,
             file_updated: exists,
+            conflicts_resolved: 0,
         })
     }
 }

@@ -757,3 +757,108 @@ fn test_export_uses_one_snapshot_during_concurrent_archiving() {
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn test_sync_preserves_historic_timestamps_for_unmodified_rules() {
+    let dir =
+        std::env::temp_dir().join(format!("agent_mem_sync_timestamps_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let rules_path = dir.join(".agent-rules");
+
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    // Seed rules with historic timestamps directly in SQLite
+    let historic_time = 1_600_000_000i64;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind)
+             VALUES ('rule/preserved', 'value unchanged', ?1, 'src/lib.rs:1', NULL, NULL, 'rule'),
+                    ('rule/modified', 'old value', ?1, NULL, NULL, NULL, 'rule');",
+            rusqlite::params![historic_time],
+        )
+        .unwrap();
+    }
+
+    // Create file where rule/preserved is untouched and rule/modified has a new value
+    let file_content =
+        "rule/preserved = value unchanged (@ src/lib.rs:1)\nrule/modified = new upgraded value\n";
+    std::fs::write(&rules_path, file_content).unwrap();
+
+    let report = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report.total, 2);
+    assert_eq!(report.conflicts_resolved, 0);
+
+    // Verify timestamps in SQLite
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let preserved_updated: i64 = conn
+        .query_row(
+            "SELECT updated_at FROM memories WHERE key = 'rule/preserved';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved_updated, historic_time,
+        "Unmodified rule must retain historic timestamp"
+    );
+
+    let modified_updated: i64 = conn
+        .query_row(
+            "SELECT updated_at FROM memories WHERE key = 'rule/modified';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        modified_updated > historic_time,
+        "Modified rule must receive a fresh timestamp"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_sync_detects_and_logs_conflicts_with_provenance() {
+    let dir =
+        std::env::temp_dir().join(format!("agent_mem_sync_conflicts_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let rules_path = dir.join(".agent-rules");
+
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    // .agent-rules containing conflicting definitions for the same key
+    let file_content = r#"
+# Branch merge with conflicting rule definitions
+gotcha/auth = validate JWT issuer before expiration (@ src/auth.rs:12)
+gotcha/auth = use constant-time comparison for tokens (@ src/crypto.rs:45)
+"#;
+    std::fs::write(&rules_path, file_content).unwrap();
+
+    let report = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report.total, 1);
+    assert_eq!(report.conflicts_resolved, 1, "Must detect 1 conflict resolution");
+
+    // The winning value should be the last definition
+    let stored = store.get_entry("gotcha/auth").unwrap().expect("Rule must exist");
+    assert_eq!(stored.val, "use constant-time comparison for tokens");
+    assert_eq!(stored.anchor.as_deref(), Some("src/crypto.rs:45"));
+
+    // Verify session audit log provenance
+    let sessions = store.session_list(10).unwrap();
+    assert!(
+        sessions.iter().any(|(_, summary)| {
+            summary.contains("[conflict-resolved] 'gotcha/auth'")
+                && summary.contains("validate JWT issuer")
+                && summary.contains("use constant-time comparison")
+        }),
+        "Session audit log must record conflict resolution with full provenance"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+

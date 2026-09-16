@@ -499,6 +499,11 @@ pub fn print_sync(report: &crate::store::SyncReport) {
                 "  {EMERALD}✓{RESET}  {MUTED}exported{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules written{RESET}",
                 report.total
             );
+        } else if report.conflicts_resolved > 0 {
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active ({} conflict(s) resolved){RESET}",
+                report.total, report.conflicts_resolved
+            );
         } else {
             println!(
                 "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active{RESET}",
@@ -509,8 +514,13 @@ pub fn print_sync(report: &crate::store::SyncReport) {
         println!("created {} ({} rules)", file_name, report.total);
     } else if report.file_updated {
         println!("exported {} ({} rules)", file_name, report.total);
+    } else if report.conflicts_resolved > 0 {
+        println!(
+            "synchronized {} ({} rules, {} conflicts resolved)",
+            file_name, report.total, report.conflicts_resolved
+        );
     } else {
-        println!("sync: {} rules in {}", report.total, file_name);
+        println!("synchronized {} ({} rules)", file_name, report.total);
     }
 }
 
