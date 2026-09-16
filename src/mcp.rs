@@ -445,6 +445,37 @@ impl McpServer {
         }
     }
 
+    fn format_context_rule(
+        kind: &str,
+        key: &str,
+        val: &str,
+        anchor: Option<&str>,
+        compact: bool,
+    ) -> String {
+        let kind_badge = if kind != "rule" {
+            format!("[{}] ", kind)
+        } else {
+            String::new()
+        };
+        let effective_val = if compact && val.len() > 1024 {
+            let mut end = 1024;
+            while !val.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!(
+                "{} ... [truncated; use mem_find key=\"{}\" for full content]",
+                &val[..end],
+                key
+            )
+        } else {
+            val.to_string()
+        };
+        match anchor {
+            Some(a) => format!("{}{}: {} ({})", kind_badge, key, effective_val, a),
+            None => format!("{}{}: {}", kind_badge, key, effective_val),
+        }
+    }
+
     fn dispatch_tool(&self, name: &str, args: &Value) -> Result<String> {
         match name {
             "mem_set" => {
@@ -603,63 +634,141 @@ impl McpServer {
                     }
                 }
 
+                let compact = limit > 1;
+
+                let (project_rule_limit, mut global_rule_limit) = if scope == "all" {
+                    let global_reserved = if limit >= 4 {
+                        (limit / 4).clamp(2, 10)
+                    } else {
+                        1
+                    };
+                    let proj_lim = limit.saturating_sub(global_reserved).max(1);
+                    (proj_lim, global_reserved)
+                } else if scope == "project" {
+                    (limit, 0)
+                } else {
+                    (0, limit)
+                };
+
+                const NOTICE_LEN: usize = 32;
+                let total_byte_budget = MAX_TEXT_RESULT_BYTES.saturating_sub(NOTICE_LEN);
+                let mut current_bytes = 0;
+
+                let reserved_global_bytes = if scope == "all" { 2560 } else { 0 };
+                let reserved_meta_bytes =
+                    if scope == "all" || scope == "project" { 1536 } else { 0 };
+
+                let project_byte_budget = total_byte_budget
+                    .saturating_sub(reserved_global_bytes)
+                    .saturating_sub(reserved_meta_bytes);
+
                 let mut lines = Vec::new();
-                let mut remaining_rules = limit;
+                let mut actual_project_rule_count = 0;
 
                 if (scope == "all" || scope == "project")
                     && let Some(store) = self.open_read_store("project")?
                 {
                     let (rules, rels, sessions) = if !files.is_empty() {
-                        store.context_for_files(&files, topic, limit)?
+                        store.context_for_files(&files, topic, project_rule_limit)?
                     } else {
-                        store.context_filtered(anchor, topic, limit)?
+                        store.context_filtered(anchor, topic, project_rule_limit)?
                     };
-                    remaining_rules = remaining_rules.saturating_sub(rules.len());
-                    if !rules.is_empty() {
-                        lines.push("== PROJECT RULES ==".to_string());
-                        for r in rules {
-                            let kind_badge = if r.kind != "rule" {
-                                format!("[{}] ", r.kind)
-                            } else {
-                                String::new()
-                            };
-                            match r.anchor {
-                                Some(a) => lines
-                                    .push(format!("{}{}: {} ({})", kind_badge, r.key, r.val, a)),
-                                None => lines.push(format!("{}{}: {}", kind_badge, r.key, r.val)),
-                            }
+
+                    actual_project_rule_count = rules.len();
+
+                    let mut project_rule_lines = Vec::new();
+                    for r in rules {
+                        let line = Self::format_context_rule(
+                            &r.kind,
+                            &r.key,
+                            &r.val,
+                            r.anchor.as_deref(),
+                            compact,
+                        );
+                        let cost = line.len() + 1;
+                        if current_bytes + cost <= project_byte_budget {
+                            current_bytes += cost;
+                            project_rule_lines.push(line);
+                        } else if project_rule_lines.is_empty() {
+                            // First rule is allowed even if long (e.g. limit=1 with large payload)
+                            current_bytes += cost;
+                            project_rule_lines.push(line);
+                            break;
                         }
                     }
-                    if !rels.is_empty() {
-                        lines.push("== RELATIONS ==".to_string());
-                        for rel in rels {
-                            lines.push(format!(
-                                "{} -> {} -> {}",
-                                rel.source_key, rel.rel_type, rel.target_key
-                            ));
+
+                    if !project_rule_lines.is_empty() {
+                        let header = "== PROJECT RULES ==";
+                        current_bytes += header.len() + 1;
+                        lines.push(header.to_string());
+                        lines.extend(project_rule_lines);
+                    }
+
+                    let mut rel_lines = Vec::new();
+                    for rel in rels {
+                        let line = format!(
+                            "{} -> {} -> {}",
+                            rel.source_key, rel.rel_type, rel.target_key
+                        );
+                        let cost = line.len() + 1;
+                        if current_bytes + cost
+                            <= total_byte_budget.saturating_sub(reserved_global_bytes)
+                        {
+                            current_bytes += cost;
+                            rel_lines.push(line);
                         }
                     }
-                    if !sessions.is_empty() {
-                        lines.push("== SESSIONS ==".to_string());
-                        for (id, summary) in sessions {
-                            lines.push(format!("[#{}] {}", id, summary));
+                    if !rel_lines.is_empty() {
+                        let header = "== RELATIONS ==";
+                        current_bytes += header.len() + 1;
+                        lines.push(header.to_string());
+                        lines.extend(rel_lines);
+                    }
+
+                    let mut session_lines = Vec::new();
+                    for (id, summary) in sessions {
+                        let line = format!("[#{}] {}", id, summary);
+                        let cost = line.len() + 1;
+                        if current_bytes + cost
+                            <= total_byte_budget.saturating_sub(reserved_global_bytes)
+                        {
+                            current_bytes += cost;
+                            session_lines.push(line);
                         }
+                    }
+                    if !session_lines.is_empty() {
+                        let header = "== SESSIONS ==";
+                        current_bytes += header.len() + 1;
+                        lines.push(header.to_string());
+                        lines.extend(session_lines);
                     }
                 }
 
-                if remaining_rules > 0
+                // If scope is "all", expand global slots to claim any unused project slots
+                if scope == "all" {
+                    global_rule_limit = limit
+                        .saturating_sub(actual_project_rule_count)
+                        .max(global_rule_limit);
+                }
+
+                if global_rule_limit > 0
                     && (scope == "all" || scope == "global")
                     && let Some(store) = self.open_read_store("global")?
                 {
-                    let rules = store.dump_limited(remaining_rules)?;
-                    if !rules.is_empty() {
-                        lines.push("== GLOBAL PREFERENCES ==".to_string());
-                        for (k, v, a) in rules {
-                            match a {
-                                Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
-                                None => lines.push(format!("{}: {}", k, v)),
-                            }
+                    let rules = store.dump_limited(global_rule_limit)?;
+                    let mut global_lines = Vec::new();
+                    for (k, v, a) in rules {
+                        let line =
+                            Self::format_context_rule("rule", &k, &v, a.as_deref(), compact);
+                        let cost = line.len() + 1;
+                        if current_bytes + cost <= total_byte_budget {
+                            current_bytes += cost;
+                            global_lines.push(line);
                         }
+                    }
+                    if !global_lines.is_empty() {
+                        lines.push("== GLOBAL PREFERENCES ==".to_string());
+                        lines.extend(global_lines);
                     }
                 }
 

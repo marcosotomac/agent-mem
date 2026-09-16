@@ -884,3 +884,81 @@ fn test_mcp_invalid_relation_is_rejected_before_storage_io() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_mcp_context_full_rule_packing_and_global_space_reservation() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_packing_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let project_db = temp_dir.join(".agent-mem").join("mem.db");
+    let global_db = temp_dir.join("global.db");
+
+    // 1. Seed project with a huge 10KB rule AND a critical short authorization rule
+    let mut p_store = Store::open(&project_db, true).unwrap();
+    p_store
+        .set(
+            "gotcha/traceback",
+            &format!("Large stack trace: {}", "A".repeat(10 * 1024)),
+        )
+        .unwrap();
+    p_store
+        .set_entry(
+            "decision/auth",
+            "Require JWT RS256 authentication on all endpoints",
+            Some("src/auth/jwt.rs:1"),
+            Some("decision"),
+        )
+        .unwrap();
+    let _ = p_store.session_add("feat: implement token verification").unwrap();
+    drop(p_store);
+
+    // 2. Seed global preferences
+    let mut g_store = Store::open(&global_db, true).unwrap();
+    g_store
+        .set("personal/style", "Favor immutability and pure functions")
+        .unwrap();
+    drop(g_store);
+
+    let server = McpServer::with_paths(temp_dir.clone(), global_db);
+
+    // 3. Call mem_context with scope="all" and limit=5
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_context",
+            "arguments": { "scope": "all", "limit": 5 }
+        }),
+    };
+    let res = server.handle_request(&req).unwrap().result.unwrap();
+    let text = res["content"][0]["text"].as_str().unwrap();
+
+    // A. Verify critical decision/auth is NOT hidden or crowded out by the large traceback rule
+    assert!(
+        text.contains("[decision] decision/auth: Require JWT RS256 authentication on all endpoints"),
+        "Critical brief authorization rule must be present in full"
+    );
+
+    // B. Verify large traceback rule was compactly bounded without starving the rest of the context
+    assert!(text.contains("gotcha/traceback"));
+    assert!(text.contains("... [truncated; use mem_find key=\"gotcha/traceback\" for full content]"));
+
+    // C. Verify sessions were not crowded out
+    assert!(text.contains("== SESSIONS =="));
+    assert!(text.contains("feat: implement token verification"));
+
+    // D. Verify global preferences were NOT starved out when scope="all"
+    assert!(text.contains("== GLOBAL PREFERENCES =="));
+    assert!(text.contains("personal/style: Favor immutability and pure functions"));
+
+    // E. Total text does not exceed budget
+    assert!(text.len() <= 16 * 1024);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
