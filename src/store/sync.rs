@@ -382,6 +382,7 @@ impl Store {
             temp.write_all(content.as_bytes())?;
             drop(temp);
             fs::rename(&temp_path, path)?;
+            let _ = self.record_sync_state(path, &content);
             Ok(())
         })();
 
@@ -389,6 +390,41 @@ impl Store {
             let _ = fs::remove_file(&temp_path);
         }
         result
+    }
+
+    fn compute_content_hash(content: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub(crate) fn get_db_fingerprint(&self) -> Result<String> {
+        let fp: String = self.conn.query_row(
+            "SELECT printf('%d:%d:%d',
+                (SELECT COUNT(*) FROM memories),
+                (SELECT COALESCE(MAX(updated_at), 0) FROM memories),
+                (SELECT COUNT(*) FROM relations)
+            );",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(fp)
+    }
+
+    pub(crate) fn record_sync_state(&self, path: &Path, content: &str) -> Result<()> {
+        let content_hash = Self::compute_content_hash(content) as i64;
+        let db_state = self.get_db_fingerprint()?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS _sync_state (path TEXT PRIMARY KEY, content_hash INTEGER NOT NULL, db_state TEXT NOT NULL);",
+            [],
+        )?;
+        self.conn.execute(
+            "INSERT INTO _sync_state (path, content_hash, db_state) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash, db_state = excluded.db_state;",
+            rusqlite::params![path.to_string_lossy(), content_hash, db_state],
+        )?;
+        Ok(())
     }
 
     /// Reconcile SQLite database with a plain-text rules file (.agent-rules).
@@ -409,6 +445,42 @@ impl Store {
         }
 
         let content = fs::read_to_string(path)?;
+        let content_hash = Self::compute_content_hash(&content) as i64;
+        let db_state = self.get_db_fingerprint()?;
+
+        // Fast path: if the file content and database state have not changed since last sync/export,
+        // bypass parsing, memory allocation, transaction locking, and diffing entirely.
+        let is_noop: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sync_state');",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false)
+            && self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _sync_state WHERE path = ?1 AND content_hash = ?2 AND db_state = ?3);",
+                    rusqlite::params![path.to_string_lossy(), content_hash, db_state],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+
+        if is_noop {
+            let total: usize = self
+                .conn
+                .query_row("SELECT count(*) FROM memories;", [], |r| r.get(0))?;
+            return Ok(SyncReport {
+                path: path.to_path_buf(),
+                imported: total,
+                total,
+                file_created: false,
+                file_updated: false,
+                conflicts_resolved: 0,
+            });
+        }
+
         let (parsed, parse_error) = Self::parse_rules_with_error(&content);
         if let Some(error) = parse_error {
             return Err(error);
@@ -666,6 +738,7 @@ impl Store {
         }
 
         tx.commit()?;
+        let _ = self.record_sync_state(path, &content);
 
         let total: usize = self
             .conn

@@ -280,14 +280,14 @@ impl McpServer {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
+                            "batch": { "type": "array" },
                             "key": { "type": "string" },
                             "val": { "type": "string" },
                             "anchor": { "type": "string", "description": "path[:line]" },
                             "kind": { "type": "string", "enum": ["rule", "decision", "gotcha", "pattern"] },
                             "rel": { "type": "string", "description": "type:target" },
                             "scope": { "type": "string", "enum": ["project", "global"] }
-                        },
-                        "required": ["key", "val"]
+                        }
                     }
                 },
                 {
@@ -479,6 +479,86 @@ impl McpServer {
     fn dispatch_tool(&self, name: &str, args: &Value) -> Result<String> {
         match name {
             "mem_set" => {
+                let scope = args
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("project");
+
+                if let Some(batch_val) = args.get("batch").and_then(|v| v.as_array()) {
+                    if batch_val.is_empty() {
+                        return Err(crate::error::Error::Usage(
+                            "Batch array cannot be empty".into(),
+                        ));
+                    }
+
+                    struct ParsedBatchItem {
+                        key: String,
+                        val: String,
+                        anchor: Option<String>,
+                        kind: Option<String>,
+                        rel: Option<(String, String)>,
+                    }
+
+                    let mut items = Vec::with_capacity(batch_val.len());
+                    for (idx, item) in batch_val.iter().enumerate() {
+                        let key = item
+                            .get("key")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                crate::error::Error::Usage(format!(
+                                    "Batch item #{} missing 'key'",
+                                    idx
+                                ))
+                            })?;
+                        let val = item
+                            .get("val")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                crate::error::Error::Usage(format!(
+                                    "Batch item #{} missing 'val'",
+                                    idx
+                                ))
+                            })?;
+                        let anchor = item.get("anchor").and_then(|v| v.as_str()).map(String::from);
+                        let kind = item.get("kind").and_then(|v| v.as_str()).map(String::from);
+                        let rel = item
+                            .get("rel")
+                            .and_then(|v| v.as_str())
+                            .map(Self::parse_relation)
+                            .transpose()?
+                            .map(|(t, r)| (t.to_string(), r.to_string()));
+
+                        items.push(ParsedBatchItem {
+                            key: key.to_string(),
+                            val: val.to_string(),
+                            anchor,
+                            kind,
+                            rel,
+                        });
+                    }
+
+                    let batch_rules: Vec<crate::store::BatchRule> = items
+                        .iter()
+                        .map(|it| crate::store::BatchRule {
+                            key: &it.key,
+                            val: &it.val,
+                            anchor: it.anchor.as_deref(),
+                            kind: it.kind.as_deref(),
+                            relation: it.rel.as_ref().map(|(t, r)| (t.as_str(), r.as_str())),
+                        })
+                        .collect();
+
+                    let mut store = self.open_store(scope, true)?;
+                    let count = store.set_batch(&batch_rules)?;
+                    if scope == "project" {
+                        let rules_file = self.project_root.join(".agent-rules");
+                        if rules_file.exists() {
+                            store.export_to_file(&rules_file)?;
+                        }
+                    }
+                    return Ok(format!("saved [{}] {} memories in batch", scope, count));
+                }
+
                 let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
                     crate::error::Error::Usage("Missing required argument 'key'".into())
                 })?;
@@ -488,10 +568,6 @@ impl McpServer {
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
                 let kind = args.get("kind").and_then(|v| v.as_str());
                 let rel = args.get("rel").and_then(|v| v.as_str());
-                let scope = args
-                    .get("scope")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("project");
 
                 let relation = rel.map(Self::parse_relation).transpose()?;
                 let mut store = self.open_store(scope, true)?;

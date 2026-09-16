@@ -2,6 +2,7 @@
 # Track this file in git to share rules across your team without SQLite binary conflicts.
 
 architecture/anchor-garbage-collection = Auto-Poda de Reglas Zombis (clean and post-commit hook): inspects anchor paths against filesystem and git deleted files, auto-archiving stale memories with [file_deleted: <paths>] without leaving working trees dirty or breaking multi-branch isolation
+[decision] architecture/batch-writes-and-sync-noop-detection = Batch writes via Store::set_batch use single immediate transaction with atomic rollback, cutting N-1 disk exports and WAL flushes. sync_with_file detects no-op in ~0.03ms via _sync_state content and db fingerprints. (@ src/store/mod.rs:45)
 architecture/canonical-project-registry = Canonical project registry in ~/.config/agent-mem/projects.json resolves symlinks/case-folding and anchors by git remote URL, eliminating duplication while keeping zero overhead on reads. (@ src/registry.rs:1)
 architecture/clustered-knowledge-hypergraph = Schema v3 supports rule, decision, gotcha and pattern entities with typed directed relations and anchor-filtered context. Team Git sync uses deterministic text with lossless JSON-v1 records for ambiguous content; measure retrieval savings together with relevant-rule retention. (@ src/store/graph.rs:1)
 architecture/context-budget-packing-and-global-reservation = Context builder implements pre-materialization budget packing with compact representations for oversized values, full-rule atomic selection, and reserved slot and byte allocations for global preferences under scope all.

@@ -202,6 +202,18 @@ fn test_massive_sync_reconciliation_scale() {
         "2,000 rules sync must finish in < 500ms"
     );
 
+    // Second sync on untouched file must hit no-op fast path (< 5ms)
+    let noop_start = Instant::now();
+    let noop_report = store.sync_with_file(&rules_path).unwrap();
+    let noop_duration = noop_start.elapsed();
+    assert_eq!(noop_report.total, 2_000);
+    assert_eq!(noop_report.conflicts_resolved, 0);
+    assert!(
+        noop_duration.as_millis() < 5,
+        "Unchanged 2,000 rules sync must hit no-op path in < 5ms, took {:?}",
+        noop_duration
+    );
+
     // BM25 verify
     let results = store.find("Rule description number 1500").unwrap();
     assert_eq!(results.len(), 1);

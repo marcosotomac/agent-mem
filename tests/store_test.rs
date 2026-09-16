@@ -862,3 +862,112 @@ gotcha/auth = use constant-time comparison for tokens (@ src/crypto.rs:45)
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn test_store_set_batch_atomic_transaction() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_batch_set_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    let rules = [
+        agent_mem::BatchRule {
+            key: "auth/jwt",
+            val: "Use RS256 with key rotation",
+            anchor: Some("src/auth.rs:10"),
+            kind: Some("decision"),
+            relation: Some(("relates_to", "crypto/keys")),
+        },
+        agent_mem::BatchRule {
+            key: "crypto/keys",
+            val: "Rotate RSA keys every 90 days",
+            anchor: Some("src/crypto.rs:25"),
+            kind: Some("rule"),
+            relation: None,
+        },
+        agent_mem::BatchRule {
+            key: "db/wal",
+            val: "Enable WAL mode",
+            anchor: None,
+            kind: Some("rule"),
+            relation: None,
+        },
+    ];
+
+    let count = store.set_batch(&rules).unwrap();
+    assert_eq!(count, 3);
+
+    // Verify all memories, FTS, and relations were saved
+    assert_eq!(store.get("auth/jwt").unwrap(), Some("Use RS256 with key rotation".into()));
+    assert_eq!(store.get("crypto/keys").unwrap(), Some("Rotate RSA keys every 90 days".into()));
+    assert_eq!(store.get("db/wal").unwrap(), Some("Enable WAL mode".into()));
+
+    let relations = store.get_relations("auth/jwt").unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].0, "relates_to");
+    assert_eq!(relations[0].1, "crypto/keys");
+
+    let fts_hits = store.find("rotation").unwrap();
+    assert_eq!(fts_hits.len(), 2);
+
+    // Verify atomic rollback on invalid entry in batch
+    let invalid_rules = [
+        agent_mem::BatchRule {
+            key: "valid/one",
+            val: "Valid value",
+            anchor: None,
+            kind: None,
+            relation: None,
+        },
+        agent_mem::BatchRule {
+            key: "", // invalid empty key!
+            val: "Should trigger rollback",
+            anchor: None,
+            kind: None,
+            relation: None,
+        },
+    ];
+    let err = store.set_batch(&invalid_rules);
+    assert!(err.is_err());
+    assert_eq!(store.get("valid/one").unwrap(), None, "Rollback must ensure no partial writes");
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_sync_noop_detection_and_invalidation() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_sync_noop_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let rules_path = dir.join(".agent-rules");
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    let initial_content = "rule/one = first rule\nrule/two = second rule\n";
+    std::fs::write(&rules_path, initial_content).unwrap();
+
+    // First sync imports rules
+    let report1 = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report1.total, 2);
+
+    // Second sync without modifications hits no-op path
+    let report2 = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report2.total, 2);
+
+    // File change invalidates no-op cache and triggers sync
+    std::fs::write(&rules_path, "rule/one = first rule\nrule/two = updated second rule\nrule/three = third rule\n").unwrap();
+    let report3 = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report3.total, 3);
+    assert_eq!(store.get("rule/two").unwrap(), Some("updated second rule".into()));
+
+    // DB modification invalidates cache
+    store.set("rule/four", "fourth rule").unwrap();
+    // Subsequent sync reconciles to match the file (which only has three rules)
+    let report4 = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report4.total, 3);
+    assert_eq!(store.get("rule/four").unwrap(), None);
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+

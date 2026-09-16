@@ -20,6 +20,15 @@ pub struct Store {
     pub(crate) conn: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchRule<'a> {
+    pub key: &'a str,
+    pub val: &'a str,
+    pub anchor: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub relation: Option<(&'a str, &'a str)>,
+}
+
 impl Store {
     /// Set or update a key-value memory rule with optional repo-relative code anchor and entity kind.
     pub fn set_entry(
@@ -32,6 +41,92 @@ impl Store {
         self.set_entry_with_relation(key, val, anchor, kind, None)
     }
 
+    /// Atomically insert or update a batch of memory rules in a single SQLite transaction.
+    pub fn set_batch<'a>(&mut self, rules: &[BatchRule<'a>]) -> Result<usize> {
+        if rules.is_empty() {
+            return Ok(0);
+        }
+
+        // Validate all rules up front before any transaction or I/O
+        for r in rules {
+            if r.key.trim().is_empty() {
+                return Err(crate::error::Error::Usage(
+                    "Memory key cannot be empty".into(),
+                ));
+            }
+            if r.val.trim().is_empty() {
+                return Err(crate::error::Error::Usage(
+                    "Memory value cannot be empty".into(),
+                ));
+            }
+            if let Some((rel_type, target)) = r.relation
+                && (rel_type.trim().is_empty() || target.trim().is_empty())
+            {
+                return Err(crate::error::Error::Usage(
+                    "Relation type and target cannot be empty".into(),
+                ));
+            }
+        }
+
+        let now = now_epoch();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        {
+            let mut insert_mem = tx.prepare_cached(
+                "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
+                 ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor, archived_at = NULL, archive_reason = NULL, kind = excluded.kind;",
+            )?;
+            let mut delete_fts = tx.prepare_cached("DELETE FROM memories_fts WHERE key = ?1;")?;
+            let mut insert_fts = tx.prepare_cached(
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
+            )?;
+            let mut insert_rel = tx.prepare_cached(
+                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+            )?;
+
+            for r in rules {
+                let trimmed_key = r.key.trim();
+                let trimmed_val = r.val.trim();
+                let trimmed_anchor = r.anchor.map(|a| a.trim()).filter(|a| !a.is_empty());
+                let effective_kind = r
+                    .kind
+                    .map(|k| k.trim())
+                    .filter(|k| !k.is_empty())
+                    .unwrap_or_else(|| infer_kind(trimmed_key));
+
+                insert_mem.execute(params![
+                    trimmed_key,
+                    trimmed_val,
+                    now,
+                    trimmed_anchor,
+                    effective_kind
+                ])?;
+                delete_fts.execute(params![trimmed_key])?;
+                insert_fts.execute(params![
+                    trimmed_key,
+                    trimmed_val,
+                    trimmed_anchor,
+                    effective_kind
+                ])?;
+
+                if let Some((rel_type, target)) = r.relation {
+                    insert_rel.execute(params![
+                        trimmed_key,
+                        rel_type.trim(),
+                        target.trim(),
+                        now
+                    ])?;
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(rules.len())
+    }
+
     /// Atomically set a memory and, optionally, one directed relation.
     pub fn set_entry_with_relation(
         &mut self,
@@ -41,64 +136,13 @@ impl Store {
         kind: Option<&str>,
         relation: Option<(&str, &str)>,
     ) -> Result<()> {
-        let trimmed_key = key.trim();
-        let trimmed_val = val.trim();
-        if trimmed_key.is_empty() {
-            return Err(crate::error::Error::Usage(
-                "Memory key cannot be empty".into(),
-            ));
-        }
-        if trimmed_val.is_empty() {
-            return Err(crate::error::Error::Usage(
-                "Memory value cannot be empty".into(),
-            ));
-        }
-
-        let trimmed_anchor = anchor.map(|a| a.trim()).filter(|a| !a.is_empty());
-        let effective_kind = kind
-            .map(|k| k.trim())
-            .filter(|k| !k.is_empty())
-            .unwrap_or_else(|| infer_kind(trimmed_key));
-        let relation = match relation {
-            Some((rel_type, target)) => {
-                let rel_type = rel_type.trim();
-                let target = target.trim();
-                if rel_type.is_empty() || target.is_empty() {
-                    return Err(crate::error::Error::Usage(
-                        "Relation type and target cannot be empty".into(),
-                    ));
-                }
-                Some((rel_type, target))
-            }
-            None => None,
-        };
-
-        let now = now_epoch();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
-             ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor, archived_at = NULL, archive_reason = NULL, kind = excluded.kind;",
-            params![trimmed_key, trimmed_val, now, trimmed_anchor, effective_kind],
-        )?;
-        tx.execute(
-            "DELETE FROM memories_fts WHERE key = ?1;",
-            params![trimmed_key],
-        )?;
-        tx.execute(
-            "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
-            params![trimmed_key, trimmed_val, trimmed_anchor, effective_kind],
-        )?;
-        if let Some((rel_type, target)) = relation {
-            tx.execute(
-                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
-                params![trimmed_key, rel_type, target, now],
-            )?;
-        }
-        tx.commit()?;
-
+        self.set_batch(&[BatchRule {
+            key,
+            val,
+            anchor,
+            kind,
+            relation,
+        }])?;
         Ok(())
     }
 

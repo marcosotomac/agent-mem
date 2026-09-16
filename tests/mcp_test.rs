@@ -962,3 +962,79 @@ fn test_mcp_context_full_rule_packing_and_global_space_reservation() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_mcp_mem_set_batch_writes_and_single_export() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_batch_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let rules_path = temp_dir.join(".agent-rules");
+    fs::write(&rules_path, "# initial rules\n").unwrap();
+
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+
+    let batch_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {
+                "scope": "project",
+                "batch": [
+                    {
+                        "key": "gotcha/jwt_issuer",
+                        "val": "Validate issuer before expiration",
+                        "anchor": "src/auth.rs:15",
+                        "kind": "gotcha"
+                    },
+                    {
+                        "key": "decision/constant_time",
+                        "val": "Use constant time string comparison",
+                        "anchor": "src/crypto.rs:40",
+                        "kind": "decision",
+                        "rel": "relates_to:gotcha/jwt_issuer"
+                    },
+                    {
+                        "key": "rule/cache_ttl",
+                        "val": "Set redis cache TTL to 300s"
+                    }
+                ]
+            }
+        }),
+    };
+
+    let resp = server.handle_request(&batch_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"].as_bool(), None);
+    let text = res["content"][0]["text"].as_str().unwrap();
+    assert_eq!(text, "saved [project] 3 memories in batch");
+
+    // Verify .agent-rules exported with all 3 rules
+    let exported = fs::read_to_string(&rules_path).unwrap();
+    assert!(exported.contains("gotcha/jwt_issuer = Validate issuer before expiration"));
+    assert!(exported.contains("decision/constant_time = Use constant time string comparison"));
+    assert!(exported.contains("rule/cache_ttl = Set redis cache TTL to 300s"));
+
+    // Verify relations and find in SQLite
+    let find_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_find",
+            "arguments": { "query": "constant time", "scope": "project" }
+        }),
+    };
+    let find_resp = server.handle_request(&find_req).unwrap();
+    let find_text = find_resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    assert!(find_text.contains("[decision] decision/constant_time"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
