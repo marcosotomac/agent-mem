@@ -1,10 +1,9 @@
 use agent_mem::mcp::{JsonRpcRequest, McpServer};
 use agent_mem::store::Store;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::Instant;
 
 fn percentile(sorted: &[f64], pct: f64) -> f64 {
@@ -27,7 +26,7 @@ fn format_us(us: f64) -> String {
 
 fn main() {
     println!("\n============================================================");
-    println!("     agent-mem: Sub-Millisecond AI Memory Benchmark Suite   ");
+    println!("     agent-mem: Local Memory Benchmark Suite   ");
     println!("============================================================\n");
 
     let temp_dir = std::env::temp_dir().join(format!(
@@ -40,7 +39,7 @@ fn main() {
     fs::create_dir_all(&temp_dir).expect("failed to create temp bench dir");
     let db_path = temp_dir.join(".agent-mem").join("mem.db");
 
-    println!("[1/7] Seeding 2,000 realistic engineering rules & knowledge graph...");
+    println!("[1/6] Seeding 2,000 realistic engineering rules & knowledge graph...");
     let mut store = Store::open(&db_path, true).expect("failed to open store");
 
     let topics = [
@@ -78,14 +77,20 @@ fn main() {
 
         // Link with prior node to create graph topology
         if i > 0 && i % 3 == 0 {
-            let prev_key = format!("{}/{}_{:04}", topic, kinds[(i - 1) % kinds.len()], i - 1);
+            let prev_key = format!(
+                "{}/{}_{:04}",
+                topics[(i - 1) % topics.len()],
+                kinds[(i - 1) % kinds.len()],
+                i - 1
+            );
             let rel = match i % 4 {
                 0 => "relates_to",
                 1 => "mitigates",
                 2 => "depends_on",
                 _ => "supersedes",
             };
-            let _ = store.relate(&key, rel, &prev_key);
+            assert!(store.get_entry(&prev_key).expect("target lookup").is_some());
+            store.relate(&key, rel, &prev_key).expect("seed relation");
         }
     }
     let seed_duration = seed_start.elapsed();
@@ -98,7 +103,7 @@ fn main() {
     // ---------------------------------------------------------
     // Benchmark 1: Point Lookup Latency (Clustered B-tree)
     // ---------------------------------------------------------
-    println!("[2/7] Benchmarking Clustered B-Tree Point Lookups (5,000 iterations)...");
+    println!("[2/6] Benchmarking Clustered B-Tree Point Lookups (5,000 iterations)...");
     let mut lookup_times = Vec::with_capacity(5000);
     for i in 0..5000 {
         let topic = topics[i % topics.len()];
@@ -132,7 +137,7 @@ fn main() {
     // ---------------------------------------------------------
     // Benchmark 2: Full-Text Search (FTS5 BM25)
     // ---------------------------------------------------------
-    println!("[3/7] Benchmarking FTS5 BM25 Search (1,000 iterations)...");
+    println!("[3/6] Benchmarking FTS5 BM25 Search (1,000 iterations)...");
     let search_queries = [
         "zero-allocation buffers",
         "WAL mode isolation",
@@ -166,16 +171,23 @@ fn main() {
     println!("      Throughput: {:.0} queries/sec\n", fts_ops);
 
     // ---------------------------------------------------------
-    // Benchmark 3: Knowledge Hypergraph 1-Hop Traversal
+    // Benchmark 3: Indexed outgoing edge lookup (nonempty results)
     // ---------------------------------------------------------
-    println!("[4/7] Benchmarking Knowledge Hypergraph 1-Hop Traversal (1,000 iterations)...");
+    println!("[4/6] Benchmarking Outgoing Edge Lookup (1,000 iterations)...");
     let mut graph_times = Vec::with_capacity(1000);
     for i in 0..1000 {
-        let key = format!("auth/rule_{:04}", (i * 3) % 2000);
+        let index = (i % 666 + 1) * 3;
+        let key = format!(
+            "{}/{}_{:04}",
+            topics[index % topics.len()],
+            kinds[index % kinds.len()],
+            index
+        );
         let t0 = Instant::now();
-        store.get_relations(&key).expect("graph traversal");
+        let relations = store.get_relations(&key).expect("edge lookup");
         let elapsed = t0.elapsed().as_secs_f64() * 1_000_000.0;
         graph_times.push(elapsed);
+        assert_eq!(relations.len(), 1);
     }
     graph_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -192,10 +204,10 @@ fn main() {
     println!("      Throughput: {:.0} traversals/sec\n", graph_ops);
 
     // ---------------------------------------------------------
-    // Benchmark 4: MCP dispatch including connection setup, query, and result construction
+    // Benchmark 4: Warm in-process MCP dispatch; excludes stdio and process startup.
     // ---------------------------------------------------------
     let mcp = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
-    println!("[5/7] Benchmarking MCP mem_find Dispatch (1,000 iterations)...");
+    println!("[5/6] Benchmarking MCP mem_find Dispatch (1,000 iterations)...");
     let find_req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         id: Some(json!(1)),
@@ -205,6 +217,8 @@ fn main() {
             "arguments": { "query": "zero-allocation buffers", "scope": "project" }
         }),
     };
+    // Warm up connection and prepared statement caches outside the timed loop.
+    mcp.handle_request(&find_req).expect("warmup");
     let mut mcp_times = Vec::with_capacity(1000);
     for _ in 0..1000 {
         let t0 = Instant::now();
@@ -212,6 +226,14 @@ fn main() {
         let elapsed = t0.elapsed().as_secs_f64() * 1_000_000.0;
         mcp_times.push(elapsed);
         assert!(response.error.is_none());
+        let result = response.result.expect("tool result");
+        assert_ne!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .expect("search text")
+                .contains("Production convention")
+        );
     }
     mcp_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mcp_p50 = percentile(&mcp_times, 50.0);
@@ -224,7 +246,7 @@ fn main() {
     // ---------------------------------------------------------
     // Benchmark 5: Token Budget & Context Filtering Efficiency
     // ---------------------------------------------------------
-    println!("[6/7] Auditing Token Budget & Context Reduction...");
+    println!("[6/6] Auditing Token Budget & Context Reduction...");
     let list_req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         id: Some(json!(1)),
@@ -235,337 +257,193 @@ fn main() {
     let schema_chars = serde_json::to_string(&resp.result).expect("json").len();
     let schema_tokens = schema_chars / 4; // ~4 chars per token rule of thumb
 
-    // Context dump vs anchor-filtered context
-    let (all_rules, _) = store.context().expect("full context");
-    let full_chars: usize = all_rules.iter().map(|r| r.0.len() + r.1.len() + 10).sum();
-
+    // Build the relevance oracle independently of the retrieval query: exact file
+    // matches plus the seeded outgoing one-hop neighbors, with no result cap.
+    let all_rules = store.dump_all().expect("full rules");
+    let direct: BTreeSet<_> = all_rules
+        .iter()
+        .filter(|r| r.anchor.as_deref().and_then(|a| a.split(':').next()) == Some(files[0]))
+        .map(|r| r.key.clone())
+        .collect();
+    let mut expected = direct.clone();
+    for rel in store.get_all_relations().expect("all relations") {
+        if direct.contains(&rel.source_key) {
+            expected.insert(rel.target_key);
+        }
+    }
     let (anchor_rules, _, _) = store
-        .context_filtered(Some("src/auth/jwt.rs"), None, 20)
-        .expect("anchor context");
-    let anchor_chars: usize = anchor_rules
-        .iter()
-        .map(|r| r.key.len() + r.val.len() + 10)
-        .sum();
-
-    let token_reduction_pct = if full_chars > 0 {
-        (1.0 - (anchor_chars as f64 / full_chars as f64)) * 100.0
-    } else {
-        0.0
+        .context_filtered(Some(files[0]), None, all_rules.len())
+        .expect("untruncated anchor context");
+    let actual: BTreeSet<_> = anchor_rules.iter().map(|r| r.key.clone()).collect();
+    assert_eq!(actual, expected, "filtering must retain all relevant rules");
+    let (capped_rules, _, _) = store
+        .context_filtered(Some(files[0]), None, 20)
+        .expect("capped anchor context");
+    let rule_bytes = |rules: &[agent_mem::store::RuleRecord]| -> usize {
+        rules.iter().map(|r| r.key.len() + r.val.len()).sum()
     };
-
+    let full_bytes = rule_bytes(&all_rules);
+    let filtered_bytes = rule_bytes(&anchor_rules);
+    let capped_bytes = rule_bytes(&capped_rules);
+    let filtering_reduction = 100.0 * (1.0 - filtered_bytes as f64 / full_bytes as f64);
+    let capped_reduction = 100.0 * (1.0 - capped_bytes as f64 / full_bytes as f64);
+    let capped_recall = 100.0 * capped_rules.len() as f64 / expected.len() as f64;
     println!(
-        "      MCP Tool Schema: {} chars (~{} tokens across 4 tools)",
-        schema_chars, schema_tokens
+        "      Relevant rules: {} ({} directly anchored)",
+        expected.len(),
+        direct.len()
     );
     println!(
-        "      Full Context Payload:    {} chars (~{} tokens)",
-        full_chars,
-        full_chars / 4
+        "      Filtering only: {filtering_reduction:.1}% fewer key/value bytes; 100% relevant rules retained"
     );
     println!(
-        "      Anchor Context Payload:  {} chars (~{} tokens)",
-        anchor_chars,
-        anchor_chars / 4
-    );
-    println!(
-        "      Context Token Reduction: {:.1}%\n",
-        token_reduction_pct
+        "      With limit=20: {capped_reduction:.1}% fewer bytes; {capped_recall:.1}% relevant rules retained"
     );
 
-    let _ = fs::remove_dir_all(&temp_dir);
-
-    // ---------------------------------------------------------
-    // Benchmark 6: Engram Real-Time Live Audit
-    // ---------------------------------------------------------
-    println!("[7/7] Auditing & Benchmarking Engram Engine...");
-    let engram_bench = probe_and_bench_engram();
-    if engram_bench.installed {
-        println!("      Detected:  {}", engram_bench.name_version);
-        println!(
-            "      Binary:    {} (Go Mach-O)",
-            engram_bench.binary_size_str
-        );
-        println!(
-            "      MCP Tool Schema: {} chars (~{} tokens across 18 tools)",
-            engram_bench.schema_chars, engram_bench.schema_tokens
-        );
-        println!(
-            "      MCP Search Dispatch (p50): {}\n",
-            engram_bench.mcp_search_dispatch
-        );
-    } else {
-        println!(
-            "      Engram binary not detected locally; using verified empirical reference metrics.\n"
-        );
+    // Measure the user-facing selective read and write/export paths as well as
+    // database primitives. Same corpus and warm connections for every iteration.
+    let mut context_times = Vec::with_capacity(200);
+    let mut serialization_times = Vec::with_capacity(100);
+    let mut export_times = Vec::with_capacity(100);
+    let mut write_times = Vec::with_capacity(100);
+    let rules_path = temp_dir.join(".agent-rules");
+    for _ in 0..200 {
+        let start = Instant::now();
+        let (rules, _, _) = store
+            .context_filtered(Some(files[0]), None, 20)
+            .expect("context");
+        context_times.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+        assert_eq!(rules.len(), 20);
     }
-
-    // ---------------------------------------------------------
-    // Final Summary & Competitor Comparison Scorecard
-    // ---------------------------------------------------------
-    println!("============================================================");
-    println!("                 COMPETITIVE SCORECARD                      ");
-    println!("============================================================\n");
-
-    let engram_col_header = if engram_bench.name_version.starts_with("engram") {
-        engram_bench.name_version.clone()
-    } else {
-        format!("engram ({})", engram_bench.name_version)
-    };
-
-    let markdown_table = format!(
-        r#"| Metric | agent-mem | {} | agentmemory | mem0 | Static (CLAUDE.md) |
-|---|---|---|---|---|---|
-| **Point Lookup Latency** | **{}** | ~45 µs | ~14 ms | ~150 ms | N/A |
-| **BM25 Search Latency** | **{}** | ~480 µs | ~14 ms | N/A (vector) | ~5 ms (grep) |
-| **MCP Search Dispatch** | **{}** | {} | N/A | N/A | N/A |
-| **Graph 1-Hop Traversal** | **{}** | ~120 µs | ~25 ms | ~200 ms | N/A |
-| **MCP Schema Overhead** | **{} chars (~{} tokens)** | {} chars (~{} tokens) | 54 tools (~5,000 tok) | ~3,500 tok | 0 tok |
-| **Anchor Token Savings** | **{:.1}% reduction** | 0% (dump format) | 0% (dump/vector) | 0% | N/A |
-| **Architecture** | **Single binary (2.4–2.7 MB)** | Single binary ({}, Go) | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
-| **Runtime Memory (RSS)** | **~2 MB** | ~28 MB | ~250 MB | ~500 MB+ | 0 MB |
-| **Daemon Requirement** | **Zero daemons** | Zero daemons | Pinned iii background engine | Docker / Python server | None |
-| **Git / Team Sync** | **Native `.agent-rules` (union merge)** | Binary chunks / Cloud Sync | None (local state only) | Cloud / API only | Manual git merge |
-
-*agent-mem and engram performance columns are measured directly on your machine when binaries are present; competitor values are historical reference estimates.*"#,
-        engram_col_header,
-        format_us(lookup_p50),
-        format_us(fts_p50),
-        format_us(mcp_p50),
-        engram_bench.mcp_search_dispatch,
-        format_us(graph_p50),
-        schema_chars,
-        schema_tokens,
-        engram_bench.schema_chars,
-        engram_bench.schema_tokens,
-        token_reduction_pct,
-        engram_bench.binary_size_str
-    );
-
-    println!("{}\n", markdown_table);
-
-    // Write benchmark report file
-    let report_path = PathBuf::from("BENCHMARK.md");
-    let report_content = format!(
-        "# agent-mem Benchmark & Competitor Comparison\n\n\
-        > Automated reproducible benchmark executed on v{}\n\n\
-        ## Executive Summary\n\n\
-        `agent-mem` delivers **sub-millisecond latency** and **extreme token efficiency** via embedded SQLite with Memory-Mapped I/O (`PRAGMA mmap_size`), clustered B-tree indexes (`WITHOUT ROWID`), and BM25 full-text search.\n\n\
-        ## Benchmark Results\n\n\
-        - **Point Lookup (p50):** {}\n\
-        - **Point Lookup (p99):** {}\n\
-        - **BM25 FTS5 Search (p50):** {}\n\
-        - **BM25 FTS5 Search (p99):** {}\n\
-        - **Graph 1-Hop Traversal (p50):** {}\n\
-        - **MCP `mem_find` Dispatch (p50):** {}\n\
-        - **MCP Tool Schema:** {} characters (~{} tokens)\n\
-        - **Anchor Context Reduction:** {:.1}%\n\n\
-        ## Competitive Comparison\n\n\
-        {}\n\n\
-        ## How to Reproduce\n\n\
-        ```bash\n\
-        cargo bench\n\
-        ```\n",
-        env!("CARGO_PKG_VERSION"),
-        format_us(lookup_p50),
-        format_us(lookup_p99),
-        format_us(fts_p50),
-        format_us(fts_p99),
-        format_us(graph_p50),
-        format_us(mcp_p50),
-        schema_chars,
-        schema_tokens,
-        token_reduction_pct,
-        markdown_table
-    );
-
-    let _ = fs::write(&report_path, report_content);
-    println!("Benchmark report generated at BENCHMARK.md");
-}
-
-struct EngramBenchmark {
-    name_version: String,
-    binary_size_str: String,
-    schema_chars: usize,
-    schema_tokens: usize,
-    mcp_search_dispatch: String,
-    installed: bool,
-}
-
-fn probe_and_bench_engram() -> EngramBenchmark {
-    let candidates = ["/opt/homebrew/bin/engram", "/usr/local/bin/engram"];
-    let bin_path = candidates
-        .iter()
-        .find_map(|p| {
-            let pb = PathBuf::from(p);
-            if pb.exists() { Some(pb) } else { None }
-        })
-        .or_else(|| {
-            Command::new("which")
-                .arg("engram")
-                .output()
-                .ok()
-                .and_then(|out| {
-                    if out.status.success() {
-                        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if !s.is_empty() {
-                            Some(PathBuf::from(s))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-        });
-
-    let Some(bin_path) = bin_path else {
-        return EngramBenchmark {
-            name_version: "engram (v1.20 ref)".to_string(),
-            binary_size_str: "18 MB".to_string(),
-            schema_chars: 21327,
-            schema_tokens: 5331,
-            mcp_search_dispatch: "~0.48 ms".to_string(),
-            installed: false,
-        };
-    };
-
-    let version_raw = Command::new(&bin_path)
-        .arg("version")
-        .output()
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_default();
-
-    let name_version = if version_raw.contains("engram") {
-        version_raw
-    } else if !version_raw.is_empty() {
-        format!("engram {}", version_raw)
-    } else {
-        "engram v1.20".to_string()
-    };
-
-    let size_bytes = fs::metadata(&bin_path)
-        .map(|m| m.len())
-        .unwrap_or(18 * 1024 * 1024);
-    let binary_size_str = format!("{:.1} MB", size_bytes as f64 / (1024.0 * 1024.0));
-
-    // Dynamic measurement of tools schema
-    let (schema_chars, schema_tokens) = {
-        let child = Command::new(&bin_path)
-            .args(["mcp", "--tools=agent"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
-
-        if let Ok(mut c) = child {
-            if let (Some(mut stdin), Some(stdout)) = (c.stdin.take(), c.stdout.take()) {
-                let mut reader = BufReader::new(stdout);
-                let _ = writeln!(
-                    stdin,
-                    r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{{}}}}"#
-                );
-                let _ = stdin.flush();
-                let mut line = String::new();
-                let _ = reader.read_line(&mut line);
-                let _ = c.kill();
-
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let Some(tools) = v.get("result").and_then(|r| r.get("tools")) {
-                        let chars = serde_json::to_string(tools)
-                            .map(|s| s.len())
-                            .unwrap_or(21327);
-                        (chars, chars / 4)
-                    } else {
-                        (21327, 5331)
-                    }
+    for _ in 0..100 {
+        let start = Instant::now();
+        let text = store.export_rules_text().expect("serialize");
+        serialization_times.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+        assert!(text.contains("auth/rule_0000"));
+    }
+    for _ in 0..100 {
+        let start = Instant::now();
+        store.export_to_file(&rules_path).expect("export");
+        export_times.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+    for i in 0..100 {
+        let start = Instant::now();
+        store
+            .set_entry(
+                "bench/write",
+                if i % 2 == 0 {
+                    "First line\nSecond line"
                 } else {
-                    (21327, 5331)
-                }
-            } else {
-                let _ = c.kill();
-                (21327, 5331)
-            }
-        } else {
-            (21327, 5331)
-        }
-    };
-
-    // Dynamic latency measurement against clean temp environment
-    let temp_engram_dir = std::env::temp_dir().join(format!(
-        "engram_bench_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = fs::create_dir_all(&temp_engram_dir);
-
-    let mcp_search_dispatch = (|| -> Option<String> {
-        let mut child = Command::new(&bin_path)
-            .args(["mcp", "--tools=agent"])
-            .env("ENGRAM_DATA_DIR", &temp_engram_dir)
-            .env("ENGRAM_PROJECT", "bench_live")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-
-        let mut stdin = child.stdin.take()?;
-        let mut reader = BufReader::new(child.stdout.take()?);
-
-        // initialize
-        writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"bench","version":"1.0"}}}}}}"#
-        )
-        .ok()?;
-        stdin.flush().ok()?;
-        let mut line = String::new();
-        reader.read_line(&mut line).ok()?;
-
-        // save a memory
-        writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"mem_save","arguments":{{"title":"bench","content":"production convention for benchmark testing"}}}}}}"#
-        )
-        .ok()?;
-        stdin.flush().ok()?;
-        line.clear();
-        reader.read_line(&mut line).ok()?;
-
-        // run 50 search iterations
-        let mut times = Vec::with_capacity(50);
-        for i in 0..50 {
-            let t0 = Instant::now();
-            writeln!(
-                stdin,
-                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"mem_search","arguments":{{"query":"convention"}}}}}}"#,
-                100 + i
+                    "Deploy @ staging"
+                },
+                None,
+                None,
             )
-            .ok()?;
-            stdin.flush().ok()?;
-            line.clear();
-            reader.read_line(&mut line).ok()?;
-            times.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
-        }
+            .expect("write");
+        store.export_to_file(&rules_path).expect("write export");
+        write_times.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+    context_times.sort_by(f64::total_cmp);
+    serialization_times.sort_by(f64::total_cmp);
+    export_times.sort_by(f64::total_cmp);
+    write_times.sort_by(f64::total_cmp);
 
-        let _ = child.kill();
-        let _ = fs::remove_dir_all(&temp_engram_dir);
+    let mut table =
+        String::from("| Operation | Samples | p50 | p95 | p99 |\n|---|---:|---:|---:|---:|\n");
+    for (label, times) in [
+        ("Point lookup", &lookup_times),
+        ("FTS5 search", &fts_times),
+        ("Outgoing edge lookup (one edge)", &graph_times),
+        ("MCP search (warm, in-process)", &mcp_times),
+        (
+            "Anchor context (limit 20, including relations/sessions)",
+            &context_times,
+        ),
+        ("Export serialization (no file I/O)", &serialization_times),
+        ("Full export (serialization + atomic rename)", &export_times),
+        ("Set + full export", &write_times),
+    ] {
+        table.push_str(&format!(
+            "| {label} | {} | {} | {} | {} |\n",
+            times.len(),
+            format_us(percentile(times, 50.0)),
+            format_us(percentile(times, 95.0)),
+            format_us(percentile(times, 99.0))
+        ));
+    }
+    let profile = if cfg!(debug_assertions) {
+        "debug (not a release performance result)"
+    } else {
+        "release/bench"
+    };
+    let report = format!(
+        r#"# agent-mem benchmark
 
-        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p50 = percentile(&times, 50.0);
-        Some(format_us(p50))
-    })()
-    .unwrap_or_else(|| "~0.48 ms".to_string());
+Version: {}. Platform: {}/{}. Profile: {}.
 
-    EngramBenchmark {
-        name_version,
-        binary_size_str,
+## Method
+
+Synthetic corpus: 2,000 memories across 10 files and 666 directed edges with existing endpoints.
+Point reads assert a hit; edge lookups assert one edge; FTS and MCP calls assert successful, nonempty results.
+MCP is measured in-process after warmup, excluding process startup and stdio transport.
+Export includes serialization and atomic file replacement; writes use SQLite WAL with synchronous=NORMAL.
+These measurements describe this machine and workload, not a universal latency guarantee.
+
+{}
+## Context efficiency and retrieval quality
+
+Payload metric: UTF-8 bytes of rule keys and values only; excludes formatting, anchors, relations and sessions.
+This is not a tokenizer measurement. MCP schema: {} bytes (~{} tokens using bytes/4).
+
+| Selection | Rules returned | Key/value bytes | Reduction vs full corpus | Relevant rules retained |
+|---|---:|---:|---:|---:|
+| Full corpus | {} | {} | 0% | 100% |
+| Anchor + outgoing one hop, without truncation | {} | {} | {:.1}% | 100% |
+| Same filter, limit 20 | {} | {} | {:.1}% | {:.1}% |
+
+The untruncated result is checked against an independent set of exact file matches and their outgoing neighbors.
+Savings from the result cap must not be attributed to filtering; the cap can omit relevant rules.
+
+## Comparisons
+
+No competitor latency, memory usage or token estimates are reported. A comparative benchmark must first
+use the same corpus, queries, transport, limits and correctness checks for both engines.
+
+## Reproduce
+
+```bash
+cargo bench --bench bench_suite
+# Explicitly refresh the tracked report:
+AGENT_MEM_BENCH_REPORT=BENCHMARK.md cargo bench --bench bench_suite
+```
+
+The default report goes to target/benchmark.md, so tests do not rewrite tracked documentation.
+"#,
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        profile,
+        table,
         schema_chars,
         schema_tokens,
-        mcp_search_dispatch,
-        installed: true,
+        all_rules.len(),
+        full_bytes,
+        anchor_rules.len(),
+        filtered_bytes,
+        filtering_reduction,
+        capped_rules.len(),
+        capped_bytes,
+        capped_reduction,
+        capped_recall
+    );
+    println!("\n{report}");
+    let report_path = std::env::var_os("AGENT_MEM_BENCH_REPORT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/benchmark.md"));
+    if let Some(parent) = report_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).expect("report directory");
     }
+    fs::write(&report_path, report).expect("write benchmark report");
+    println!("Benchmark report generated at {}", report_path.display());
+    fs::remove_dir_all(&temp_dir).expect("remove benchmark fixture");
 }

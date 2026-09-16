@@ -1,41 +1,51 @@
-# agent-mem Benchmark & Competitor Comparison
+# agent-mem benchmark
 
-> Automated reproducible benchmark executed on v1.1.0
+Version: 1.1.0. Platform: macos/aarch64. Profile: release/bench.
 
-## Executive Summary
+## Method
 
-`agent-mem` delivers **sub-millisecond latency** and **extreme token efficiency** via embedded SQLite with Memory-Mapped I/O (`PRAGMA mmap_size`), clustered B-tree indexes (`WITHOUT ROWID`), and BM25 full-text search.
+Synthetic corpus: 2,000 memories across 10 files and 666 directed edges with existing endpoints.
+Point reads assert a hit; edge lookups assert one edge; FTS and MCP calls assert successful, nonempty results.
+MCP is measured in-process after warmup, excluding process startup and stdio transport.
+Export includes serialization and atomic file replacement; writes use SQLite WAL with synchronous=NORMAL.
+These measurements describe this machine and workload, not a universal latency guarantee.
 
-## Benchmark Results
+| Operation | Samples | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|
+| Point lookup | 5000 | 1.29 µs | 1.42 µs | 2.08 µs |
+| FTS5 search | 1000 | 303.62 µs | 1.15 ms | 1.18 ms |
+| Outgoing edge lookup (one edge) | 1000 | 1.17 µs | 1.33 µs | 1.79 µs |
+| MCP search (warm, in-process) | 1000 | 1.14 ms | 1.18 ms | 1.20 ms |
+| Anchor context (limit 20, including relations/sessions) | 200 | 542.96 µs | 566.58 µs | 580.08 µs |
+| Export serialization (no file I/O) | 100 | 772.21 µs | 799.29 µs | 918.79 µs |
+| Full export (serialization + atomic rename) | 100 | 1.21 ms | 2.10 ms | 2.55 ms |
+| Set + full export | 100 | 1.29 ms | 1.69 ms | 3.25 ms |
 
-- **Point Lookup (p50):** 1.33 µs
-- **Point Lookup (p99):** 2.33 µs
-- **BM25 FTS5 Search (p50):** 293.04 µs
-- **BM25 FTS5 Search (p99):** 1.16 ms
-- **Graph 1-Hop Traversal (p50):** 1.00 µs
-- **MCP `mem_find` Dispatch (p50):** 1.09 ms
-- **MCP Tool Schema:** 1376 characters (~344 tokens)
-- **Anchor Context Reduction:** 99.0%
+## Context efficiency and retrieval quality
 
-## Competitive Comparison
+Payload metric: UTF-8 bytes of rule keys and values only; excludes formatting, anchors, relations and sessions.
+This is not a tokenizer measurement. MCP schema: 1376 bytes (~344 tokens using bytes/4).
 
-| Metric | agent-mem | engram 1.20.0 | agentmemory | mem0 | Static (CLAUDE.md) |
-|---|---|---|---|---|---|
-| **Point Lookup Latency** | **1.33 µs** | ~45 µs | ~14 ms | ~150 ms | N/A |
-| **BM25 Search Latency** | **293.04 µs** | ~480 µs | ~14 ms | N/A (vector) | ~5 ms (grep) |
-| **MCP Search Dispatch** | **1.09 ms** | 125.71 µs | N/A | N/A | N/A |
-| **Graph 1-Hop Traversal** | **1.00 µs** | ~120 µs | ~25 ms | ~200 ms | N/A |
-| **MCP Schema Overhead** | **1376 chars (~344 tokens)** | 20476 chars (~5119 tokens) | 54 tools (~5,000 tok) | ~3,500 tok | 0 tok |
-| **Anchor Token Savings** | **99.0% reduction** | 0% (dump format) | 0% (dump/vector) | 0% | N/A |
-| **Architecture** | **Single binary (2.4–2.7 MB)** | Single binary (18.0 MB, Go) | Node.js + iii daemon + 4 ports | Python + Docker + Postgres | Static file |
-| **Runtime Memory (RSS)** | **~2 MB** | ~28 MB | ~250 MB | ~500 MB+ | 0 MB |
-| **Daemon Requirement** | **Zero daemons** | Zero daemons | Pinned iii background engine | Docker / Python server | None |
-| **Git / Team Sync** | **Native `.agent-rules` (union merge)** | Binary chunks / Cloud Sync | None (local state only) | Cloud / API only | Manual git merge |
+| Selection | Rules returned | Key/value bytes | Reduction vs full corpus | Relevant rules retained |
+|---|---:|---:|---:|---:|
+| Full corpus | 2000 | 249790 | 0% | 100% |
+| Anchor + outgoing one hop, without truncation | 266 | 32604 | 86.9% | 100% |
+| Same filter, limit 20 | 20 | 2455 | 99.0% | 7.5% |
 
-*agent-mem and engram performance columns are measured directly on your machine when binaries are present; competitor values are historical reference estimates.*
+The untruncated result is checked against an independent set of exact file matches and their outgoing neighbors.
+Savings from the result cap must not be attributed to filtering; the cap can omit relevant rules.
 
-## How to Reproduce
+## Comparisons
+
+No competitor latency, memory usage or token estimates are reported. A comparative benchmark must first
+use the same corpus, queries, transport, limits and correctness checks for both engines.
+
+## Reproduce
 
 ```bash
-cargo bench
+cargo bench --bench bench_suite
+# Explicitly refresh the tracked report:
+AGENT_MEM_BENCH_REPORT=BENCHMARK.md cargo bench --bench bench_suite
 ```
+
+The default report goes to target/benchmark.md, so tests do not rewrite tracked documentation.
