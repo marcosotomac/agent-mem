@@ -175,3 +175,144 @@ fn test_cli_context_with_diff_in_git_repo() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_exact_path_precision_over_alphabetical_basename_collision() {
+    let mut store = Store::open_in_memory().unwrap();
+
+    // 1. Seed two memories where "architecture/db" is alphabetically earlier than "decision/api",
+    // but both share the generic basename "mod.rs".
+    store
+        .set_entry(
+            "architecture/db",
+            "Use PostgreSQL connection pool",
+            Some("src/db/mod.rs:1"),
+            Some("rule"),
+        )
+        .unwrap();
+
+    store
+        .set_entry(
+            "decision/api",
+            "Use GraphQL API router",
+            Some("src/api/mod.rs:1"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    // 2. Request context specifically for "src/api/mod.rs" with limit = 1.
+    // Exact path matching must prioritize src/api/mod.rs over the alphabetically earlier src/db/mod.rs!
+    let (rules, _, _) = store
+        .context_for_files(&["src/api/mod.rs".to_string()], None, 1)
+        .unwrap();
+
+    assert_eq!(rules.len(), 1, "Should retrieve exactly 1 rule for limit=1");
+    assert_eq!(
+        rules[0].key, "decision/api",
+        "Exact match for src/api/mod.rs must beat alphabetical precedence of src/db/mod.rs"
+    );
+    assert_eq!(rules[0].anchor.as_deref(), Some("src/api/mod.rs:1"));
+
+    // 3. Request context for "src/db/mod.rs" with limit = 1
+    let (db_rules, _, _) = store
+        .context_for_files(&["src/db/mod.rs".to_string()], None, 1)
+        .unwrap();
+
+    assert_eq!(db_rules.len(), 1);
+    assert_eq!(db_rules[0].key, "architecture/db");
+}
+
+#[test]
+fn test_context_filtered_combined_anchor_and_topic() {
+    let mut store = Store::open_in_memory().unwrap();
+
+    // Seed rules on same anchor with different topics/kinds
+    store
+        .set_entry(
+            "decision/auth",
+            "JWT authentication",
+            Some("src/auth/jwt.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    store
+        .set_entry(
+            "gotcha/auth",
+            "Token expiration clock skew",
+            Some("src/auth/jwt.rs:20"),
+            Some("gotcha"),
+        )
+        .unwrap();
+
+    store
+        .set_entry(
+            "gotcha/db",
+            "Connection pool exhaustion",
+            Some("src/db/pool.rs:5"),
+            Some("gotcha"),
+        )
+        .unwrap();
+
+    // 1. Query with BOTH anchor and topic specified: anchor = src/auth/jwt.rs, topic = "gotcha"
+    let (rules, _, _) = store
+        .context_filtered(Some("src/auth/jwt.rs"), Some("gotcha"), 10)
+        .unwrap();
+
+    assert_eq!(rules.len(), 1, "Must respect BOTH anchor AND topic filter");
+    assert_eq!(rules[0].key, "gotcha/auth");
+    assert_eq!(rules[0].kind, "gotcha");
+
+    // 2. Query with BOTH anchor and topic = "decision"
+    let (dec_rules, _, _) = store
+        .context_filtered(Some("src/auth/jwt.rs"), Some("decision"), 10)
+        .unwrap();
+
+    assert_eq!(dec_rules.len(), 1);
+    assert_eq!(dec_rules[0].key, "decision/auth");
+}
+
+#[test]
+fn test_hierarchy_ranking_and_generic_basename_isolation() {
+    let mut store = Store::open_in_memory().unwrap();
+
+    store
+        .set_entry(
+            "pattern/api-sibling",
+            "Use REST response envelope",
+            Some("src/api/routes.rs:1"),
+            Some("pattern"),
+        )
+        .unwrap();
+
+    store
+        .set_entry(
+            "decision/api-exact",
+            "GraphQL endpoint on /graphql",
+            Some("src/api/mod.rs:1"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    store
+        .set_entry(
+            "gotcha/db-mod",
+            "Deadlock on concurrent transactions",
+            Some("src/db/mod.rs:1"),
+            Some("gotcha"),
+        )
+        .unwrap();
+
+    // Query for src/api/mod.rs with limit = 2
+    let (rules, _, _) = store
+        .context_for_files(&["src/api/mod.rs".to_string()], None, 2)
+        .unwrap();
+
+    assert_eq!(rules.len(), 2);
+    // 1st must be exact match
+    assert_eq!(rules[0].key, "decision/api-exact");
+    // 2nd must be same-directory sibling
+    assert_eq!(rules[1].key, "pattern/api-sibling");
+    // Generic mod.rs in different module (src/db/mod.rs) must NEVER be included
+    assert!(!rules.iter().any(|r| r.key == "gotcha/db-mod"));
+}
