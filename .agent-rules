@@ -20,6 +20,7 @@ architecture/mcp-strict-storage-integrity = agent-mem MCP propagates all SQLite 
 [decision] decision/hook = add zero-overhead git lifecycle auto-capture post-commit hook (@ src/cli.rs:1, src/hook.rs:1, src/init.rs:1)
 feature/selective-context = Selective context via git diff or files matches anchored rules, expands one-hop relations and includes universal rules. Savings depend on the corpus and result limit; distinguish filtering from truncation and verify relevant-rule retention.
 release/v1.1.0 = Release v1.1.0 published: benchmark suite (cargo bench), AI client auto-setup, thread-safe test isolation, and GitHub release artifacts
+release/v1.2.0 = Release v1.2.0: Lossless json-v1 team sync, auto-import on clone, streaming SQLite export, zero-alloc kind inference, and retention-aware benchmark methodology
 
 # Relations
 [rel] architecture/zero-friction-init -> relates_to -> architecture/canonical-project-registry

@@ -1,6 +1,6 @@
 # agent-mem benchmark
 
-Version: 1.1.0. Platform: macos/aarch64. Profile: release/bench.
+Version: 1.2.0. Platform: macos/aarch64. Profile: release/bench.
 
 ## Method
 
