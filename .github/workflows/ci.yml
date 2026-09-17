@@ -23,6 +23,11 @@ jobs:
         run: scripts/check-release-metadata.sh
       - name: Check formatting
         run: cargo fmt --check
+      - name: Validate end-to-end benchmark harness
+        run: |
+          python3 -m py_compile evals/run_matrix.py evals/summarize.py
+          sh -n evals/bootstrap-mcp.sh
+          python3 evals/run_matrix.py --generate-only
       - name: Lint every feature and target
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 

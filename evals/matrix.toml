@@ -1,0 +1,26 @@
+harbor_version = "0.23.0"
+dataset = "swe-bench/swe-bench-verified"
+dataset_ref = "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341"
+agent = "codex"
+agent_version = "0.154.0"
+attempts = 3
+concurrency = 2
+
+# Harbor records the exact model and immutable dataset lock in every job.
+models = [
+  "openai/gpt-5.2-codex",
+  "openai/gpt-5-mini-2025-08-07",
+]
+
+# One independently verified real GitHub issue from each external repository.
+task_globs = [
+  "*astropy__astropy-*",
+  "*django__django-*",
+  "*sympy__sympy-*",
+]
+
+baselines = ["native", "agent-mem", "projectmem", "official-mcp-memory"]
+
+[packages]
+projectmem = "0.3.3"
+official_mcp_memory = "2025.11.25"

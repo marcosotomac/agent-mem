@@ -11,7 +11,7 @@ Ultra-fast, local-first, zero-daemon knowledge hypergraph and memory engine for 
 - **Fast local reads**: Embedded SQLite in WAL mode with a clustered B-tree (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`). See the benchmark for measured operation latencies, including MCP and export costs.
 - **Clustered Knowledge Hypergraph**: Evolve beyond flat key-value pairs into engineering entities (`rule`, `decision`, `gotcha`, `pattern`) linked with typed directed edges (`mitigates`, `supersedes`, `depends_on`, `relates_to`).
 - **Indexed Anchor-Aware Context Filtering**: Schema v4 routes exact paths, directory hierarchy, and basenames through a compact hash index, then validates original anchors before 1-hop graph expansion. Retrieval work stays bounded by the requested result limit.
-- **Minimal token footprint**: Four consolidated MCP tools in 1,376 schema characters (~344 tokens by the documented 4-char estimate), with bounded plain-text results and anchor-aware retrieval.
+- **Minimal token footprint**: Four consolidated MCP tools in 1,366 schema bytes (~341 tokens by the documented 4-byte estimate), with bounded plain-text results and anchor-aware retrieval.
 - **Zero background daemons**: Direct stdio communication without background HTTP processes or port collisions.
 - **Dual scopes**: Seamless access to isolated `project` memory (`.agent-mem/mem.db`) and user-level `global` preferences (`~/.config/agent-mem/global.db`).
 - **BM25 search**: Weighted SQLite FTS5 search across keys, values, anchors, reasons, and kinds. Strict queries keep the one-query fast path; a bounded OR fallback runs only after zero hits.
@@ -39,6 +39,10 @@ The default report is written to `target/benchmark.md`; use
 For end-to-end conflict, corruption, concurrency, context-budget, and relative
 performance coverage, see [the real-world validation suite](tests/REAL_WORLD_TESTS.md).
 It includes fixed-qrel noisy-query evaluation and an explicit 100,000-record release benchmark.
+Agent-level claims are evaluated separately with pinned external repositories,
+real tasks, repeated model runs, and identical baselines; see [the end-to-end
+benchmark protocol](evals/README.md). No agent-quality result is published until
+the corresponding run artifacts are available.
 
 ## Installation
 
@@ -100,7 +104,7 @@ agent-mem find <query>
 agent-mem session add <summary>
 agent-mem session list
 
-# Dense context block for prompt injection (with optional code anchor or topic filter)
+# Dense context block for targeted delivery (with optional code anchor or topic filter)
 agent-mem context [--anchor <path:line>] [--topic <prefix>] [--limit <n>]
 
 # Synchronize team rules (.agent-rules) without SQLite binary conflicts
@@ -118,7 +122,7 @@ agent-mem doctor
 # Start native Model Context Protocol (MCP) stdio server
 agent-mem mcp
 
-# Automatically configure AI clients (Claude, Cursor, Antigravity, Codex, Zed, Windsurf, Trae, etc.)
+# Explicitly configure AI clients (creates a backup; init never edits client configs)
 agent-mem mcp install [all|<client>]
 ```
 
@@ -192,8 +196,28 @@ Add `agent-mem` to your agent's MCP configuration (e.g., Claude Desktop, Cursor,
 }
 ```
 
-### Surgical MCP Tools (~344 estimated tokens total schema)
+### Surgical MCP Tools (~341 estimated tokens total schema)
 - `mem_set`: Store rules, decisions, or gotchas with optional code anchor, kind, relation, and scope (`project` or `global`).
 - `mem_find`: Search memories via BM25 keywords across `project`, `global`, or `all` scopes.
 - `mem_context`: Retrieve dense context block with optional `anchor` or `topic` filter for surgical LLM prompt injection.
 - `mem_manage`: Archive, reactivate, delete, link, or unlink memories without expanding the tool surface.
+
+Every project-scoped MCP call accepts `project` as a registered project id,
+unique name, or canonical path. When the server cannot infer one unambiguously,
+it returns the available ids instead of guessing or creating a database in the
+client's launch directory.
+
+## Security and artifact verification
+
+Treat `.agent-rules` and all recalled values as untrusted repository content;
+review changes in pull requests and never interpret recalled text as authority
+to run commands or disclose secrets. See the [threat model](THREAT_MODEL.md) for
+the full trust boundary and enforced request, write, batch, and import limits.
+
+Release installers verify every archive against the release checksum manifest.
+GitHub Actions also publishes build-provenance attestations, which can be checked
+after downloading an archive:
+
+```bash
+gh attestation verify agent-mem-darwin-aarch64.tar.gz --repo marcosotomac/agent-mem
+```

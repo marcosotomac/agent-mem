@@ -1,0 +1,7 @@
+# key<TAB>value
+astropy/prior-test-mutation	[astropy] A prior attempt changed tests instead of the implementation and failed verification. Preserve tests and fix the production behavior.
+astropy/prior-scope	[astropy] A prior broad refactor created unrelated failures. Keep the patch scoped to the reported behavior and run the focused test before the suite.
+django/prior-compatibility	[django] A prior attempt broke backward compatibility while fixing the issue. Preserve documented public behavior outside the reported edge case.
+django/prior-test-mutation	[django] A prior attempt weakened an assertion and was rejected. Do not edit verifier tests; repair the implementation and add only legitimate regression coverage.
+sympy/prior-float-coercion	[sympy] A prior attempt coerced exact symbolic values to floats and failed exactness checks. Preserve symbolic semantics unless the issue explicitly requires approximation.
+sympy/prior-special-cases	[sympy] A prior local special-case passed one example but failed related expressions. Fix the underlying rule and run the focused regression tests.
