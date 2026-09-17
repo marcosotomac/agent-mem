@@ -15,8 +15,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Tabs, Wrap,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
 };
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -26,6 +25,8 @@ use std::time::{Duration, Instant};
 const ACCENT: Color = Color::White;
 const EMERALD: Color = Color::Indexed(150); // Soft emerald (#a7d998)
 const AMBER: Color = Color::Indexed(216); // Soft amber (#fab283)
+const CYAN: Color = Color::Indexed(116); // Soft cyan (#8cd5e8)
+const VIOLET: Color = Color::Indexed(183); // Soft purple (#d0b0ea)
 const MUTED: Color = Color::Indexed(245); // Zinc-400
 const SUBTLE: Color = Color::Indexed(238); // Zinc-700
 const BG_SELECT: Color = Color::Indexed(236); // Subtle selection gray
@@ -873,33 +874,36 @@ pub fn render_ui(f: &mut ratatui::Frame, app: &mut App) {
 }
 
 fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let header_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBTLE));
+
+    let inner = header_block.inner(area);
+    f.render_widget(header_block, area);
+
     let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(24), // Title
-            Constraint::Min(25),    // Tabs
-            Constraint::Length(30), // Meta info
+            Constraint::Length(20), // Brand
+            Constraint::Min(35),    // Navigation Tabs
+            Constraint::Length(28), // Repo & Engine Status
         ])
-        .split(area);
+        .split(inner);
 
-    // Title
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(" agent-mem ", Style::default().fg(ACCENT).bold()),
-        Span::styled("tui", Style::default().fg(EMERALD).bold()),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(SUBTLE)),
-    );
-    f.render_widget(title, header_chunks[0]);
+    // Brand Logo & Version
+    let brand = Paragraph::new(Line::from(vec![
+        Span::styled(" ⬡ agent-mem ", Style::default().fg(ACCENT).bold()),
+        Span::styled("v1.2 ", Style::default().fg(EMERALD)),
+        Span::styled("│", Style::default().fg(SUBTLE)),
+    ]));
+    f.render_widget(brand, header_chunks[0]);
 
     // Tabs
     let rules_label = format!(" 1 Rules ({}) ", app.rules.len());
     let sessions_label = format!(" 2 Sessions ({}) ", app.sessions.len());
     let projects_label = format!(" 3 Projects ({}) ", app.projects.len());
-    let doctor_label = " 4 Doctor & AIs ";
+    let doctor_label = " 4 Doctor ";
     let help_label = " ? Help ";
 
     let titles = vec![
@@ -919,36 +923,24 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let tabs = Tabs::new(titles)
         .select(active_index)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(SUBTLE)),
-        )
-        .highlight_style(Style::default().fg(ACCENT).bold())
+        .highlight_style(Style::default().fg(ACCENT).bold().bg(BG_SELECT))
         .style(Style::default().fg(MUTED))
         .divider(Span::styled("·", Style::default().fg(SUBTLE)));
     f.render_widget(tabs, header_chunks[1]);
 
-    // Meta / Repo
+    // Meta / Repo Status
     let repo_name = app
         .root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".to_string());
     let meta = Paragraph::new(Line::from(vec![
-        Span::styled("repo: ", Style::default().fg(MUTED)),
-        Span::styled(repo_name, Style::default().fg(ACCENT)),
+        Span::styled("● ", Style::default().fg(EMERALD)),
+        Span::styled(repo_name, Style::default().fg(ACCENT).bold()),
         Span::styled(" · ", Style::default().fg(SUBTLE)),
-        Span::styled("WAL", Style::default().fg(EMERALD)),
+        Span::styled("SQLite WAL ", Style::default().fg(MUTED)),
     ]))
-    .alignment(Alignment::Right)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(SUBTLE)),
-    );
+    .alignment(Alignment::Right);
     f.render_widget(meta, header_chunks[2]);
 }
 
@@ -975,18 +967,30 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     let filter_text = if app.filter_query.is_empty() && app.input_mode != InputMode::Filter {
         Span::styled("press '/' to search...", Style::default().fg(MUTED))
+    } else if app.filter_query.is_empty() {
+        Span::styled("type query... (esc to cancel)", Style::default().fg(MUTED))
     } else {
         Span::styled(&app.filter_query, Style::default().fg(ACCENT).bold())
     };
 
-    let search_box = Paragraph::new(Line::from(vec![
-        Span::styled("🔍 ", Style::default()),
-        filter_text,
-    ]))
-    .block(
+    let search_icon = if app.input_mode == InputMode::Filter {
+        Span::styled("❯ ", Style::default().fg(EMERALD).bold())
+    } else {
+        Span::styled("🔍 ", Style::default())
+    };
+
+    let search_box = Paragraph::new(Line::from(vec![search_icon, filter_text])).block(
         Block::default()
-            .title(" Filter ")
-            .title_style(Style::default().fg(MUTED))
+            .title(if app.input_mode == InputMode::Filter {
+                " Filter (Active) "
+            } else {
+                " Filter "
+            })
+            .title_style(Style::default().fg(if app.input_mode == InputMode::Filter {
+                EMERALD
+            } else {
+                MUTED
+            }))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(search_border_style),
@@ -1019,9 +1023,9 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             let prefix = if is_selected { "▶ " } else { "  " };
 
             let kind_badge = match rule.kind.as_str() {
-                "decision" => Span::styled("[dec] ", Style::default().fg(Color::Cyan)),
+                "decision" => Span::styled("[dec] ", Style::default().fg(CYAN)),
                 "gotcha" => Span::styled("[gotcha] ", Style::default().fg(AMBER)),
-                "pattern" => Span::styled("[pat] ", Style::default().fg(Color::Magenta)),
+                "pattern" => Span::styled("[pat] ", Style::default().fg(VIOLET)),
                 _ => Span::styled("[rule] ", Style::default().fg(MUTED)),
             };
 
@@ -1042,14 +1046,23 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    let total = app.rules.len();
+    let visible_count = app.filtered_indices.len();
+    let current_pos = if visible_count == 0 {
+        0
+    } else {
+        app.selected_rule_idx + 1
+    };
+
     let list_title = if !app.filter_query.is_empty() {
         format!(
-            " Rules ({}/{}) ",
-            app.filtered_indices.len(),
-            app.rules.len()
+            " Rules · {current_pos}/{visible_count} (filter: \"{}\") ",
+            app.filter_query
         )
+    } else if total > 0 {
+        format!(" Rules · {current_pos} of {total} ")
     } else {
-        format!(" Rules ({}) ", app.rules.len())
+        " Rules (empty) ".to_string()
     };
 
     let rules_list = List::new(items)
@@ -1071,27 +1084,10 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.rules_state.select(selected);
     f.render_stateful_widget(rules_list, left_chunks[1], &mut app.rules_state);
 
-    if app.filtered_indices.len() > left_chunks[1].height.saturating_sub(2) as usize {
-        let mut scrollbar_state = ScrollbarState::default()
-            .content_length(app.filtered_indices.len())
-            .position(app.selected_rule_idx);
-        f.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .thumb_symbol("█")
-                .track_symbol(None)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .style(Style::default().fg(SUBTLE)),
-            left_chunks[1],
-            &mut scrollbar_state,
-        );
-    }
-
     // Right column: Detail Inspector
     let selected_rule = app.current_selected_rule();
     let detail_block = Block::default()
-        .title(" Inspector ")
+        .title(" Inspector · Knowledge Cockpit ")
         .title_style(Style::default().fg(MUTED))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1104,34 +1100,82 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             Span::styled(" [ACTIVE] ", Style::default().fg(EMERALD).bold())
         };
 
-        let kind_badge = match rule.kind.as_str() {
-            "decision" => Span::styled(" [DECISION] ", Style::default().fg(Color::Cyan).bold()),
-            "gotcha" => Span::styled(" [GOTCHA] ", Style::default().fg(AMBER).bold()),
-            "pattern" => Span::styled(" [PATTERN] ", Style::default().fg(Color::Magenta).bold()),
-            _ => Span::styled(" [RULE] ", Style::default().fg(MUTED).bold()),
+        let (kind_badge, kind_icon) = match rule.kind.as_str() {
+            "decision" => (Span::styled(" [DECISION] ", Style::default().fg(CYAN).bold()), "⚡"),
+            "gotcha" => (Span::styled(" [GOTCHA] ", Style::default().fg(AMBER).bold()), "▲"),
+            "pattern" => (Span::styled(" [PATTERN] ", Style::default().fg(VIOLET).bold()), "◈"),
+            _ => (Span::styled(" [RULE] ", Style::default().fg(MUTED).bold()), "✦"),
+        };
+
+        let scope_str = if let Some((scope, _)) = rule.key.split_once('/') {
+            scope.to_string()
+        } else {
+            "global".to_string()
         };
 
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("Key: ", Style::default().fg(MUTED)),
+                Span::styled(format!(" {} ", kind_icon), Style::default().fg(EMERALD).bold()),
                 Span::styled(&rule.key, Style::default().fg(ACCENT).bold()),
-                status_badge,
-                kind_badge,
             ]),
+            Line::from(vec![
+                Span::styled("   Status: ", Style::default().fg(MUTED)),
+                status_badge,
+                Span::styled("  Type: ", Style::default().fg(MUTED)),
+                kind_badge,
+                Span::styled("  Scope: ", Style::default().fg(MUTED)),
+                Span::styled(scope_str, Style::default().fg(ACCENT)),
+            ]),
+            Line::from(Span::styled(
+                "  ────────────────────────────────────────────────────────────────────────",
+                Style::default().fg(SUBTLE),
+            )),
             Line::from(""),
             Line::from(Span::styled(
-                "Content:",
-                Style::default().fg(MUTED).underlined(),
+                "  KNOWLEDGE DIRECTIVE:",
+                Style::default().fg(MUTED).bold(),
             )),
-            Line::from(Span::styled(&rule.val, Style::default().fg(ACCENT))),
-            Line::from(""),
         ];
 
-        if let Some(anchor) = &rule.anchor {
+        // Format content with elegant quote bar
+        for val_line in rule.val.lines() {
             lines.push(Line::from(vec![
-                Span::styled("Source Anchor: ", Style::default().fg(MUTED)),
-                Span::styled(format!("📍 {}", anchor), Style::default().fg(EMERALD)),
+                Span::styled("  │ ", Style::default().fg(EMERALD)),
+                Span::styled(val_line, Style::default().fg(ACCENT)),
             ]));
+        }
+        if rule.val.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(SUBTLE)),
+                Span::styled("(empty value)", Style::default().fg(MUTED)),
+            ]));
+        }
+        lines.push(Line::from(""));
+
+        // Source Anchor section
+        if let Some(anchor) = &rule.anchor {
+            lines.push(Line::from(Span::styled(
+                "  SOURCE ANCHOR:",
+                Style::default().fg(MUTED).bold(),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("  📍 ", Style::default()),
+                Span::styled(anchor, Style::default().fg(EMERALD).bold()),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "     Injected automatically when editing files matching this path.",
+                Style::default().fg(MUTED),
+            )));
+            lines.push(Line::from(""));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  SOURCE ANCHOR:",
+                Style::default().fg(MUTED).bold(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  📍 Global rule (always evaluated in agent context)",
+                Style::default().fg(MUTED),
+            )));
             lines.push(Line::from(""));
         }
 
@@ -1144,22 +1188,22 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
         if !connected_rels.is_empty() {
             lines.push(Line::from(Span::styled(
-                "Knowledge Graph Relations:",
-                Style::default().fg(MUTED).underlined(),
+                "  HYPERGRAPH RELATIONS:",
+                Style::default().fg(MUTED).bold(),
             )));
             for rel in connected_rels {
                 if rel.source_key == rule.key {
                     lines.push(Line::from(vec![
-                        Span::styled("  ➜ ", Style::default().fg(EMERALD)),
-                        Span::styled(&rel.rel_type, Style::default().fg(Color::Cyan)),
-                        Span::styled(" ➜ ", Style::default().fg(SUBTLE)),
+                        Span::styled("    ┌─ ", Style::default().fg(SUBTLE)),
+                        Span::styled(&rel.rel_type, Style::default().fg(CYAN).bold()),
+                        Span::styled(" ──► ", Style::default().fg(SUBTLE)),
                         Span::styled(&rel.target_key, Style::default().fg(ACCENT)),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
-                        Span::styled("  ⬅ ", Style::default().fg(AMBER)),
-                        Span::styled(&rel.rel_type, Style::default().fg(Color::Cyan)),
-                        Span::styled(" by ", Style::default().fg(SUBTLE)),
+                        Span::styled("    └─ ", Style::default().fg(SUBTLE)),
+                        Span::styled(&rel.rel_type, Style::default().fg(CYAN).bold()),
+                        Span::styled(" ◄── ", Style::default().fg(AMBER)),
                         Span::styled(&rel.source_key, Style::default().fg(ACCENT)),
                     ]));
                 }
@@ -1169,27 +1213,65 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
         if let Some(reason) = &rule.archive_reason {
             lines.push(Line::from(vec![
-                Span::styled("Archival Reason: ", Style::default().fg(AMBER).bold()),
+                Span::styled("  ARCHIVAL DETAILS: ", Style::default().fg(AMBER).bold()),
                 Span::styled(reason, Style::default().fg(AMBER)),
             ]));
             if let Some(at) = rule.archived_at {
                 lines.push(Line::from(vec![
-                    Span::styled("Archived At: ", Style::default().fg(MUTED)),
-                    Span::styled(format!("timestamp {}", at), Style::default().fg(MUTED)),
+                    Span::styled("  Archived timestamp: ", Style::default().fg(MUTED)),
+                    Span::styled(format!("{}", at), Style::default().fg(MUTED)),
                 ]));
             }
             lines.push(Line::from(""));
         }
+
+        // Action shortcuts bar inside inspector
+        lines.push(Line::from(Span::styled(
+            "  ────────────────────────────────────────────────────────────────────────",
+            Style::default().fg(SUBTLE),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("  Actions: ", Style::default().fg(MUTED)),
+            Span::styled("[e] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Edit  ", Style::default().fg(MUTED)),
+            Span::styled("[a] ", Style::default().fg(ACCENT).bold()),
+            Span::styled(
+                if rule.is_archived() {
+                    "Reactivate  "
+                } else {
+                    "Archive  "
+                },
+                Style::default().fg(MUTED),
+            ),
+            Span::styled("[d] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Delete  ", Style::default().fg(MUTED)),
+            Span::styled("[n] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("New Rule", Style::default().fg(MUTED)),
+        ]));
 
         let detail_p = Paragraph::new(lines)
             .block(detail_block)
             .wrap(Wrap { trim: false });
         f.render_widget(detail_p, main_chunks[1]);
     } else {
-        let empty_msg = Paragraph::new("No rule selected")
-            .style(Style::default().fg(MUTED))
-            .alignment(Alignment::Center)
-            .block(detail_block);
+        let empty_msg = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "No rule selected",
+                Style::default().fg(MUTED).bold(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press 'n' to create your first rule in this project.",
+                Style::default().fg(MUTED),
+            )),
+            Line::from(Span::styled(
+                "Or press '/' to filter existing memories.",
+                Style::default().fg(MUTED),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .block(detail_block);
         f.render_widget(empty_msg, main_chunks[1]);
     }
 }
@@ -1221,10 +1303,23 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    let total = app.sessions.len();
+    let current_pos = if total == 0 {
+        0
+    } else {
+        app.selected_session_idx + 1
+    };
+
+    let list_title = if total > 0 {
+        format!(" Checkpoints · {current_pos} of {total} ")
+    } else {
+        " Checkpoints (empty) ".to_string()
+    };
+
     let list = List::new(session_items)
         .block(
             Block::default()
-                .title(format!(" Checkpoints ({}) ", app.sessions.len()))
+                .title(list_title)
                 .title_style(Style::default().fg(MUTED))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -1240,25 +1335,8 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.sessions_state.select(selected);
     f.render_stateful_widget(list, chunks[0], &mut app.sessions_state);
 
-    if app.sessions.len() > chunks[0].height.saturating_sub(2) as usize {
-        let mut scrollbar_state = ScrollbarState::default()
-            .content_length(app.sessions.len())
-            .position(app.selected_session_idx);
-        f.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .thumb_symbol("█")
-                .track_symbol(None)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .style(Style::default().fg(SUBTLE)),
-            chunks[0],
-            &mut scrollbar_state,
-        );
-    }
-
     let detail_block = Block::default()
-        .title(" Checkpoint Summary ")
+        .title(" Checkpoint Summary · Timeline ")
         .title_style(Style::default().fg(MUTED))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1266,26 +1344,54 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     if let Some((id, summary)) = app.sessions.get(app.selected_session_idx) {
         let lines = vec![
-            Line::from(vec![Span::styled(
-                format!("Session Checkpoint #{}", id),
-                Style::default().fg(ACCENT).bold(),
-            )]),
+            Line::from(vec![
+                Span::styled("  🔖 ", Style::default()),
+                Span::styled(format!("Session Checkpoint #{id}"), Style::default().fg(ACCENT).bold()),
+                Span::styled("  [RECORDED]", Style::default().fg(EMERALD).bold()),
+            ]),
+            Line::from(Span::styled(
+                "  ────────────────────────────────────────────────────────────────────────",
+                Style::default().fg(SUBTLE),
+            )),
+            Line::from(""),
+            Line::from(Span::styled("  MILESTONE LOG:", Style::default().fg(MUTED).bold())),
+            Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(EMERALD)),
+                Span::styled(summary, Style::default().fg(ACCENT)),
+            ]),
             Line::from(""),
             Line::from(Span::styled(
-                "Summary:",
-                Style::default().fg(MUTED).underlined(),
+                "     Checkpoints preserve atomic engineering events, conventional commits, and agent state.",
+                Style::default().fg(MUTED),
             )),
-            Line::from(Span::styled(summary, Style::default().fg(ACCENT))),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  ────────────────────────────────────────────────────────────────────────",
+                Style::default().fg(SUBTLE),
+            )),
+            Line::from(vec![
+                Span::styled("  Actions: ", Style::default().fg(MUTED)),
+                Span::styled("[c] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("New Checkpoint  ", Style::default().fg(MUTED)),
+                Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Reload  ", Style::default().fg(MUTED)),
+                Span::styled("[S] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Git Sync", Style::default().fg(MUTED)),
+            ]),
         ];
         let p = Paragraph::new(lines)
             .block(detail_block)
             .wrap(Wrap { trim: false });
         f.render_widget(p, chunks[1]);
     } else {
-        let empty = Paragraph::new("No session selected")
-            .style(Style::default().fg(MUTED))
-            .alignment(Alignment::Center)
-            .block(detail_block);
+        let empty = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled("No session checkpoints recorded yet", Style::default().fg(MUTED).bold())),
+            Line::from(""),
+            Line::from(Span::styled("Press 'c' to record your first milestone checkpoint.", Style::default().fg(MUTED))),
+        ])
+        .alignment(Alignment::Center)
+        .block(detail_block);
         f.render_widget(empty, chunks[1]);
     }
 }
@@ -1329,13 +1435,23 @@ fn render_projects_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    let total = app.projects.len();
+    let current_pos = if total == 0 {
+        0
+    } else {
+        app.selected_project_idx + 1
+    };
+
+    let list_title = if total > 0 {
+        format!(" Repositories · {current_pos} of {total} ")
+    } else {
+        " Repositories (empty) ".to_string()
+    };
+
     let list = List::new(project_items)
         .block(
             Block::default()
-                .title(format!(
-                    " Registered Repositories ({}) ",
-                    app.projects.len()
-                ))
+                .title(list_title)
                 .title_style(Style::default().fg(MUTED))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -1350,23 +1466,6 @@ fn render_projects_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     };
     app.projects_state.select(selected);
     f.render_stateful_widget(list, chunks[0], &mut app.projects_state);
-
-    if app.projects.len() > chunks[0].height.saturating_sub(2) as usize {
-        let mut scrollbar_state = ScrollbarState::default()
-            .content_length(app.projects.len())
-            .position(app.selected_project_idx);
-        f.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .thumb_symbol("█")
-                .track_symbol(None)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .style(Style::default().fg(SUBTLE)),
-            chunks[0],
-            &mut scrollbar_state,
-        );
-    }
 
     let detail_block = Block::default()
         .title(" Repository Overview & Cockpit ")
@@ -1659,23 +1758,6 @@ fn render_doctor_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     };
     app.clients_state.select(selected);
     f.render_stateful_widget(client_list, top_bottom[1], &mut app.clients_state);
-
-    if detected_clients.len() > top_bottom[1].height.saturating_sub(2) as usize {
-        let mut scrollbar_state = ScrollbarState::default()
-            .content_length(detected_clients.len())
-            .position(app.selected_client_idx);
-        f.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .thumb_symbol("█")
-                .track_symbol(None)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .style(Style::default().fg(SUBTLE)),
-            top_bottom[1],
-            &mut scrollbar_state,
-        );
-    }
 }
 
 fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
@@ -1859,92 +1941,102 @@ fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let left_spans = match &app.input_mode {
         InputMode::Normal => match app.active_tab {
             ActiveTab::Rules => vec![
-                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
-                Span::styled("Tab  ", Style::default().fg(MUTED)),
-                Span::styled("[n] ", Style::default().fg(ACCENT).bold()),
+                Span::styled(" ⇥ Tab ", Style::default().fg(MUTED)),
+                Span::styled("│ ", Style::default().fg(SUBTLE)),
+                Span::styled("↑↓ ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Select  ", Style::default().fg(MUTED)),
+                Span::styled("n ", Style::default().fg(ACCENT).bold()),
                 Span::styled("New  ", Style::default().fg(MUTED)),
-                Span::styled("[e] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("e ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Edit  ", Style::default().fg(MUTED)),
-                Span::styled("[a] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("a ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Archive  ", Style::default().fg(MUTED)),
-                Span::styled("[d] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("d ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Delete  ", Style::default().fg(MUTED)),
-                Span::styled("[S] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("/ ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Filter  ", Style::default().fg(MUTED)),
+                Span::styled("S ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Sync  ", Style::default().fg(MUTED)),
-                Span::styled("[/] ", Style::default().fg(ACCENT).bold()),
-                Span::styled("Search  ", Style::default().fg(MUTED)),
-                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("q ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Quit", Style::default().fg(MUTED)),
             ],
             ActiveTab::Sessions => vec![
-                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
-                Span::styled("Tab  ", Style::default().fg(MUTED)),
-                Span::styled("[c] ", Style::default().fg(ACCENT).bold()),
+                Span::styled(" ⇥ Tab ", Style::default().fg(MUTED)),
+                Span::styled("│ ", Style::default().fg(SUBTLE)),
+                Span::styled("↑↓ ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Select  ", Style::default().fg(MUTED)),
+                Span::styled("c ", Style::default().fg(ACCENT).bold()),
                 Span::styled("New Checkpoint  ", Style::default().fg(MUTED)),
-                Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("r ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Reload  ", Style::default().fg(MUTED)),
-                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("q ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Quit", Style::default().fg(MUTED)),
             ],
             ActiveTab::Projects => vec![
-                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
-                Span::styled("Tab  ", Style::default().fg(MUTED)),
-                Span::styled("[Enter] ", Style::default().fg(ACCENT).bold()),
+                Span::styled(" ⇥ Tab ", Style::default().fg(MUTED)),
+                Span::styled("│ ", Style::default().fg(SUBTLE)),
+                Span::styled("↑↓ ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Select  ", Style::default().fg(MUTED)),
+                Span::styled("Enter ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Switch Project  ", Style::default().fg(MUTED)),
-                Span::styled("[x] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("x ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Deregister  ", Style::default().fg(MUTED)),
-                Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("r ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Reload  ", Style::default().fg(MUTED)),
-                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("q ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Quit", Style::default().fg(MUTED)),
             ],
             ActiveTab::Doctor => vec![
-                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
-                Span::styled("Tab  ", Style::default().fg(MUTED)),
-                Span::styled("[i] ", Style::default().fg(ACCENT).bold()),
+                Span::styled(" ⇥ Tab ", Style::default().fg(MUTED)),
+                Span::styled("│ ", Style::default().fg(SUBTLE)),
+                Span::styled("↑↓ ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Select  ", Style::default().fg(MUTED)),
+                Span::styled("i ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Install MCP  ", Style::default().fg(MUTED)),
-                Span::styled("[I] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("I ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Install ALL  ", Style::default().fg(MUTED)),
-                Span::styled("[r] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("r ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Reload  ", Style::default().fg(MUTED)),
-                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled("q ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Quit", Style::default().fg(MUTED)),
             ],
             ActiveTab::Help => vec![
-                Span::styled(" [Tab] ", Style::default().fg(ACCENT).bold()),
-                Span::styled("Tab  ", Style::default().fg(MUTED)),
-                Span::styled("[q] ", Style::default().fg(ACCENT).bold()),
+                Span::styled(" ⇥ Tab ", Style::default().fg(MUTED)),
+                Span::styled("│ ", Style::default().fg(SUBTLE)),
+                Span::styled("1-4 ", Style::default().fg(ACCENT).bold()),
+                Span::styled("Tabs  ", Style::default().fg(MUTED)),
+                Span::styled("q ", Style::default().fg(ACCENT).bold()),
                 Span::styled("Quit", Style::default().fg(MUTED)),
             ],
         },
         InputMode::Filter => vec![
-            Span::styled(" Filter Query: ", Style::default().fg(EMERALD).bold()),
-            Span::styled("[Enter] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Confirm  ", Style::default().fg(MUTED)),
-            Span::styled("[Esc] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Exit Search", Style::default().fg(MUTED)),
+            Span::styled(" ❯ Search Filter: ", Style::default().fg(EMERALD).bold()),
+            Span::styled("Enter ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Lock Query  ", Style::default().fg(MUTED)),
+            Span::styled("Esc ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Exit / Clear", Style::default().fg(MUTED)),
         ],
         InputMode::ConfirmDelete => vec![
-            Span::styled(" CONFIRM DELETION: ", Style::default().fg(AMBER).bold()),
-            Span::styled("[y] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Delete  ", Style::default().fg(AMBER)),
-            Span::styled("[n / Esc] ", Style::default().fg(ACCENT).bold()),
+            Span::styled(" ▲ CONFIRM DELETION: ", Style::default().fg(AMBER).bold()),
+            Span::styled("y ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Delete Rule  ", Style::default().fg(AMBER)),
+            Span::styled("n / Esc ", Style::default().fg(ACCENT).bold()),
             Span::styled("Cancel", Style::default().fg(MUTED)),
         ],
         InputMode::NewRule { .. } | InputMode::EditRule { .. } => vec![
-            Span::styled(" FORM: ", Style::default().fg(EMERALD).bold()),
-            Span::styled("[Tab] ", Style::default().fg(ACCENT).bold()),
+            Span::styled(" ◆ FORM: ", Style::default().fg(EMERALD).bold()),
+            Span::styled("Tab ", Style::default().fg(ACCENT).bold()),
             Span::styled("Next Field  ", Style::default().fg(MUTED)),
-            Span::styled("[Enter] ", Style::default().fg(ACCENT).bold()),
-            Span::styled("Next / Submit  ", Style::default().fg(MUTED)),
-            Span::styled("[Esc] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Enter ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Submit  ", Style::default().fg(MUTED)),
+            Span::styled("Esc ", Style::default().fg(ACCENT).bold()),
             Span::styled("Cancel", Style::default().fg(MUTED)),
         ],
         InputMode::NewSession { .. } => vec![
-            Span::styled(" NEW CHECKPOINT: ", Style::default().fg(EMERALD).bold()),
-            Span::styled("[Enter] ", Style::default().fg(ACCENT).bold()),
+            Span::styled(" 🔖 NEW CHECKPOINT: ", Style::default().fg(EMERALD).bold()),
+            Span::styled("Enter ", Style::default().fg(ACCENT).bold()),
             Span::styled("Save Checkpoint  ", Style::default().fg(MUTED)),
-            Span::styled("[Esc] ", Style::default().fg(ACCENT).bold()),
+            Span::styled("Esc ", Style::default().fg(ACCENT).bold()),
             Span::styled("Cancel", Style::default().fg(MUTED)),
         ],
     };
@@ -1952,8 +2044,13 @@ fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let mut right_spans = Vec::new();
     if let Some((msg, _)) = &app.toast {
         right_spans.push(Span::styled(
-            format!("✓ {}  ", msg),
+            format!("✓ {} ", msg),
             Style::default().fg(EMERALD).bold(),
+        ));
+    } else {
+        right_spans.push(Span::styled(
+            "agent-mem · sub-millisecond memory ",
+            Style::default().fg(SUBTLE),
         ));
     }
 
