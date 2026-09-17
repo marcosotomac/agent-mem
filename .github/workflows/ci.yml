@@ -2,38 +2,58 @@ name: CI
 
 on:
   push:
-    branches: [ "main", "dev" ]
+    branches: [main, dev]
   pull_request:
-    branches: [ "main", "dev" ]
+    branches: [main, dev]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check-and-test:
-    name: Test & Lint (${{ matrix.os }})
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check release metadata
+        run: scripts/check-release-metadata.sh
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Lint every feature and target
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  tests:
+    name: Tests (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest ]
-
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run default-feature suite
+        run: cargo test --locked --all-targets -- --nocapture
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check code formatting
-        run: cargo fmt --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Run all unit and integration tests
-        run: cargo test --all-targets -- --nocapture
+  features:
+    name: Feature Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test minimal binary
+        run: cargo test --locked --no-default-features
+      - name: Test all features
+        run: cargo test --locked --all-features
