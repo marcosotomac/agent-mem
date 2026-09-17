@@ -1,11 +1,13 @@
 use crate::error::Result;
 use crate::init::{find_project_root, global_db_path};
+use crate::registry::{ProjectRecord, ProjectRegistry};
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cell::{RefCell, RefMut};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -58,9 +60,11 @@ pub struct JsonRpcError {
 }
 
 pub struct McpServer {
-    project_root: PathBuf,
+    default_project_root: Option<PathBuf>,
+    allow_project_create: bool,
+    projects: Vec<ProjectRecord>,
     global_path: PathBuf,
-    project_store: RefCell<Option<Store>>,
+    project_stores: RefCell<HashMap<PathBuf, Store>>,
     global_store: RefCell<Option<Store>>,
 }
 
@@ -72,48 +76,160 @@ impl Default for McpServer {
 
 impl McpServer {
     pub fn new() -> Self {
+        let root = find_project_root();
+        let default_project_root = root
+            .join(".agent-mem")
+            .join("mem.db")
+            .exists()
+            .then(|| ProjectRegistry::canonicalize_path(&root));
         Self {
-            project_root: find_project_root(),
+            default_project_root,
+            allow_project_create: false,
+            projects: ProjectRegistry::load().unwrap_or_default().projects,
             global_path: global_db_path(),
-            project_store: RefCell::new(None),
+            project_stores: RefCell::new(HashMap::new()),
             global_store: RefCell::new(None),
         }
     }
 
     pub fn with_paths(project_root: PathBuf, global_path: PathBuf) -> Self {
         Self {
-            project_root,
+            default_project_root: Some(ProjectRegistry::canonicalize_path(&project_root)),
+            allow_project_create: true,
+            projects: Vec::new(),
             global_path,
-            project_store: RefCell::new(None),
+            project_stores: RefCell::new(HashMap::new()),
             global_store: RefCell::new(None),
         }
     }
 
-    fn project_db_path(&self) -> PathBuf {
-        self.project_root.join(".agent-mem").join("mem.db")
+    fn live_registered_projects(&self) -> impl Iterator<Item = &ProjectRecord> {
+        self.projects.iter().filter(|project| {
+            Path::new(&project.canonical_path)
+                .join(".agent-mem")
+                .join("mem.db")
+                .exists()
+        })
     }
 
-    fn open_store(&self, scope: &str, need_write: bool) -> Result<RefMut<'_, Store>> {
-        let (slot, path) = match scope {
-            "global" => (&self.global_store, self.global_path.clone()),
-            "project" => (&self.project_store, self.project_db_path()),
-            other => Err(crate::error::Error::Usage(format!(
-                "Invalid scope '{}'. Supported scopes: 'project', 'global'",
-                other
-            )))?,
-        };
+    fn resolve_project_root(&self, selector: Option<&str>) -> Result<PathBuf> {
+        if let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(default) = &self.default_project_root
+                && (selector == default.to_string_lossy()
+                    || selector
+                        == default
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(""))
+            {
+                return Ok(default.clone());
+            }
 
-        let mut cached = slot.borrow_mut();
+            let matches: Vec<&ProjectRecord> = self
+                .live_registered_projects()
+                .filter(|project| {
+                    project.id == selector
+                        || project.name == selector
+                        || project.canonical_path == selector
+                })
+                .collect();
+            return match matches.as_slice() {
+                [project] => Ok(PathBuf::from(&project.canonical_path)),
+                [] => Err(crate::error::Error::Usage(format!(
+                    "Unknown project '{selector}'. Use an id, unique name, or registered path"
+                ))),
+                _ => Err(crate::error::Error::Usage(format!(
+                    "Ambiguous project name '{selector}'. Use its id or registered path"
+                ))),
+            };
+        }
+
+        if let Some(default) = &self.default_project_root {
+            return Ok(default.clone());
+        }
+
+        let projects: Vec<&ProjectRecord> = self.live_registered_projects().collect();
+        match projects.as_slice() {
+            [project] => Ok(PathBuf::from(&project.canonical_path)),
+            [] => Err(crate::error::Error::Usage(
+                "No initialized project is available. Run 'agent-mem init' in a repository".into(),
+            )),
+            _ => {
+                let choices = projects
+                    .iter()
+                    .take(8)
+                    .map(|project| format!("{}:{}", project.id, project.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(crate::error::Error::Usage(format!(
+                    "Project is required. Registered projects: {choices}"
+                )))
+            }
+        }
+    }
+
+    fn project_for_scope(&self, args: &Value, scope: &str) -> Result<Option<PathBuf>> {
+        if scope == "global" {
+            return Ok(None);
+        }
+        self.resolve_project_root(args.get("project").and_then(Value::as_str))
+            .map(Some)
+    }
+
+    fn open_project_store(&self, root: &Path, need_write: bool) -> Result<RefMut<'_, Store>> {
+        let root = ProjectRegistry::canonicalize_path(root);
+        let db_path = root.join(".agent-mem").join("mem.db");
+        if !db_path.exists() && !self.allow_project_create {
+            return Err(crate::error::Error::NotInitialized);
+        }
+
+        let mut stores = self.project_stores.borrow_mut();
+        if !stores.contains_key(&root) {
+            stores.insert(root.clone(), Store::open(&db_path, need_write)?);
+        }
+        Ok(RefMut::map(stores, |stores| {
+            stores
+                .get_mut(&root)
+                .expect("project store cache initialized")
+        }))
+    }
+
+    fn open_global_store(&self, need_write: bool) -> Result<RefMut<'_, Store>> {
+        let mut cached = self.global_store.borrow_mut();
         if cached.is_none() {
-            *cached = Some(Store::open(&path, need_write)?);
+            *cached = Some(Store::open(&self.global_path, need_write)?);
         }
         Ok(RefMut::map(cached, |store| {
             store.as_mut().expect("store cache was initialized")
         }))
     }
 
-    fn open_read_store(&self, scope: &str) -> Result<Option<RefMut<'_, Store>>> {
-        match self.open_store(scope, false) {
+    fn open_store(
+        &self,
+        scope: &str,
+        project_root: Option<&Path>,
+        need_write: bool,
+    ) -> Result<RefMut<'_, Store>> {
+        match scope {
+            "global" => self.open_global_store(need_write),
+            "project" => self.open_project_store(
+                project_root.ok_or_else(|| {
+                    crate::error::Error::Usage("Project scope requires a project".into())
+                })?,
+                need_write,
+            ),
+            other => Err(crate::error::Error::Usage(format!(
+                "Invalid scope '{other}'. Supported scopes: 'project', 'global'"
+            ))),
+        }
+    }
+
+    fn open_read_store(
+        &self,
+        scope: &str,
+        project_root: Option<&Path>,
+    ) -> Result<Option<RefMut<'_, Store>>> {
+        match self.open_store(scope, project_root, false) {
             Ok(store) => Ok(Some(store)),
             Err(crate::error::Error::NotInitialized) => Ok(None),
             Err(e) => Err(e),
@@ -283,9 +399,10 @@ impl McpServer {
                             "batch": { "type": "array" },
                             "key": { "type": "string" },
                             "val": { "type": "string" },
-                            "anchor": { "type": "string", "description": "path[:line]" },
+                            "anchor": { "type": "string" },
                             "kind": { "type": "string", "enum": ["rule", "decision", "gotcha", "pattern"] },
-                            "rel": { "type": "string", "description": "type:target" },
+                            "rel": { "type": "string" },
+                            "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["project", "global"] }
                         }
                     }
@@ -297,6 +414,7 @@ impl McpServer {
                         "type": "object",
                         "properties": {
                             "query": { "type": "string" },
+                            "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["all", "project", "global"] }
                         },
                         "required": ["query"]
@@ -309,10 +427,11 @@ impl McpServer {
                         "type": "object",
                         "properties": {
                             "diff": { "type": "boolean" },
-                            "files": { "type": "string", "description": "Comma-separated paths" },
+                            "files": { "type": "string" },
                             "anchor": { "type": "string" },
                             "topic": { "type": "string" },
                             "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                            "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["all", "project", "global"] }
                         }
                     }
@@ -329,7 +448,8 @@ impl McpServer {
                             },
                             "key": { "type": "string" },
                             "reason": { "type": "string" },
-                            "rel": { "type": "string", "description": "type:target" },
+                            "rel": { "type": "string" },
+                            "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["project", "global"] }
                         },
                         "required": ["action", "key"]
@@ -483,6 +603,7 @@ impl McpServer {
                     .get("scope")
                     .and_then(|v| v.as_str())
                     .unwrap_or("project");
+                let project_root = self.project_for_scope(args, scope)?;
 
                 if let Some(batch_val) = args.get("batch").and_then(|v| v.as_array()) {
                     if batch_val.is_empty() {
@@ -539,10 +660,13 @@ impl McpServer {
                         })
                         .collect();
 
-                    let mut store = self.open_store(scope, true)?;
+                    let mut store = self.open_store(scope, project_root.as_deref(), true)?;
                     let count = store.set_batch(&batch_rules)?;
                     if scope == "project" {
-                        let rules_file = self.project_root.join(".agent-rules");
+                        let rules_file = project_root
+                            .as_ref()
+                            .expect("project scope was resolved")
+                            .join(".agent-rules");
                         if rules_file.exists() {
                             store.export_to_file(&rules_file)?;
                         }
@@ -561,10 +685,13 @@ impl McpServer {
                 let rel = args.get("rel").and_then(|v| v.as_str());
 
                 let relation = rel.map(Self::parse_relation).transpose()?;
-                let mut store = self.open_store(scope, true)?;
+                let mut store = self.open_store(scope, project_root.as_deref(), true)?;
                 store.set_entry_with_relation(key, val, anchor, kind, relation)?;
                 if scope == "project" {
-                    let rules_file = self.project_root.join(".agent-rules");
+                    let rules_file = project_root
+                        .as_ref()
+                        .expect("project scope was resolved")
+                        .join(".agent-rules");
                     if rules_file.exists() {
                         store.export_to_file(&rules_file)?;
                     }
@@ -592,11 +719,12 @@ impl McpServer {
                         scope
                     )));
                 }
+                let project_root = self.project_for_scope(args, scope)?;
 
                 let mut lines = Vec::new();
 
                 if (scope == "all" || scope == "project")
-                    && let Some(store) = self.open_read_store("project")?
+                    && let Some(store) = self.open_read_store("project", project_root.as_deref())?
                 {
                     let results = store.find(query)?;
                     for r in results {
@@ -627,7 +755,7 @@ impl McpServer {
                 }
 
                 if (scope == "all" || scope == "global")
-                    && let Some(store) = self.open_read_store("global")?
+                    && let Some(store) = self.open_read_store("global", None)?
                 {
                     let results = store.find(query)?;
                     for r in results {
@@ -679,6 +807,7 @@ impl McpServer {
                         scope
                     )));
                 }
+                let project_root = self.project_for_scope(args, scope)?;
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
                 let topic = args.get("topic").and_then(|v| v.as_str());
                 let diff = args.get("diff").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -693,7 +822,12 @@ impl McpServer {
                     }
                 }
                 if diff {
-                    let diff_files = crate::hook::get_diff_files(&self.project_root);
+                    let root = project_root.as_ref().ok_or_else(|| {
+                        crate::error::Error::Usage(
+                            "diff context requires project or all scope".into(),
+                        )
+                    })?;
+                    let diff_files = crate::hook::get_diff_files(root);
                     for df in diff_files {
                         if !files.contains(&df) {
                             files.push(df);
@@ -736,7 +870,7 @@ impl McpServer {
                 let mut actual_project_rule_count = 0;
 
                 if (scope == "all" || scope == "project")
-                    && let Some(store) = self.open_read_store("project")?
+                    && let Some(store) = self.open_read_store("project", project_root.as_deref())?
                 {
                     let (rules, rels, sessions) = if !files.is_empty() {
                         store.context_for_files(&files, topic, project_rule_limit)?
@@ -823,7 +957,7 @@ impl McpServer {
 
                 if global_rule_limit > 0
                     && (scope == "all" || scope == "global")
-                    && let Some(store) = self.open_read_store("global")?
+                    && let Some(store) = self.open_read_store("global", None)?
                 {
                     let rules = store.dump_limited(global_rule_limit)?;
                     let mut global_lines = Vec::new();
@@ -859,6 +993,7 @@ impl McpServer {
                     .get("scope")
                     .and_then(|v| v.as_str())
                     .unwrap_or("project");
+                let project_root = self.project_for_scope(args, scope)?;
 
                 let parsed_relation = match action {
                     "archive" | "unarchive" | "delete" | "del" | "rm" => None,
@@ -879,7 +1014,7 @@ impl McpServer {
                     }
                 };
 
-                let mut store = self.open_store(scope, true)?;
+                let mut store = self.open_store(scope, project_root.as_deref(), true)?;
 
                 let msg = match action {
                     "archive" => {
@@ -889,7 +1024,10 @@ impl McpServer {
                             return Err(crate::error::Error::NotFound(key.to_string()));
                         }
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -905,7 +1043,10 @@ impl McpServer {
                             return Err(crate::error::Error::NotFound(key.to_string()));
                         }
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -918,7 +1059,10 @@ impl McpServer {
                             return Err(crate::error::Error::NotFound(key.to_string()));
                         }
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -929,7 +1073,10 @@ impl McpServer {
                         let (rel_type, target) = parsed_relation.expect("relation was validated");
                         store.relate(key, rel_type, target)?;
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -946,7 +1093,10 @@ impl McpServer {
                             )));
                         }
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }

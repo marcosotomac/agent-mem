@@ -1,4 +1,5 @@
 use agent_mem::mcp::{JsonRpcRequest, LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, McpServer};
+use agent_mem::registry::{ProjectRecord, ProjectRegistry};
 use agent_mem::store::Store;
 use serde_json::json;
 use std::fs;
@@ -10,6 +11,94 @@ fn modern_meta(version: &str) -> serde_json::Value {
         "io.modelcontextprotocol/protocolVersion": version,
         "io.modelcontextprotocol/clientCapabilities": {}
     })
+}
+
+#[test]
+fn test_mcp_routes_explicit_projects_from_global_client_cwd() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_routing_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let launcher = temp_dir.join("launcher");
+    let registry_dir = temp_dir.join("registry");
+    let alpha = temp_dir.join("alpha");
+    let beta = temp_dir.join("beta");
+    for path in [&launcher, &registry_dir, &alpha, &beta] {
+        fs::create_dir_all(path).unwrap();
+    }
+    Store::open(&alpha.join(".agent-mem/mem.db"), true).unwrap();
+    Store::open(&beta.join(".agent-mem/mem.db"), true).unwrap();
+
+    let record = |id: &str, name: &str, path: &std::path::Path| ProjectRecord {
+        id: id.into(),
+        name: name.into(),
+        canonical_path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
+        git_remote: None,
+        last_accessed: 0,
+        rules_count: 0,
+        archived_count: 0,
+        sessions_count: 0,
+        db_size_bytes: 0,
+    };
+    let registry = ProjectRegistry {
+        projects: vec![record("a1", "alpha", &alpha), record("b1", "beta", &beta)],
+    };
+    fs::write(
+        registry_dir.join("projects.json"),
+        serde_json::to_string(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-mem"))
+        .arg("mcp")
+        .current_dir(&launcher)
+        .env("AGENT_MEM_GLOBAL_DIR", &registry_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start MCP server");
+    let stdin = child.stdin.as_mut().unwrap();
+    for request in [
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mem_set","arguments":{"key":"routing/a","val":"alpha","project":"a1"}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mem_set","arguments":{"key":"routing/b","val":"beta","project":"beta"}}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mem_find","arguments":{"query":"routing","scope":"project"}}}),
+    ] {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[2]["result"]["isError"], true);
+    assert!(
+        responses[2]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Project is required")
+    );
+
+    let alpha_store = Store::open(&alpha.join(".agent-mem/mem.db"), false).unwrap();
+    let beta_store = Store::open(&beta.join(".agent-mem/mem.db"), false).unwrap();
+    assert_eq!(
+        alpha_store.get("routing/a").unwrap().as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(
+        beta_store.get("routing/b").unwrap().as_deref(),
+        Some("beta")
+    );
+    assert!(!launcher.join(".agent-mem").exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
