@@ -1104,3 +1104,30 @@ fn test_sync_noop_detection_and_invalidation() {
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn test_write_limits_reject_oversized_values_before_mutation() {
+    let mut store = Store::open_in_memory().unwrap();
+    let oversized = "x".repeat(agent_mem::store::MAX_VALUE_BYTES + 1);
+
+    let error = store.set("too-large", &oversized).unwrap_err();
+
+    assert!(error.to_string().contains("65536-byte limit"));
+    assert_eq!(store.get("too-large").unwrap(), None);
+}
+
+#[test]
+fn test_sync_rejects_oversized_rules_file_before_reading_it() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_sync_limit_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rules_path = dir.join(".agent-rules");
+    let file = std::fs::File::create(&rules_path).unwrap();
+    file.set_len(32 * 1024 * 1024 + 1).unwrap();
+    let mut store = Store::open(&dir.join("mem.db"), true).unwrap();
+
+    let error = store.sync_with_file(&rules_path).unwrap_err();
+
+    assert!(error.to_string().contains("33554432-byte import limit"));
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}

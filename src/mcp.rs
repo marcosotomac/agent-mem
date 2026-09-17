@@ -18,6 +18,9 @@ const CACHE_TTL_MS: u64 = 86_400_000;
 const DEFAULT_CONTEXT_LIMIT: usize = 10;
 const MAX_CONTEXT_LIMIT: usize = 50;
 const MAX_TEXT_RESULT_BYTES: usize = 16 * 1024;
+const MAX_BATCH_ITEMS: usize = 256;
+const MAX_BATCH_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProtocolEra {
@@ -611,6 +614,24 @@ impl McpServer {
                             "Batch array cannot be empty".into(),
                         ));
                     }
+                    if batch_val.len() > MAX_BATCH_ITEMS {
+                        return Err(crate::error::Error::Usage(format!(
+                            "Batch exceeds the {MAX_BATCH_ITEMS}-item limit"
+                        )));
+                    }
+
+                    let batch_bytes = batch_val.iter().try_fold(0usize, |total, item| {
+                        let item_bytes = ["key", "val", "anchor", "kind", "rel"]
+                            .iter()
+                            .filter_map(|field| item.get(field).and_then(Value::as_str))
+                            .try_fold(0usize, |sum, value| sum.checked_add(value.len()))?;
+                        total.checked_add(item_bytes)
+                    });
+                    if batch_bytes.is_none_or(|bytes| bytes > MAX_BATCH_BYTES) {
+                        return Err(crate::error::Error::Usage(format!(
+                            "Batch exceeds the {MAX_BATCH_BYTES}-byte payload limit"
+                        )));
+                    }
 
                     struct ParsedBatchItem {
                         key: String,
@@ -1115,13 +1136,46 @@ impl McpServer {
         }
     }
 
-    /// Run MCP loop reading line by line from stdin and replying to stdout.
-    pub fn run_stdio(&self) -> Result<()> {
-        let stdin = io::stdin();
-        let mut stdout = io::stdout();
-
-        for line in stdin.lock().lines() {
-            let line = line?;
+    fn run_stream<R: BufRead, W: Write>(&self, mut input: R, mut output: W) -> Result<()> {
+        loop {
+            let mut line = String::new();
+            let mut bounded = std::io::Read::take(&mut input, (MAX_REQUEST_BYTES + 1) as u64);
+            let bytes_read = bounded.read_line(&mut line)?;
+            if bytes_read == 0 {
+                break;
+            }
+            if line.len() > MAX_REQUEST_BYTES {
+                if !line.ends_with('\n') {
+                    loop {
+                        let buffered = input.fill_buf()?;
+                        if buffered.is_empty() {
+                            break;
+                        }
+                        if let Some(newline) = buffered.iter().position(|byte| *byte == b'\n') {
+                            input.consume(newline + 1);
+                            break;
+                        }
+                        let buffered_len = buffered.len();
+                        input.consume(buffered_len);
+                    }
+                }
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0",
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32600,
+                        message: format!("Request exceeds the {MAX_REQUEST_BYTES}-byte limit"),
+                        data: None,
+                    }),
+                };
+                serde_json::to_writer(&mut output, &resp).map_err(|e| {
+                    crate::error::Error::Usage(format!("JSON serialization error: {e}"))
+                })?;
+                output.write_all(b"\n")?;
+                output.flush()?;
+                continue;
+            }
             if line.trim().is_empty() {
                 continue;
             }
@@ -1145,11 +1199,48 @@ impl McpServer {
                     crate::error::Error::Usage(format!("JSON serialization error: {}", e))
                 })?;
                 serialized.push('\n');
-                stdout.write_all(serialized.as_bytes())?;
-                stdout.flush()?;
+                output.write_all(serialized.as_bytes())?;
+                output.flush()?;
             }
         }
 
         Ok(())
+    }
+
+    /// Run MCP stdio with bounded, newline-delimited JSON-RPC requests.
+    pub fn run_stdio(&self) -> Result<()> {
+        self.run_stream(io::stdin().lock(), io::stdout())
+    }
+}
+
+#[cfg(test)]
+mod bounded_input_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn oversized_request_is_rejected_and_next_request_is_processed() {
+        let root = std::env::temp_dir().join(format!(
+            "agent_mem_mcp_bounded_{}_{}",
+            std::process::id(),
+            crate::store::now_epoch()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let server = McpServer::with_paths(root.clone(), root.join("global.db"));
+        let mut input = vec![b'x'; MAX_REQUEST_BYTES + 32];
+        input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n");
+        let mut output = Vec::new();
+
+        server.run_stream(Cursor::new(input), &mut output).unwrap();
+
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert_eq!(responses[1]["result"], json!({}));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

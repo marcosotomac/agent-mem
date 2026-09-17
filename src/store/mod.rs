@@ -24,6 +24,12 @@ pub mod semantic;
 pub mod session;
 pub mod sync;
 
+pub const MAX_KEY_BYTES: usize = 512;
+pub const MAX_VALUE_BYTES: usize = 64 * 1024;
+pub const MAX_ANCHOR_BYTES: usize = 4 * 1024;
+pub const MAX_KIND_BYTES: usize = 64;
+pub const MAX_RELATION_TYPE_BYTES: usize = 64;
+
 pub struct Store {
     pub(crate) conn: Connection,
     #[cfg(feature = "semantic-local")]
@@ -90,6 +96,46 @@ pub struct BatchRule<'a> {
     pub relation: Option<(&'a str, &'a str)>,
 }
 
+fn reject_oversized(field: &str, value: &str, max: usize) -> Result<()> {
+    if value.len() > max {
+        return Err(crate::error::Error::Usage(format!(
+            "Memory {field} exceeds the {max}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_batch_rule(rule: &BatchRule<'_>) -> Result<()> {
+    if rule.key.trim().is_empty() {
+        return Err(crate::error::Error::Usage(
+            "Memory key cannot be empty".into(),
+        ));
+    }
+    if rule.val.trim().is_empty() {
+        return Err(crate::error::Error::Usage(
+            "Memory value cannot be empty".into(),
+        ));
+    }
+    reject_oversized("key", rule.key, MAX_KEY_BYTES)?;
+    reject_oversized("value", rule.val, MAX_VALUE_BYTES)?;
+    if let Some(anchor) = rule.anchor {
+        reject_oversized("anchor", anchor, MAX_ANCHOR_BYTES)?;
+    }
+    if let Some(kind) = rule.kind {
+        reject_oversized("kind", kind, MAX_KIND_BYTES)?;
+    }
+    if let Some((rel_type, target)) = rule.relation {
+        if rel_type.trim().is_empty() || target.trim().is_empty() {
+            return Err(crate::error::Error::Usage(
+                "Relation type and target cannot be empty".into(),
+            ));
+        }
+        reject_oversized("relation type", rel_type, MAX_RELATION_TYPE_BYTES)?;
+        reject_oversized("relation target", target, MAX_KEY_BYTES)?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// Set or update a key-value memory rule with optional repo-relative code anchor and entity kind.
     pub fn set_entry(
@@ -109,24 +155,8 @@ impl Store {
         }
 
         // Validate all rules up front before any transaction or I/O
-        for r in rules {
-            if r.key.trim().is_empty() {
-                return Err(crate::error::Error::Usage(
-                    "Memory key cannot be empty".into(),
-                ));
-            }
-            if r.val.trim().is_empty() {
-                return Err(crate::error::Error::Usage(
-                    "Memory value cannot be empty".into(),
-                ));
-            }
-            if let Some((rel_type, target)) = r.relation
-                && (rel_type.trim().is_empty() || target.trim().is_empty())
-            {
-                return Err(crate::error::Error::Usage(
-                    "Relation type and target cannot be empty".into(),
-                ));
-            }
+        for rule in rules {
+            validate_batch_rule(rule)?;
         }
 
         let now = now_epoch();

@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  attestations: write
 
 jobs:
   metadata:
@@ -113,6 +114,11 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
         shell: bash
+
+      - name: Attest release archives and checksum manifest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-assets/*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

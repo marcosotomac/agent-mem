@@ -444,6 +444,14 @@ impl Store {
             });
         }
 
+        const MAX_RULES_FILE_BYTES: u64 = 32 * 1024 * 1024;
+        let file_size = fs::metadata(path)?.len();
+        if file_size > MAX_RULES_FILE_BYTES {
+            return Err(crate::error::Error::Usage(format!(
+                "Rules file exceeds the {}-byte import limit",
+                MAX_RULES_FILE_BYTES
+            )));
+        }
         let content = fs::read_to_string(path)?;
         let content_hash = Self::compute_content_hash(&content) as i64;
         let db_state = self.get_db_fingerprint()?;
@@ -484,6 +492,25 @@ impl Store {
         let (parsed, parse_error) = Self::parse_rules_with_error(&content);
         if let Some(error) = parse_error {
             return Err(error);
+        }
+
+        for rule in &parsed.rules {
+            super::validate_batch_rule(&super::BatchRule {
+                key: &rule.key,
+                val: &rule.val,
+                anchor: rule.anchor.as_deref(),
+                kind: Some(&rule.kind),
+                relation: None,
+            })?;
+        }
+        for (source, rel_type, target) in &parsed.relations {
+            super::validate_batch_rule(&super::BatchRule {
+                key: source,
+                val: "relation",
+                anchor: None,
+                kind: None,
+                relation: Some((rel_type, target)),
+            })?;
         }
 
         struct ParsedEntry<'a> {

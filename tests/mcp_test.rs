@@ -472,6 +472,39 @@ fn test_mcp_tool_execution_and_dual_scopes() {
 }
 
 #[test]
+fn test_mcp_rejects_oversized_batch_without_partial_writes() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("agent_mem_mcp_batch_limit_{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+    let batch: Vec<_> = (0..257)
+        .map(|index| json!({"key": format!("rule/{index}"), "val": "bounded"}))
+        .collect();
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {"scope": "project", "batch": batch}
+        }),
+    };
+
+    let response = server.handle_request(&request).unwrap();
+    let result = response.result.unwrap();
+
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("256-item limit")
+    );
+    assert!(!temp_dir.join(".agent-mem/mem.db").exists());
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[test]
 fn test_mcp_exceptions_and_errors() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_mcp_err_{}",

@@ -73,31 +73,34 @@ fn test_massive_scale_5k_records_and_sub_millisecond_latency() {
 }
 
 #[test]
-fn test_extreme_1mb_payload_handling() {
+fn test_payload_boundary_and_oversized_rejection() {
     let mut store = Store::open_in_memory().unwrap();
 
-    // 1 Megabyte payload
-    let mega_payload = "E".repeat(1024 * 1024);
+    let max_payload = "E".repeat(agent_mem::store::MAX_VALUE_BYTES);
     let key = "enterprise/large_spec";
     let anchor = "specs/openapi.json:1";
 
     let write_start = Instant::now();
     store
-        .set_with_anchor(key, &mega_payload, Some(anchor))
+        .set_with_anchor(key, &max_payload, Some(anchor))
         .unwrap();
     let write_duration = write_start.elapsed();
-    println!("1MB payload write duration: {:?}", write_duration);
+    println!("bounded payload write duration: {:?}", write_duration);
 
     let read_start = Instant::now();
-    let retrieved = store.get(key).unwrap().expect("1mb value retrieved");
+    let retrieved = store.get(key).unwrap().expect("bounded value retrieved");
     let read_duration = read_start.elapsed();
-    println!("1MB payload read duration: {:?}", read_duration);
+    println!("bounded payload read duration: {:?}", read_duration);
 
-    assert_eq!(retrieved.len(), 1024 * 1024);
+    assert_eq!(retrieved.len(), agent_mem::store::MAX_VALUE_BYTES);
     assert!(
         read_duration.as_millis() < 10,
-        "1MB memory mapped read must execute in < 10ms"
+        "bounded memory mapped read must execute in < 10ms"
     );
+
+    let oversized = "E".repeat(agent_mem::store::MAX_VALUE_BYTES + 1);
+    assert!(store.set("enterprise/rejected", &oversized).is_err());
+    assert_eq!(store.get("enterprise/rejected").unwrap(), None);
 }
 
 #[test]
