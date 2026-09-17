@@ -97,7 +97,10 @@ fn semantic_fallback_recovers_disjoint_multilingual_paraphrases_and_rejects_stal
         println!(
             "query={:?} results={:?}",
             case.query,
-            results.iter().map(|rule| rule.key.as_str()).collect::<Vec<_>>()
+            results
+                .iter()
+                .map(|rule| rule.key.as_str())
+                .collect::<Vec<_>>()
         );
         let rank = results
             .iter()

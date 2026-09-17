@@ -1355,7 +1355,10 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 Style::default().fg(SUBTLE),
             )),
             Line::from(""),
-            Line::from(Span::styled("  MILESTONE LOG:", Style::default().fg(MUTED).bold())),
+            Line::from(Span::styled(
+                "  MILESTONE LOG:",
+                Style::default().fg(MUTED).bold(),
+            )),
             Line::from(vec![
                 Span::styled("  │ ", Style::default().fg(EMERALD)),
                 Span::styled(summary, Style::default().fg(ACCENT)),
@@ -1387,9 +1390,15 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     } else {
         let empty = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("No session checkpoints recorded yet", Style::default().fg(MUTED).bold())),
+            Line::from(Span::styled(
+                "No session checkpoints recorded yet",
+                Style::default().fg(MUTED).bold(),
+            )),
             Line::from(""),
-            Line::from(Span::styled("Press 'c' to record your first milestone checkpoint.", Style::default().fg(MUTED))),
+            Line::from(Span::styled(
+                "Press 'c' to record your first milestone checkpoint.",
+                Style::default().fg(MUTED),
+            )),
         ])
         .alignment(Alignment::Center)
         .block(detail_block);
@@ -1781,10 +1790,7 @@ fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("    PgDn / PgUp   ", Style::default().fg(ACCENT)),
-            Span::styled(
-                "Jump down/up by 10 items",
-                Style::default().fg(MUTED),
-            ),
+            Span::styled("Jump down/up by 10 items", Style::default().fg(MUTED)),
         ]),
         Line::from(vec![
             Span::styled("    Home / End, g/G ", Style::default().fg(ACCENT)),

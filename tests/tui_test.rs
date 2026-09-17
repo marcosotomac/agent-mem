@@ -364,8 +364,8 @@ fn test_tui_projects_navigation_and_switch() {
 
 #[test]
 fn test_tui_rules_list_scrolling() {
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     let _lock = TUI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = std::env::temp_dir().join(format!(
