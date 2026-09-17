@@ -291,8 +291,8 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
     // Auto-register project in the global canonical registry
     let _ = crate::registry::ProjectRegistry::load().and_then(|mut reg| reg.register(root));
 
-    // 6. Auto-configure detected AI editor / MCP clients
-    report.configured_clients = crate::installer::install_detected_clients().unwrap_or_default();
+    // MCP client configuration is intentionally opt-in. Project initialization must never
+    // mutate user-level editor configuration; use `agent-mem mcp install [client]` explicitly.
 
     Ok(report)
 }
