@@ -893,7 +893,7 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     // Brand Logo & Version
     let brand = Paragraph::new(Line::from(vec![
-        Span::styled(" ⬡ agent-mem ", Style::default().fg(ACCENT).bold()),
+        Span::styled(" agent-mem ", Style::default().fg(ACCENT).bold()),
         Span::styled("v1.2 ", Style::default().fg(EMERALD)),
         Span::styled("│", Style::default().fg(SUBTLE)),
     ]));
@@ -966,7 +966,7 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     };
 
     let filter_text = if app.filter_query.is_empty() && app.input_mode != InputMode::Filter {
-        Span::styled("press '/' to search...", Style::default().fg(MUTED))
+        Span::styled("type '/' to filter...", Style::default().fg(MUTED))
     } else if app.filter_query.is_empty() {
         Span::styled("type query... (esc to cancel)", Style::default().fg(MUTED))
     } else {
@@ -976,7 +976,7 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let search_icon = if app.input_mode == InputMode::Filter {
         Span::styled("❯ ", Style::default().fg(EMERALD).bold())
     } else {
-        Span::styled("🔍 ", Style::default())
+        Span::styled("/ ", Style::default().fg(MUTED).bold())
     };
 
     let search_box = Paragraph::new(Line::from(vec![search_icon, filter_text])).block(
@@ -1100,11 +1100,11 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             Span::styled(" [ACTIVE] ", Style::default().fg(EMERALD).bold())
         };
 
-        let (kind_badge, kind_icon) = match rule.kind.as_str() {
-            "decision" => (Span::styled(" [DECISION] ", Style::default().fg(CYAN).bold()), "⚡"),
-            "gotcha" => (Span::styled(" [GOTCHA] ", Style::default().fg(AMBER).bold()), "▲"),
-            "pattern" => (Span::styled(" [PATTERN] ", Style::default().fg(VIOLET).bold()), "◈"),
-            _ => (Span::styled(" [RULE] ", Style::default().fg(MUTED).bold()), "✦"),
+        let kind_badge = match rule.kind.as_str() {
+            "decision" => Span::styled(" [DECISION] ", Style::default().fg(CYAN).bold()),
+            "gotcha" => Span::styled(" [GOTCHA] ", Style::default().fg(AMBER).bold()),
+            "pattern" => Span::styled(" [PATTERN] ", Style::default().fg(VIOLET).bold()),
+            _ => Span::styled(" [RULE] ", Style::default().fg(MUTED).bold()),
         };
 
         let scope_str = if let Some((scope, _)) = rule.key.split_once('/') {
@@ -1115,11 +1115,11 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
         let mut lines = vec![
             Line::from(vec![
-                Span::styled(format!(" {} ", kind_icon), Style::default().fg(EMERALD).bold()),
+                Span::styled("  ", Style::default()),
                 Span::styled(&rule.key, Style::default().fg(ACCENT).bold()),
             ]),
             Line::from(vec![
-                Span::styled("   Status: ", Style::default().fg(MUTED)),
+                Span::styled("  Status: ", Style::default().fg(MUTED)),
                 status_badge,
                 Span::styled("  Type: ", Style::default().fg(MUTED)),
                 kind_badge,
@@ -1159,11 +1159,11 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 Style::default().fg(MUTED).bold(),
             )));
             lines.push(Line::from(vec![
-                Span::styled("  📍 ", Style::default()),
+                Span::styled("  @ ", Style::default().fg(EMERALD).bold()),
                 Span::styled(anchor, Style::default().fg(EMERALD).bold()),
             ]));
             lines.push(Line::from(Span::styled(
-                "     Injected automatically when editing files matching this path.",
+                "    Injected automatically when editing files matching this path.",
                 Style::default().fg(MUTED),
             )));
             lines.push(Line::from(""));
@@ -1173,7 +1173,7 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 Style::default().fg(MUTED).bold(),
             )));
             lines.push(Line::from(Span::styled(
-                "  📍 Global rule (always evaluated in agent context)",
+                "  * Global rule (always evaluated in agent context)",
                 Style::default().fg(MUTED),
             )));
             lines.push(Line::from(""));
@@ -1345,8 +1345,9 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     if let Some((id, summary)) = app.sessions.get(app.selected_session_idx) {
         let lines = vec![
             Line::from(vec![
-                Span::styled("  🔖 ", Style::default()),
-                Span::styled(format!("Session Checkpoint #{id}"), Style::default().fg(ACCENT).bold()),
+                Span::styled("  #", Style::default().fg(MUTED)),
+                Span::styled(format!("{id} "), Style::default().fg(ACCENT).bold()),
+                Span::styled("Session Checkpoint", Style::default().fg(ACCENT).bold()),
                 Span::styled("  [RECORDED]", Style::default().fg(EMERALD).bold()),
             ]),
             Line::from(Span::styled(
@@ -2010,21 +2011,21 @@ fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ],
         },
         InputMode::Filter => vec![
-            Span::styled(" ❯ Search Filter: ", Style::default().fg(EMERALD).bold()),
+            Span::styled(" / Search Filter: ", Style::default().fg(EMERALD).bold()),
             Span::styled("Enter ", Style::default().fg(ACCENT).bold()),
             Span::styled("Lock Query  ", Style::default().fg(MUTED)),
             Span::styled("Esc ", Style::default().fg(ACCENT).bold()),
             Span::styled("Exit / Clear", Style::default().fg(MUTED)),
         ],
         InputMode::ConfirmDelete => vec![
-            Span::styled(" ▲ CONFIRM DELETION: ", Style::default().fg(AMBER).bold()),
+            Span::styled(" ! CONFIRM DELETION: ", Style::default().fg(AMBER).bold()),
             Span::styled("y ", Style::default().fg(ACCENT).bold()),
             Span::styled("Delete Rule  ", Style::default().fg(AMBER)),
             Span::styled("n / Esc ", Style::default().fg(ACCENT).bold()),
             Span::styled("Cancel", Style::default().fg(MUTED)),
         ],
         InputMode::NewRule { .. } | InputMode::EditRule { .. } => vec![
-            Span::styled(" ◆ FORM: ", Style::default().fg(EMERALD).bold()),
+            Span::styled(" > FORM: ", Style::default().fg(EMERALD).bold()),
             Span::styled("Tab ", Style::default().fg(ACCENT).bold()),
             Span::styled("Next Field  ", Style::default().fg(MUTED)),
             Span::styled("Enter ", Style::default().fg(ACCENT).bold()),
@@ -2033,7 +2034,7 @@ fn render_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::styled("Cancel", Style::default().fg(MUTED)),
         ],
         InputMode::NewSession { .. } => vec![
-            Span::styled(" 🔖 NEW CHECKPOINT: ", Style::default().fg(EMERALD).bold()),
+            Span::styled(" + NEW CHECKPOINT: ", Style::default().fg(EMERALD).bold()),
             Span::styled("Enter ", Style::default().fg(ACCENT).bold()),
             Span::styled("Save Checkpoint  ", Style::default().fg(MUTED)),
             Span::styled("Esc ", Style::default().fg(ACCENT).bold()),
