@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const { spawn, execSync } = require('child_process');
 const https = require('https');
+const crypto = require('crypto');
 
 const PKG = require('../package.json');
 const VERSION = PKG.version;
@@ -48,25 +49,65 @@ function findSystemBinary() {
   return null;
 }
 
-function download(url, dest) {
+function download(url, dest, redirects = 0) {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
     https.get(url, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-        return download(response.headers.location, dest).then(resolve).catch(reject);
+        response.resume();
+        if (redirects >= 5) return reject(new Error('Too many HTTPS redirects'));
+        const next = new URL(response.headers.location, url);
+        if (next.protocol !== 'https:') return reject(new Error('Refusing non-HTTPS redirect'));
+        return download(next.href, dest, redirects + 1).then(resolve).catch(reject);
       }
       if (response.statusCode !== 200) {
+        response.resume();
         return reject(new Error(`Failed to download binary: HTTP ${response.statusCode}`));
       }
+
+      const partial = `${dest}.part-${process.pid}`;
+      const file = fs.createWriteStream(partial, { mode: 0o600 });
       response.pipe(file);
       file.on('finish', () => {
-        file.close(resolve);
+        file.close(() => {
+          fs.renameSync(partial, dest);
+          resolve();
+        });
+      });
+      file.on('error', (err) => {
+        fs.unlink(partial, () => {});
+        reject(err);
       });
     }).on('error', (err) => {
-      fs.unlink(dest, () => {});
       reject(err);
     });
   });
+}
+
+function sha256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const input = fs.createReadStream(filePath);
+    input.on('error', reject);
+    input.on('data', (chunk) => hash.update(chunk));
+    input.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+async function verifyArchive(archivePath, asset, releaseBaseUrl) {
+  const checksumsPath = `${archivePath}.sha256sums`;
+  await download(`${releaseBaseUrl}/SHA256SUMS.txt`, checksumsPath);
+  const line = fs.readFileSync(checksumsPath, 'utf8')
+    .split(/\r?\n/)
+    .find((entry) => entry.trim().endsWith(` ${asset}`));
+  fs.unlinkSync(checksumsPath);
+  if (!line) throw new Error(`No SHA-256 checksum published for ${asset}`);
+
+  const expected = line.trim().split(/\s+/)[0].toLowerCase();
+  const actual = await sha256(archivePath);
+  if (actual !== expected) {
+    fs.unlinkSync(archivePath);
+    throw new Error(`SHA-256 mismatch for ${asset}`);
+  }
 }
 
 async function ensureBinary() {
@@ -85,12 +126,14 @@ async function ensureBinary() {
 
   fs.mkdirSync(cacheDir, { recursive: true });
   const archivePath = path.join(cacheDir, asset);
-  const downloadUrl = `https://github.com/${REPO}/releases/download/v${VERSION}/${asset}`;
+  const releaseBaseUrl = `https://github.com/${REPO}/releases/download/v${VERSION}`;
+  const downloadUrl = `${releaseBaseUrl}/${asset}`;
 
   // Log to stderr only so stdout JSON-RPC MCP channel is NEVER polluted
   process.stderr.write(`[agent-mem] Downloading native binary v${VERSION} for ${os.platform()}-${os.arch()}...\n`);
 
   await download(downloadUrl, archivePath);
+  await verifyArchive(archivePath, asset, releaseBaseUrl);
 
   if (asset.endsWith('.tar.gz')) {
     execSync(`tar -xzf "${archivePath}" -C "${cacheDir}"`, { stdio: 'ignore' });

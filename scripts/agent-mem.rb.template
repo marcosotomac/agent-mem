@@ -1,26 +1,26 @@
 class AgentMem < Formula
   desc "Local-first, sub-millisecond memory engine for AI coding agents"
   homepage "https://github.com/marcosotomac/agent-mem"
-  version "1.2.0"
+  version "@VERSION@"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/marcosotomac/agent-mem/releases/download/v#{version}/agent-mem-darwin-aarch64.tar.gz"
-      sha256 "416739fe7b0458f135980468896811a686fe3f4f720694bb5c50f8eec1637885"
+      sha256 "@DARWIN_ARM_SHA@"
     else
       url "https://github.com/marcosotomac/agent-mem/releases/download/v#{version}/agent-mem-darwin-x86_64.tar.gz"
-      sha256 "dcf315383a6128fd7148b1b88c31ec15d55a6ef35825444da1e4c448bc40578d"
+      sha256 "@DARWIN_X64_SHA@"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/marcosotomac/agent-mem/releases/download/v#{version}/agent-mem-linux-aarch64.tar.gz"
-      sha256 "80dd41c72e533e64cdbf68379d0b160664ca08092fa5dd978ab1afeb5dc893d5"
+      sha256 "@LINUX_ARM_SHA@"
     else
       url "https://github.com/marcosotomac/agent-mem/releases/download/v#{version}/agent-mem-linux-x86_64.tar.gz"
-      sha256 "04d5bbb5e89e1bf68f1b767164b58e5a26720887bed104ca03808e392dd034da"
+      sha256 "@LINUX_X64_SHA@"
     end
   end
 
