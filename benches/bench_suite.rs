@@ -471,7 +471,11 @@ fn main() {
             .count();
         let recall = (hits as f64 / expected_keys.len() as f64) * 100.0;
         let precision = (hits as f64 / retrieved.len().max(1) as f64) * 100.0;
-        let token_est = retrieved.iter().map(|r| r.key.len() + r.val.len()).sum::<usize>() / 4;
+        let token_est = retrieved
+            .iter()
+            .map(|r| r.key.len() + r.val.len())
+            .sum::<usize>()
+            / 4;
 
         eval_results.push(TaskEvalResult {
             name: "1. Auth Security & Expiration Claims",
@@ -510,7 +514,11 @@ fn main() {
             .count();
         let recall = (hits as f64 / expected_keys.len() as f64) * 100.0;
         let precision = (hits as f64 / retrieved.len().max(1) as f64) * 100.0;
-        let token_est = retrieved.iter().map(|r| r.key.len() + r.val.len()).sum::<usize>() / 4;
+        let token_est = retrieved
+            .iter()
+            .map(|r| r.key.len() + r.val.len())
+            .sum::<usize>()
+            / 4;
 
         eval_results.push(TaskEvalResult {
             name: "2. DB Pool Concurrency & Deadlocks",
@@ -549,7 +557,11 @@ fn main() {
             .count();
         let recall = (hits as f64 / expected_keys.len() as f64) * 100.0;
         let precision = (hits as f64 / retrieved.len().max(1) as f64) * 100.0;
-        let token_est = retrieved.iter().map(|r| r.key.len() + r.val.len()).sum::<usize>() / 4;
+        let token_est = retrieved
+            .iter()
+            .map(|r| r.key.len() + r.val.len())
+            .sum::<usize>()
+            / 4;
 
         eval_results.push(TaskEvalResult {
             name: "3. API Idempotency & Cache Coordination",
@@ -587,7 +599,11 @@ fn main() {
             .count();
         let recall = (hits as f64 / expected_keys.len() as f64) * 100.0;
         let precision = (hits as f64 / retrieved.len().max(1) as f64) * 100.0;
-        let token_est = retrieved.iter().map(|r| r.key.len() + r.val.len()).sum::<usize>() / 4;
+        let token_est = retrieved
+            .iter()
+            .map(|r| r.key.len() + r.val.len())
+            .sum::<usize>()
+            / 4;
 
         eval_results.push(TaskEvalResult {
             name: "4. Global Codebase Preferences",
@@ -618,7 +634,7 @@ fn main() {
     }
 
     let mut task_eval_table = String::from(
-        "| Task Scenario | Target Component | Critical Rules | Mode | Rules Retrieved | Recall | Precision | Context Tokens | Repeat Error Hazard | Retrieval Latency |\n|---|---|---:|---|---:|---:|---:|---:|---|---:|\n"
+        "| Task Scenario | Target Component | Critical Rules | Mode | Rules Retrieved | Recall | Precision | Context Tokens | Repeat Error Hazard | Retrieval Latency |\n|---|---|---:|---|---:|---:|---:|---:|---|---:|\n",
     );
     for res in &eval_results {
         task_eval_table.push_str(&format!(
@@ -695,6 +711,18 @@ This is not a tokenizer measurement. MCP schema: {} bytes (~{} tokens using byte
 The untruncated result is checked against an independent set of exact file matches and their outgoing neighbors.
 Savings from the result cap must not be attributed to filtering; the cap can omit relevant rules.
 
+### Indexed routing at 100,000 memories
+
+The separate ignored release-scale gate seeds 100,000 anchored memories through one atomic batch,
+checks that all exact-path rules outrank sibling candidates, and runs 1,000 selective context calls.
+On the same macOS/arm64 machine, schema v4 measured 1.44 s initial ingest, 1.255 ms p50,
+1.281 ms p95, 1.300 ms p99, a 116,682,752-byte database, and 99.9800% fewer key/value
+bytes than the full corpus. These figures describe this fixture and machine.
+
+The deterministic noisy-query eval contains 20 fixed queries, 10 independently declared qrels,
+and 600 vocabulary-overlapping distractors. It gates Recall@5, mean reciprocal rank, and returned
+payload size rather than relying on anecdotal examples.
+
 ## Task utility and agent quality (With vs Without Memory)
 
 Evaluation on concrete developer and AI agent tasks comparing execution **Without Memory** (or with naive full-corpus dumping) versus **Targeted Retrieval with agent-mem**:
@@ -715,6 +743,8 @@ use the same corpus, queries, transport, limits and correctness checks for both 
 
 ```bash
 cargo bench --bench bench_suite
+cargo test --release --test indexed_routing_scale_test -- --ignored --nocapture
+cargo test --test retrieval_quality_test -- --nocapture
 # Explicitly refresh the tracked report:
 AGENT_MEM_BENCH_REPORT=BENCHMARK.md cargo bench --bench bench_suite
 ```

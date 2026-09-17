@@ -10,11 +10,11 @@ Ultra-fast, local-first, zero-daemon knowledge hypergraph and memory engine for 
 ## Design Principles
 - **Fast local reads**: Embedded SQLite in WAL mode with a clustered B-tree (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`). See the benchmark for measured operation latencies, including MCP and export costs.
 - **Clustered Knowledge Hypergraph**: Evolve beyond flat key-value pairs into engineering entities (`rule`, `decision`, `gotcha`, `pattern`) linked with typed directed edges (`mitigates`, `supersedes`, `depends_on`, `relates_to`).
-- **Anchor-Aware Context Filtering**: Retrieve rules by repository anchor (`context --anchor src/auth.rs:10`) with 1-hop graph expansion. The benchmark reports filtering savings separately from truncation and checks relevant-rule retention.
+- **Indexed Anchor-Aware Context Filtering**: Schema v4 routes exact paths, directory hierarchy, and basenames through a compact hash index, then validates original anchors before 1-hop graph expansion. Retrieval work stays bounded by the requested result limit.
 - **Minimal token footprint**: Four consolidated MCP tools in 1,376 schema characters (~344 tokens by the documented 4-char estimate), with bounded plain-text results and anchor-aware retrieval.
 - **Zero background daemons**: Direct stdio communication without background HTTP processes or port collisions.
 - **Dual scopes**: Seamless access to isolated `project` memory (`.agent-mem/mem.db`) and user-level `global` preferences (`~/.config/agent-mem/global.db`).
-- **BM25 search**: Full-text search powered by SQLite FTS5 with Porter stemming indexing keys, values, anchors, reasons, and entity kinds.
+- **BM25 search**: Weighted SQLite FTS5 search across keys, values, anchors, reasons, and kinds. Strict queries keep the one-query fast path; a bounded OR fallback runs only after zero hits.
 - **Session ring buffer**: Automatic atomic pruning preserving the latest 20 session checkpoints.
 
 ## Benchmarks
@@ -35,6 +35,10 @@ result against the relevant rules. Byte reduction is not a tokenizer measurement
 Cross-engine rankings are omitted until datasets, queries, transport and limits match.
 The default report is written to `target/benchmark.md`; use
 `AGENT_MEM_BENCH_REPORT=BENCHMARK.md cargo bench --bench bench_suite` to refresh the tracked report.
+
+For end-to-end conflict, corruption, concurrency, context-budget, and relative
+performance coverage, see [the real-world validation suite](tests/REAL_WORLD_TESTS.md).
+It includes fixed-qrel noisy-query evaluation and an explicit 100,000-record release benchmark.
 
 ## Installation
 

@@ -5,6 +5,7 @@ pub enum Error {
     Db(rusqlite::Error),
     Io(std::io::Error),
     Usage(String),
+    Semantic(String),
     NotFound(String),
     NotInitialized,
 }
@@ -15,6 +16,7 @@ impl fmt::Display for Error {
             Error::Db(e) => write!(f, "database error: {}", e),
             Error::Io(e) => write!(f, "io error: {}", e),
             Error::Usage(msg) => write!(f, "{}", msg),
+            Error::Semantic(msg) => write!(f, "semantic search error: {}", msg),
             Error::NotFound(key) => write!(f, "key not found: {}", key),
             Error::NotInitialized => write!(
                 f,
@@ -29,7 +31,9 @@ impl std::error::Error for Error {
         match self {
             Error::Db(e) => Some(e),
             Error::Io(e) => Some(e),
-            Error::Usage(_) | Error::NotFound(_) | Error::NotInitialized => None,
+            Error::Usage(_) | Error::Semantic(_) | Error::NotFound(_) | Error::NotInitialized => {
+                None
+            }
         }
     }
 }

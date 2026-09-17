@@ -501,25 +501,16 @@ impl McpServer {
 
                     let mut items = Vec::with_capacity(batch_val.len());
                     for (idx, item) in batch_val.iter().enumerate() {
-                        let key = item
-                            .get("key")
+                        let key = item.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+                            crate::error::Error::Usage(format!("Batch item #{} missing 'key'", idx))
+                        })?;
+                        let val = item.get("val").and_then(|v| v.as_str()).ok_or_else(|| {
+                            crate::error::Error::Usage(format!("Batch item #{} missing 'val'", idx))
+                        })?;
+                        let anchor = item
+                            .get("anchor")
                             .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
-                                crate::error::Error::Usage(format!(
-                                    "Batch item #{} missing 'key'",
-                                    idx
-                                ))
-                            })?;
-                        let val = item
-                            .get("val")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
-                                crate::error::Error::Usage(format!(
-                                    "Batch item #{} missing 'val'",
-                                    idx
-                                ))
-                            })?;
-                        let anchor = item.get("anchor").and_then(|v| v.as_str()).map(String::from);
+                            .map(String::from);
                         let kind = item.get("kind").and_then(|v| v.as_str()).map(String::from);
                         let rel = item
                             .get("rel")
@@ -731,8 +722,11 @@ impl McpServer {
                 let mut current_bytes = 0;
 
                 let reserved_global_bytes = if scope == "all" { 2560 } else { 0 };
-                let reserved_meta_bytes =
-                    if scope == "all" || scope == "project" { 1536 } else { 0 };
+                let reserved_meta_bytes = if scope == "all" || scope == "project" {
+                    1536
+                } else {
+                    0
+                };
 
                 let project_byte_budget = total_byte_budget
                     .saturating_sub(reserved_global_bytes)
@@ -834,8 +828,7 @@ impl McpServer {
                     let rules = store.dump_limited(global_rule_limit)?;
                     let mut global_lines = Vec::new();
                     for (k, v, a) in rules {
-                        let line =
-                            Self::format_context_rule("rule", &k, &v, a.as_deref(), compact);
+                        let line = Self::format_context_rule("rule", &k, &v, a.as_deref(), compact);
                         let cost = line.len() + 1;
                         if current_bytes + cost <= total_byte_budget {
                             current_bytes += cost;

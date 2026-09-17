@@ -914,7 +914,9 @@ fn test_mcp_context_full_rule_packing_and_global_space_reservation() {
             Some("decision"),
         )
         .unwrap();
-    let _ = p_store.session_add("feat: implement token verification").unwrap();
+    let _ = p_store
+        .session_add("feat: implement token verification")
+        .unwrap();
     drop(p_store);
 
     // 2. Seed global preferences
@@ -941,13 +943,17 @@ fn test_mcp_context_full_rule_packing_and_global_space_reservation() {
 
     // A. Verify critical decision/auth is NOT hidden or crowded out by the large traceback rule
     assert!(
-        text.contains("[decision] decision/auth: Require JWT RS256 authentication on all endpoints"),
+        text.contains(
+            "[decision] decision/auth: Require JWT RS256 authentication on all endpoints"
+        ),
         "Critical brief authorization rule must be present in full"
     );
 
     // B. Verify large traceback rule was compactly bounded without starving the rest of the context
     assert!(text.contains("gotcha/traceback"));
-    assert!(text.contains("... [truncated; use mem_find key=\"gotcha/traceback\" for full content]"));
+    assert!(
+        text.contains("... [truncated; use mem_find key=\"gotcha/traceback\" for full content]")
+    );
 
     // C. Verify sessions were not crowded out
     assert!(text.contains("== SESSIONS =="));
@@ -1032,9 +1038,11 @@ fn test_mcp_mem_set_batch_writes_and_single_export() {
         }),
     };
     let find_resp = server.handle_request(&find_req).unwrap();
-    let find_text = find_resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let find_text = find_resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(find_text.contains("[decision] decision/constant_time"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
-

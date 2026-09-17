@@ -1,10 +1,11 @@
-use super::{Store, now_epoch};
+use super::{Store, mark_semantic_dirty, now_epoch};
 use crate::error::Result;
 use crate::store::models::{
-    RelationRecord, RuleEntry, RuleRecord, SessionEntry, ZombieReport, extract_anchor_paths,
+    ROUTE_PATH_SUFFIX, RelationRecord, RuleEntry, RuleRecord, SessionEntry, ZombieReport,
+    extract_anchor_paths, route_hash, routing_entries_for_path,
 };
 use rusqlite::{TransactionBehavior, params};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 impl Store {
@@ -47,6 +48,30 @@ impl Store {
             list.push((row.get(0)?, row.get(1)?));
         }
         Ok(list)
+    }
+
+    fn get_outgoing_targets(&self, keys: &[&str], limit: usize) -> Result<Vec<String>> {
+        if keys.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT target_key FROM relations
+             WHERE source_key = ?1
+             ORDER BY rel_type, target_key
+             LIMIT ?2;",
+        )?;
+        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut targets = BTreeSet::new();
+        for key in keys {
+            let mut rows = stmt.query(params![key, sql_limit])?;
+            while let Some(row) = rows.next()? {
+                targets.insert(row.get(0)?);
+                if targets.len() == limit {
+                    return Ok(targets.into_iter().collect());
+                }
+            }
+        }
+        Ok(targets.into_iter().collect())
     }
 
     /// Retrieve all relations across the project.
@@ -97,12 +122,19 @@ impl Store {
             }
         }
 
+        let selected: HashSet<&str> = keys.iter().copied().collect();
         relations.sort_unstable_by(|a, b| {
-            (&a.source_key, &a.rel_type, &a.target_key).cmp(&(
-                &b.source_key,
-                &b.rel_type,
-                &b.target_key,
-            ))
+            let a_internal = selected.contains(a.source_key.as_str())
+                && selected.contains(a.target_key.as_str());
+            let b_internal = selected.contains(b.source_key.as_str())
+                && selected.contains(b.target_key.as_str());
+            b_internal.cmp(&a_internal).then_with(|| {
+                (&a.source_key, &a.rel_type, &a.target_key).cmp(&(
+                    &b.source_key,
+                    &b.rel_type,
+                    &b.target_key,
+                ))
+            })
         });
         relations.dedup_by(|a, b| {
             a.source_key == b.source_key && a.rel_type == b.rel_type && a.target_key == b.target_key
@@ -133,6 +165,8 @@ impl Store {
                 params![z.key],
             )?;
         }
+
+        mark_semantic_dirty(&tx)?;
 
         tx.commit()?;
         Ok(())
@@ -227,6 +261,162 @@ impl Store {
         Ok((rules, sessions))
     }
 
+    fn ranked_anchor_keys(
+        &self,
+        files: &[String],
+        topic: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let clean_paths: Vec<String> = files
+            .iter()
+            .filter_map(|file| normalize_query_path(file))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(256)
+            .collect();
+        if clean_paths.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let queries: Vec<NormalizedQueryFile<'_>> = clean_paths
+            .iter()
+            .map(|path| NormalizedQueryFile::new(path))
+            .collect();
+        let clean_topic = topic.map(str::trim).filter(|value| !value.is_empty());
+        let exact_route_budget = clean_paths.len().saturating_mul(limit.min(64));
+        let candidate_budget = limit
+            .saturating_mul(32)
+            .max(exact_route_budget)
+            .clamp(128, 8192);
+        let per_route_budget = limit.saturating_mul(4).clamp(32, 512).min(candidate_budget);
+        let sql_limit = i64::try_from(per_route_budget).unwrap_or(i64::MAX);
+
+        // Exact full paths are queried first so a broad basename or directory
+        // route can never crowd them out of the bounded candidate set.
+        let mut lookup_routes = Vec::new();
+        let mut seen_routes = HashSet::new();
+        for path in &clean_paths {
+            let route = (ROUTE_PATH_SUFFIX, route_hash(path));
+            if seen_routes.insert(route) {
+                lookup_routes.push((route.0, route.1, true));
+            }
+        }
+        for path in &clean_paths {
+            for route in routing_entries_for_path(path) {
+                if seen_routes.insert(route) {
+                    lookup_routes.push((route.0, route.1, false));
+                }
+            }
+        }
+
+        let mut candidates: HashMap<String, String> =
+            HashMap::with_capacity(candidate_budget.min(1024));
+        let topic_pattern = clean_topic.map(|prefix| format!("{prefix}%"));
+        let mut lookup = self.conn.prepare_cached(
+            "SELECT m.key, m.anchor
+             FROM memory_routes r
+             JOIN memories m ON m.key = r.memory_key
+             WHERE r.route_kind = ?1 AND r.route_hash = ?2 AND m.archived_at IS NULL
+               AND (?3 IS NULL OR m.key LIKE ?4 OR m.key = ?3)
+             ORDER BY m.key
+             LIMIT ?5;",
+        )?;
+        for (route_kind, route_hash, exact) in lookup_routes {
+            let route_limit = if exact {
+                i64::try_from(limit.min(64)).unwrap_or(i64::MAX)
+            } else {
+                sql_limit
+            };
+            let mut rows = lookup.query(params![
+                route_kind,
+                route_hash,
+                clean_topic,
+                topic_pattern.as_deref(),
+                route_limit
+            ])?;
+            while let Some(row) = rows.next()? {
+                let key: String = row.get(0)?;
+                let anchor: String = row.get(1)?;
+                if candidates.len() < candidate_budget || candidates.contains_key(&key) {
+                    candidates.entry(key).or_insert(anchor);
+                }
+            }
+        }
+
+        let mut scored: Vec<(u32, String)> = Vec::with_capacity(candidates.len());
+        for (key, anchor) in candidates {
+            let paths = extract_anchor_paths(&anchor);
+            let best = queries
+                .iter()
+                .flat_map(|query| {
+                    paths
+                        .iter()
+                        .filter_map(move |path| score_single_anchor(query, path))
+                })
+                .max();
+            if let Some(score) = best {
+                scored.push((score, key));
+            }
+        }
+        scored.sort_unstable_by(|(score_a, key_a), (score_b, key_b)| {
+            score_b.cmp(score_a).then_with(|| key_a.cmp(key_b))
+        });
+        Ok(scored.into_iter().take(limit).map(|(_, key)| key).collect())
+    }
+
+    fn universal_keys(&self, topic: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let clean_topic = topic.map(str::trim).filter(|value| !value.is_empty());
+        let mut keys = Vec::with_capacity(limit.min(32));
+        if let Some(prefix) = clean_topic {
+            let pattern = format!("{}%", prefix);
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT key FROM memories
+                 WHERE anchor IS NULL AND archived_at IS NULL AND (key LIKE ?1 OR key = ?2)
+                 ORDER BY key LIMIT ?3;",
+            )?;
+            let mut rows = stmt.query(params![pattern, prefix, limit as i64])?;
+            while let Some(row) = rows.next()? {
+                keys.push(row.get(0)?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT key FROM memories
+                 WHERE anchor IS NULL AND archived_at IS NULL
+                 ORDER BY key LIMIT ?1;",
+            )?;
+            let mut rows = stmt.query(params![limit as i64])?;
+            while let Some(row) = rows.next()? {
+                keys.push(row.get(0)?);
+            }
+        }
+        Ok(keys)
+    }
+
+    fn materialize_active_rules(&self, keys: &[String]) -> Result<Vec<RuleRecord>> {
+        let mut rules = Vec::with_capacity(keys.len());
+        let mut fetch = self.conn.prepare_cached(
+            "SELECT key, val, anchor, archived_at, archive_reason, kind
+             FROM memories WHERE key = ?1 AND archived_at IS NULL LIMIT 1;",
+        )?;
+        for key in keys {
+            let mut rows = fetch.query(params![key])?;
+            if let Some(row) = rows.next()? {
+                rules.push(RuleRecord {
+                    key: row.get(0)?,
+                    val: row.get(1)?,
+                    anchor: row.get(2)?,
+                    archived_at: row.get(3)?,
+                    archive_reason: row.get(4)?,
+                    kind: row.get(5)?,
+                });
+            }
+        }
+        Ok(rules)
+    }
+
     /// Retrieve context filtered by code anchor or topic prefix, expanding connected graph relations.
     pub fn context_filtered(
         &self,
@@ -250,68 +440,21 @@ impl Store {
 
         let rules = match (clean_anchor, clean_topic) {
             (Some(a), maybe_topic) => {
-                // When anchor is specified, match direct anchors (priority 1) and 1-hop related memories (priority 2).
-                // If topic is also specified, apply it across both without discarding either filter.
-                let (topic_pat, topic_exact) = match maybe_topic {
-                    Some(t) => (Some(format!("{}%", t)), Some(t.to_string())),
-                    None => (None, None),
-                };
-                let like_prefix = format!("{}:%", a);
-                let like_exact = format!("{}%", a);
-                let like_comma = format!("%, {}%", a);
-
-                let mut stmt = self.conn.prepare_cached(
-                    "WITH direct_anchors AS (
-                        SELECT key, val, anchor, archived_at, archive_reason, kind, 1 AS priority
-                        FROM memories
-                        WHERE (anchor = ?1 OR anchor LIKE ?2 OR anchor LIKE ?3 OR ?1 LIKE anchor || '%' OR anchor LIKE ?6)
-                          AND archived_at IS NULL
-                    ),
-                    related AS (
-                        SELECT m.key, m.val, m.anchor, m.archived_at, m.archive_reason, m.kind, 2 AS priority
-                        FROM relations r
-                        JOIN memories m ON r.target_key = m.key
-                        WHERE r.source_key IN (SELECT key FROM direct_anchors)
-                          AND m.archived_at IS NULL
-                    ),
-                    combined AS (
-                        SELECT key, val, anchor, archived_at, archive_reason, kind, MIN(priority) AS prio
-                        FROM (
-                            SELECT * FROM direct_anchors
-                            UNION ALL
-                            SELECT * FROM related
-                        )
-                        WHERE (?4 IS NULL OR key LIKE ?4 OR key = ?5)
-                        GROUP BY key, val, anchor, archived_at, archive_reason, kind
-                    )
-                    SELECT key, val, anchor, archived_at, archive_reason, kind
-                    FROM combined
-                    ORDER BY prio ASC, key ASC
-                    LIMIT ?7;",
-                )?;
-
-                let mut rows = stmt.query(params![
-                    a,
-                    like_prefix,
-                    like_exact,
-                    topic_pat,
-                    topic_exact,
-                    like_comma,
-                    max_limit as i64
-                ])?;
-
-                let mut list = Vec::new();
-                while let Some(row) = rows.next()? {
-                    list.push(RuleRecord {
-                        key: row.get(0)?,
-                        val: row.get(1)?,
-                        anchor: row.get(2)?,
-                        archived_at: row.get(3)?,
-                        archive_reason: row.get(4)?,
-                        kind: row.get(5)?,
-                    });
+                let direct = self.ranked_anchor_keys(&[a], maybe_topic, max_limit)?;
+                let keys: Vec<&str> = direct.iter().map(String::as_str).collect();
+                let related = self.get_outgoing_targets(&keys, max_limit.saturating_mul(4))?;
+                let mut selected = direct;
+                for key in related {
+                    if selected.len() == max_limit {
+                        break;
+                    }
+                    if maybe_topic.is_none_or(|prefix| key.starts_with(prefix) || key == prefix)
+                        && !selected.contains(&key)
+                    {
+                        selected.push(key);
+                    }
                 }
-                list
+                self.materialize_active_rules(&selected)?
             }
             (None, Some(t)) => {
                 let pattern = format!("{}%", t);
@@ -384,105 +527,13 @@ impl Store {
         }
 
         let max_limit = if limit == 0 { 20 } else { limit };
-
-        // Normalize input file paths and extract basenames/directory components
-        let clean_path_strings: Vec<String> = files
-            .iter()
-            .map(|f| {
-                let p = f.replace('\\', "/");
-                p.trim_start_matches('@')
-                    .trim()
-                    .trim_start_matches("./")
-                    .to_string()
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if clean_path_strings.is_empty() {
-            return self.context_filtered(None, topic, limit);
-        }
-
-        let normalized_queries: Vec<NormalizedQueryFile<'_>> = clean_path_strings
-            .iter()
-            .map(|p| {
-                let (dir, base) = match p.rsplit_once('/') {
-                    Some((d, b)) => (Some(d), b),
-                    None => (None, p.as_str()),
-                };
-                NormalizedQueryFile {
-                    clean_path: p.as_str(),
-                    dir,
-                    base,
-                    is_generic: is_generic_filename(base),
-                }
-            })
-            .collect();
-
         let clean_topic = topic.map(str::trim).filter(|s| !s.is_empty());
-
-        // 1. Scan routing fields. Full values are fetched for the bounded result set.
-        // If topic is specified, use the key index to prune unrelated rows early.
-        let mut stmt = if clean_topic.is_some() {
-            self.conn.prepare_cached(
-                "SELECT key, anchor
-                 FROM memories
-                 WHERE archived_at IS NULL AND (key LIKE ?1 OR key = ?2)
-                 ORDER BY key ASC;",
-            )?
-        } else {
-            self.conn.prepare_cached(
-                "SELECT key, anchor
-                 FROM memories
-                 WHERE archived_at IS NULL
-                 ORDER BY key ASC;",
-            )?
-        };
-
-        let mut rows = if let Some(t) = clean_topic {
-            let pattern = format!("{}%", t);
-            stmt.query(params![pattern, t])?
-        } else {
-            stmt.query([])?
-        };
-
-        let mut scored_direct: Vec<(u32, String)> = Vec::new();
-        let mut universal_keys = Vec::new();
-
-        while let Some(row) = rows.next()? {
-            let key: String = row.get(0)?;
-            let anchor: Option<String> = row.get(1)?;
-
-            if let Some(anchor_raw) = anchor.filter(|a| !a.trim().is_empty()) {
-                let paths = extract_anchor_paths(&anchor_raw);
-                let mut best_score: Option<u32> = None;
-                for query in &normalized_queries {
-                    for path in &paths {
-                        if let Some(score) = score_single_anchor(query, path) {
-                            best_score = Some(best_score.map_or(score, |curr| curr.max(score)));
-                        }
-                    }
-                }
-                if let Some(score) = best_score {
-                    scored_direct.push((score, key));
-                }
-            } else {
-                universal_keys.push(key);
-            }
-        }
-        drop(rows);
-        drop(stmt);
-
-        // Sort candidate direct keys by: score DESC, key ASC
-        scored_direct.sort_unstable_by(|(s1, k1), (s2, k2)| {
-            s2.cmp(s1).then_with(|| k1.cmp(k2))
-        });
-
-        let mut direct_keys = Vec::with_capacity(max_limit.min(scored_direct.len()));
-        let mut direct_key_set = HashSet::with_capacity(max_limit.min(scored_direct.len()));
-        for (_score, key) in scored_direct.into_iter().take(max_limit) {
+        let direct_keys = self.ranked_anchor_keys(files, clean_topic, max_limit)?;
+        let mut direct_key_set = HashSet::with_capacity(max_limit.min(direct_keys.len()));
+        for key in &direct_keys {
             direct_key_set.insert(key.clone());
-            direct_keys.push(key);
         }
+        let universal_keys = self.universal_keys(clean_topic, max_limit)?;
 
         // 2. Expand one graph hop through indexed source/target lookups.
         let mut related_keys = BTreeSet::new();
@@ -527,25 +578,7 @@ impl Store {
         }
 
         // 4. Materialize only selected records.
-        let mut combined_rules = Vec::with_capacity(selected_keys.len());
-        let mut fetch = self.conn.prepare_cached(
-            "SELECT key, val, anchor, archived_at, archive_reason, kind
-             FROM memories WHERE key = ?1 AND archived_at IS NULL LIMIT 1;",
-        )?;
-        for key in &selected_keys {
-            let mut rows = fetch.query(params![key])?;
-            if let Some(row) = rows.next()? {
-                combined_rules.push(RuleRecord {
-                    key: row.get(0)?,
-                    val: row.get(1)?,
-                    anchor: row.get(2)?,
-                    archived_at: row.get(3)?,
-                    archive_reason: row.get(4)?,
-                    kind: row.get(5)?,
-                });
-            }
-        }
-        drop(fetch);
+        let combined_rules = self.materialize_active_rules(&selected_keys)?;
 
         let mut rels = Vec::new();
         if !combined_rules.is_empty() {
@@ -563,6 +596,30 @@ struct NormalizedQueryFile<'a> {
     dir: Option<&'a str>,
     base: &'a str,
     is_generic: bool,
+}
+
+impl<'a> NormalizedQueryFile<'a> {
+    fn new(clean_path: &'a str) -> Self {
+        let (dir, base) = clean_path
+            .rsplit_once('/')
+            .map_or((None, clean_path), |(dir, base)| (Some(dir), base));
+        Self {
+            clean_path,
+            dir,
+            base,
+            is_generic: is_generic_filename(base),
+        }
+    }
+}
+
+fn normalize_query_path(raw: &str) -> Option<String> {
+    let normalized = raw.trim().trim_start_matches('@').trim().replace('\\', "/");
+    let without_line = normalized
+        .rsplit_once(':')
+        .filter(|(_, line)| line.parse::<u32>().is_ok())
+        .map_or(normalized.as_str(), |(path, _)| path);
+    let clean = without_line.trim_start_matches("./").trim_matches('/');
+    (!clean.is_empty()).then(|| clean.to_string())
 }
 
 fn is_generic_filename(name: &str) -> bool {

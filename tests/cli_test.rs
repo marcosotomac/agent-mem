@@ -49,6 +49,19 @@ fn test_parse_args() {
         }
     );
 
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "semantic".into(), "build".into()]).unwrap(),
+        Command::SemanticBuild
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "semantic".into(), "status".into()]).unwrap(),
+        Command::SemanticStatus
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "semantic".into(), "clear".into()]).unwrap(),
+        Command::SemanticClear
+    );
+
     // Set with anchor and kind
     assert_eq!(
         parse_args(vec![

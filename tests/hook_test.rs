@@ -100,7 +100,10 @@ fn test_conventional_commit_parsing() {
     assert!(parsed.is_breaking);
     let entity = parsed.entity.unwrap();
     assert_eq!(entity.kind, EntityKind::Rule);
-    assert_eq!(entity.key, "architecture/api/switch-to-protobuf-serialization");
+    assert_eq!(
+        entity.key,
+        "architecture/api/switch-to-protobuf-serialization"
+    );
     assert_eq!(entity.val, "switch to protobuf serialization");
 
     // 7. breaking change via subject prefix
@@ -395,10 +398,12 @@ fn test_dry_run_mode() {
     // Verify nothing written to DB
     let db_path = temp_dir.join(".agent-mem").join("mem.db");
     let store = Store::open(&db_path, false).unwrap();
-    assert!(store
-        .get_entry("decision/cache/add-redis-lru-backend")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .get_entry("decision/cache/add-redis-lru-backend")
+            .unwrap()
+            .is_none()
+    );
     let sessions = store.session_list(5).unwrap();
     assert!(sessions.is_empty());
 
@@ -481,11 +486,20 @@ fn test_cli_hook_subcommand_parsing_and_execution() {
 fn test_slugify_token_efficiency_and_bounds() {
     // Standard phrases
     assert_eq!(slugify("validate JWT issuer"), "validate-jwt-issuer");
-    assert_eq!(slugify("use constant-time comparison"), "use-constant-time-comparison");
+    assert_eq!(
+        slugify("use constant-time comparison"),
+        "use-constant-time-comparison"
+    );
 
     // Special characters & punctuation
-    assert_eq!(slugify("handle EOF (on socket closed!)"), "handle-eof-on-socket");
-    assert_eq!(slugify("fix: buffer overflow in parser"), "fix-buffer-overflow-in");
+    assert_eq!(
+        slugify("handle EOF (on socket closed!)"),
+        "handle-eof-on-socket"
+    );
+    assert_eq!(
+        slugify("fix: buffer overflow in parser"),
+        "fix-buffer-overflow-in"
+    );
 
     // Long sentences are bounded to save prompt tokens (< 32 chars)
     let long = "this is a very long commit summary describing architectural changes in detail";
@@ -511,7 +525,10 @@ fn test_distinct_commits_on_same_scope_coexist_without_overwrite() {
 
     run_git(&temp_dir, &["init"]);
     run_git(&temp_dir, &["config", "user.name", "Test Agent"]);
-    run_git(&temp_dir, &["config", "user.email", "agent@antigravity.test"]);
+    run_git(
+        &temp_dir,
+        &["config", "user.email", "agent@antigravity.test"],
+    );
 
     init_project(&temp_dir).unwrap();
 
@@ -521,7 +538,10 @@ fn test_distinct_commits_on_same_scope_coexist_without_overwrite() {
     // Commit 1: fix(auth): validate jwt issuer
     fs::write(src_dir.join("jwt.rs"), "pub fn check_jwt() {}").unwrap();
     run_git(&temp_dir, &["add", "."]);
-    run_git(&temp_dir, &["commit", "-m", "fix(auth): validate jwt issuer"]);
+    run_git(
+        &temp_dir,
+        &["commit", "-m", "fix(auth): validate jwt issuer"],
+    );
     let report1 = run_post_commit(&temp_dir, false).unwrap().unwrap();
     let ent1 = report1.entity_captured.unwrap();
     assert_eq!(ent1.key, "gotcha/auth/validate-jwt-issuer");
@@ -529,7 +549,10 @@ fn test_distinct_commits_on_same_scope_coexist_without_overwrite() {
     // Commit 2: fix(auth): use constant-time comparison
     fs::write(src_dir.join("crypto.rs"), "pub fn compare() {}").unwrap();
     run_git(&temp_dir, &["add", "."]);
-    run_git(&temp_dir, &["commit", "-m", "fix(auth): use constant-time comparison"]);
+    run_git(
+        &temp_dir,
+        &["commit", "-m", "fix(auth): use constant-time comparison"],
+    );
     let report2 = run_post_commit(&temp_dir, false).unwrap().unwrap();
     let ent2 = report2.entity_captured.unwrap();
     assert_eq!(ent2.key, "gotcha/auth/use-constant-time-comparison");
@@ -537,16 +560,30 @@ fn test_distinct_commits_on_same_scope_coexist_without_overwrite() {
     // Verify BOTH distinct gotchas coexist in the SQLite store and are not overwritten!
     let db_path = temp_dir.join(".agent-mem").join("mem.db");
     let store = Store::open(&db_path, false).unwrap();
-    let r1 = store.get_entry("gotcha/auth/validate-jwt-issuer").unwrap().unwrap();
-    let r2 = store.get_entry("gotcha/auth/use-constant-time-comparison").unwrap().unwrap();
+    let r1 = store
+        .get_entry("gotcha/auth/validate-jwt-issuer")
+        .unwrap()
+        .unwrap();
+    let r2 = store
+        .get_entry("gotcha/auth/use-constant-time-comparison")
+        .unwrap()
+        .unwrap();
     assert_eq!(r1.val, "validate jwt issuer");
     assert_eq!(r2.val, "use constant-time comparison");
 
     // Verify sessions recorded origin commit hashes
     let sessions = store.session_list(5).unwrap();
     assert_eq!(sessions.len(), 2);
-    assert!(sessions.iter().any(|s| s.1.contains("validate jwt issuer") && s.1.starts_with('[')));
-    assert!(sessions.iter().any(|s| s.1.contains("use constant-time comparison") && s.1.starts_with('[')));
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s.1.contains("validate jwt issuer") && s.1.starts_with('['))
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s.1.contains("use constant-time comparison") && s.1.starts_with('['))
+    );
 
     // Commit 3: Explicit Key trailer allows deliberate update/deduplication
     fs::write(src_dir.join("jwt.rs"), "pub fn check_jwt_v2() {}").unwrap();
@@ -554,12 +591,18 @@ fn test_distinct_commits_on_same_scope_coexist_without_overwrite() {
     let msg = "fix(auth): update jwt issuer check\n\nKey: gotcha/auth/validate-jwt-issuer";
     run_git(&temp_dir, &["commit", "-m", msg]);
     let report3 = run_post_commit(&temp_dir, false).unwrap().unwrap();
-    assert_eq!(report3.entity_captured.unwrap().key, "gotcha/auth/validate-jwt-issuer");
+    assert_eq!(
+        report3.entity_captured.unwrap().key,
+        "gotcha/auth/validate-jwt-issuer"
+    );
 
     // Total gotchas remain 2 because Commit 3 explicitly targeted and updated the first one
     let all_memories = store.dump_all().unwrap();
     assert_eq!(all_memories.len(), 2);
-    let updated_r1 = store.get_entry("gotcha/auth/validate-jwt-issuer").unwrap().unwrap();
+    let updated_r1 = store
+        .get_entry("gotcha/auth/validate-jwt-issuer")
+        .unwrap()
+        .unwrap();
     assert_eq!(updated_r1.val, "update jwt issuer check");
 
     let _ = fs::remove_dir_all(&temp_dir);

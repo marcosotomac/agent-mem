@@ -571,6 +571,9 @@ pub fn print_help() {
             "    {ACCENT}sync{RESET}    {MUTED}[file] [--export]{RESET} Synchronize team rules (.agent-rules)"
         );
         println!(
+            "    {ACCENT}semantic{RESET} {MUTED}[build|status|clear]{RESET} Manage local semantic fallback"
+        );
+        println!(
             "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>]{RESET} Export dense context"
         );
         println!(
@@ -604,10 +607,36 @@ pub fn print_help() {
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, clean, find, dump, context, session add, session list, hook post-commit, sync, mcp, mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, clean, find, dump, context, session add, session list, hook post-commit, sync, semantic, mcp, mcp install, doctor, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }
+}
+
+pub fn print_semantic_build(report: &crate::store::SemanticBuildReport) {
+    println!(
+        "semantic index built: {} records, {} bytes, {} ms ({})",
+        report.records_count, report.index_bytes, report.elapsed_ms, report.model_id
+    );
+}
+
+pub fn print_semantic_status(status: &crate::store::SemanticStatus) {
+    if !status.enabled {
+        println!("semantic fallback: disabled");
+        return;
+    }
+    let freshness = if status.dirty { "stale" } else { "fresh" };
+    println!(
+        "semantic fallback: enabled, {} records, {} bytes, {} ({})",
+        status.records_count,
+        status.index_bytes,
+        freshness,
+        status.model_id.as_deref().unwrap_or("unknown model")
+    );
+}
+
+pub fn print_semantic_clear(removed_files: usize) {
+    println!("semantic fallback disabled: removed {removed_files} index file(s)");
 }
 
 pub fn print_doctor(

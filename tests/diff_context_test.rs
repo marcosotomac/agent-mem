@@ -316,3 +316,92 @@ fn test_hierarchy_ranking_and_generic_basename_isolation() {
     // Generic mod.rs in different module (src/db/mod.rs) must NEVER be included
     assert!(!rules.iter().any(|r| r.key == "gotcha/db-mod"));
 }
+
+#[test]
+fn test_many_changed_files_receive_fair_exact_match_candidates() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut files = Vec::new();
+    for index in (0..100).rev() {
+        let path = format!("services/service-{index:03}/src/handler.rs");
+        store
+            .set_with_anchor(
+                &format!("decision/service-{index:03}"),
+                &format!("Rule for service {index}"),
+                Some(&format!("{path}:10")),
+            )
+            .unwrap();
+        files.push(path);
+    }
+
+    let (rules, _, _) = store.context_for_files(&files, None, 20).unwrap();
+    assert_eq!(rules.len(), 20);
+    let keys: Vec<_> = rules.iter().map(|rule| rule.key.as_str()).collect();
+    let expected: Vec<_> = (0..20)
+        .map(|index| format!("decision/service-{index:03}"))
+        .collect();
+    assert_eq!(
+        keys,
+        expected.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_topic_filter_applies_before_route_limit() {
+    let mut store = Store::open_in_memory().unwrap();
+    let anchor = "services/api/src/routes.rs:10";
+    for index in 0..80 {
+        store
+            .set_with_anchor(
+                &format!("aaa/noise-{index:03}"),
+                "Unrelated rule on the same file",
+                Some(anchor),
+            )
+            .unwrap();
+    }
+    store
+        .set_with_anchor(
+            "zzz/target",
+            "Target rule after every alphabetical distractor",
+            Some(anchor),
+        )
+        .unwrap();
+
+    let (rules, _, _) = store
+        .context_filtered(Some("services/api/src/routes.rs"), Some("zzz/"), 1)
+        .unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].key, "zzz/target");
+}
+
+#[test]
+fn test_incoming_edge_storm_does_not_hide_outgoing_context() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_with_anchor(
+            "decision/direct",
+            "Directly anchored decision",
+            Some("src/api.rs:10"),
+        )
+        .unwrap();
+    store
+        .set("gotcha/required", "Required outgoing mitigation")
+        .unwrap();
+    store
+        .relate("decision/direct", "mitigates", "gotcha/required")
+        .unwrap();
+    for index in 0..40 {
+        let source = format!("aaa/incoming-{index:02}");
+        store.set(&source, "Incoming graph noise").unwrap();
+        store
+            .relate(&source, "relates_to", "decision/direct")
+            .unwrap();
+    }
+
+    let (rules, relations, _) = store.context_filtered(Some("src/api.rs"), None, 2).unwrap();
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0].key, "decision/direct");
+    assert_eq!(rules[1].key, "gotcha/required");
+    assert!(relations.iter().any(|relation| {
+        relation.source_key == "decision/direct" && relation.target_key == "gotcha/required"
+    }));
+}

@@ -1,4 +1,4 @@
-use super::{Store, now_epoch};
+use super::{Store, insert_memory_routes, mark_semantic_dirty, now_epoch};
 use crate::error::{Error, Result};
 use crate::store::models::{ParsedRules, RuleRecord, SyncReport, infer_kind};
 use rusqlite::{Row, TransactionBehavior, params, types::Type, types::ValueRef};
@@ -530,9 +530,8 @@ impl Store {
 
         // Record conflict provenance in session audit log
         if !conflicts.is_empty() {
-            let mut insert_sess = tx.prepare_cached(
-                "INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);",
-            )?;
+            let mut insert_sess =
+                tx.prepare_cached("INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);")?;
             for (ckey, old_val, new_val) in &conflicts {
                 let summary = format!(
                     "[conflict-resolved] '{}': superseded '{}' with '{}'",
@@ -540,9 +539,19 @@ impl Store {
                 );
                 insert_sess.execute(params![summary, now])?;
             }
+            drop(insert_sess);
+            tx.execute(
+                "DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY id DESC LIMIT 20);",
+                [],
+            )?;
         }
 
-        let existing_count: usize = tx.query_row("SELECT COUNT(*) FROM memories;", [], |r| r.get(0))?;
+        let existing_count: usize =
+            tx.query_row("SELECT COUNT(*) FROM memories;", [], |r| r.get(0))?;
+        let rebuild_route_lookup = existing_count == 0 && unique_rules.len() >= 1_024;
+        if rebuild_route_lookup {
+            tx.execute("DROP INDEX IF EXISTS idx_memory_routes_lookup;", [])?;
+        }
 
         if existing_count == 0 {
             // Fast path for initial sync / empty database: direct inserts without diffing overhead
@@ -575,6 +584,7 @@ impl Store {
                     entry.archive_reason,
                     entry.kind,
                 ])?;
+                insert_memory_routes(&tx, key, entry.anchor)?;
             }
 
             for (source, rel_type, target) in &parsed.relations {
@@ -627,6 +637,8 @@ impl Store {
             let mut insert_fts = tx.prepare_cached(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, ?5);",
             )?;
+            let mut delete_routes =
+                tx.prepare_cached("DELETE FROM memory_routes WHERE memory_key = ?1;")?;
 
             for (key, entry) in &unique_rules {
                 match existing_map.get(*key) {
@@ -662,6 +674,8 @@ impl Store {
                                 entry.archive_reason,
                                 entry.kind,
                             ])?;
+                            delete_routes.execute(params![key])?;
+                            insert_memory_routes(&tx, key, entry.anchor)?;
                         }
                     }
                     None => {
@@ -682,6 +696,7 @@ impl Store {
                             entry.archive_reason,
                             entry.kind,
                         ])?;
+                        insert_memory_routes(&tx, key, entry.anchor)?;
                     }
                 }
             }
@@ -691,15 +706,15 @@ impl Store {
                 if !unique_rules.contains_key(key.as_str()) {
                     delete_mem.execute(params![key])?;
                     delete_fts.execute(params![key])?;
+                    delete_routes.execute(params![key])?;
                 }
             }
 
             // Reconcile relations incrementally
             let mut existing_relations = std::collections::HashSet::new();
             {
-                let mut stmt = tx.prepare_cached(
-                    "SELECT source_key, rel_type, target_key FROM relations;",
-                )?;
+                let mut stmt =
+                    tx.prepare_cached("SELECT source_key, rel_type, target_key FROM relations;")?;
                 let mut rows = stmt.query([])?;
                 while let Some(row) = rows.next()? {
                     let s: String = row.get(0)?;
@@ -709,11 +724,8 @@ impl Store {
                 }
             }
 
-            let target_relations: std::collections::HashSet<(String, String, String)> = parsed
-                .relations
-                .iter()
-                .cloned()
-                .collect();
+            let target_relations: std::collections::HashSet<(String, String, String)> =
+                parsed.relations.iter().cloned().collect();
 
             if existing_relations != target_relations {
                 let mut delete_rel = tx.prepare_cached(
@@ -736,6 +748,16 @@ impl Store {
                 }
             }
         }
+
+        if rebuild_route_lookup {
+            tx.execute(
+                "CREATE INDEX idx_memory_routes_lookup
+                 ON memory_routes(route_kind, route_hash, memory_key);",
+                [],
+            )?;
+        }
+
+        mark_semantic_dirty(&tx)?;
 
         tx.commit()?;
         let _ = self.record_sync_state(path, &content);

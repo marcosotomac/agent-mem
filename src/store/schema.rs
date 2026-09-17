@@ -1,7 +1,7 @@
-use super::Store;
+use super::{Store, insert_memory_routes};
 use crate::error::{Error, Result};
 use crate::store::models::StoreStats;
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::fs;
 use std::path::Path;
 
@@ -20,14 +20,26 @@ impl Store {
 
         let mut conn = Connection::open(db_path)?;
         Self::configure_conn(&mut conn, need_write)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            #[cfg(feature = "semantic-local")]
+            db_path: Some(db_path.to_path_buf()),
+            #[cfg(feature = "semantic-local")]
+            semantic_runtime: std::cell::RefCell::new(super::semantic::SemanticRuntime::default()),
+        })
     }
 
     /// Open an in-memory database instance (ideal for isolated unit tests).
     pub fn open_in_memory() -> Result<Self> {
         let mut conn = Connection::open_in_memory()?;
         Self::configure_conn(&mut conn, true)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            #[cfg(feature = "semantic-local")]
+            db_path: None,
+            #[cfg(feature = "semantic-local")]
+            semantic_runtime: std::cell::RefCell::new(super::semantic::SemanticRuntime::default()),
+        })
     }
 
     pub(crate) fn configure_conn(conn: &mut Connection, need_write: bool) -> Result<()> {
@@ -40,8 +52,8 @@ impl Store {
 
         let user_version: u32 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
 
-        if user_version >= 3 {
-            // Fast path: schema and migrations already initialized to v3. Bypasses DDL and table scans completely!
+        if user_version >= 5 {
+            // Fast path: schema and migrations already initialized. Bypass DDL and table scans.
             return Ok(());
         }
 
@@ -84,9 +96,44 @@ impl Store {
                 );
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                     key, val, anchor, archive_reason, kind, tokenize='porter unicode61'
+                );
+                CREATE TABLE IF NOT EXISTS memory_routes (
+                    memory_key TEXT NOT NULL,
+                    route_kind INTEGER NOT NULL,
+                    route_hash INTEGER NOT NULL,
+                    PRIMARY KEY (memory_key, route_kind, route_hash)
+                ) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_memory_routes_lookup
+                    ON memory_routes(route_kind, route_hash, memory_key);
+                CREATE TABLE IF NOT EXISTS semantic_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    generation TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    dimensions INTEGER NOT NULL,
+                    records_count INTEGER NOT NULL,
+                    built_at INTEGER NOT NULL,
+                    dirty INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS semantic_records (
+                    semantic_id INTEGER PRIMARY KEY,
+                    memory_key TEXT NOT NULL UNIQUE,
+                    fingerprint_hi INTEGER NOT NULL,
+                    fingerprint_lo INTEGER NOT NULL
                 );",
             )?;
-            tx.execute("PRAGMA user_version = 3;", [])?;
+            tx.execute("PRAGMA user_version = 5;", [])?;
+            tx.commit()?;
+        } else if user_version == 4 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            create_semantic_schema(&tx)?;
+            tx.execute("PRAGMA user_version = 5;", [])?;
+            tx.commit()?;
+        } else if user_version == 3 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            create_route_schema(&tx)?;
+            backfill_routes(&tx)?;
+            create_semantic_schema(&tx)?;
+            tx.execute("PRAGMA user_version = 5;", [])?;
             tx.commit()?;
         } else {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -166,7 +213,10 @@ impl Store {
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) SELECT key, val, anchor, archive_reason, kind FROM memories;",
                 [],
             )?;
-            tx.execute("PRAGMA user_version = 3;", [])?;
+            create_route_schema(&tx)?;
+            backfill_routes(&tx)?;
+            create_semantic_schema(&tx)?;
+            tx.execute("PRAGMA user_version = 5;", [])?;
             tx.commit()?;
         }
 
@@ -208,4 +258,57 @@ impl Store {
             sessions_count,
         })
     }
+}
+
+fn create_route_schema(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_routes (
+            memory_key TEXT NOT NULL,
+            route_kind INTEGER NOT NULL,
+            route_hash INTEGER NOT NULL,
+            PRIMARY KEY (memory_key, route_kind, route_hash)
+        ) WITHOUT ROWID;",
+    )?;
+    Ok(())
+}
+
+fn create_semantic_schema(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS semantic_state (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            generation TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            records_count INTEGER NOT NULL,
+            built_at INTEGER NOT NULL,
+            dirty INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS semantic_records (
+            semantic_id INTEGER PRIMARY KEY,
+            memory_key TEXT NOT NULL UNIQUE,
+            fingerprint_hi INTEGER NOT NULL,
+            fingerprint_lo INTEGER NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+fn backfill_routes(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute("DROP INDEX IF EXISTS idx_memory_routes_lookup;", [])?;
+    tx.execute("DELETE FROM memory_routes;", [])?;
+    let mut select = tx.prepare("SELECT key, anchor FROM memories WHERE anchor IS NOT NULL;")?;
+    let mut rows = select.query([])?;
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let anchor: String = row.get(1)?;
+        insert_memory_routes(tx, &key, Some(&anchor))?;
+    }
+    drop(rows);
+    drop(select);
+    tx.execute(
+        "CREATE INDEX idx_memory_routes_lookup
+         ON memory_routes(route_kind, route_hash, memory_key);",
+        [],
+    )?;
+    Ok(())
 }
