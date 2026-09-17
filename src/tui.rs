@@ -14,7 +14,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Tabs, Wrap,
+};
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -67,14 +70,18 @@ pub struct App {
     pub rules: Vec<RuleRecord>,
     pub filtered_indices: Vec<usize>,
     pub selected_rule_idx: usize,
+    pub rules_state: ListState,
     pub relations: Vec<crate::store::RelationRecord>,
     pub sessions: Vec<SessionEntry>,
     pub selected_session_idx: usize,
+    pub sessions_state: ListState,
     pub projects: Vec<crate::registry::ProjectRecord>,
     pub selected_project_idx: usize,
+    pub projects_state: ListState,
     pub git_doctor: GitDoctorReport,
     pub client_statuses: Vec<ClientStatus>,
     pub selected_client_idx: usize,
+    pub clients_state: ListState,
     pub toast: Option<(String, Instant)>,
     pub should_quit: bool,
 }
@@ -94,14 +101,18 @@ impl App {
             rules: Vec::new(),
             filtered_indices: Vec::new(),
             selected_rule_idx: 0,
+            rules_state: ListState::default(),
             relations: Vec::new(),
             sessions: Vec::new(),
             selected_session_idx: 0,
+            sessions_state: ListState::default(),
             projects: Vec::new(),
             selected_project_idx: 0,
+            projects_state: ListState::default(),
             git_doctor,
             client_statuses,
             selected_client_idx: 0,
+            clients_state: ListState::default(),
             toast: None,
             should_quit: false,
         };
@@ -159,8 +170,12 @@ impl App {
 
         if self.filtered_indices.is_empty() {
             self.selected_rule_idx = 0;
+            self.rules_state.select(None);
         } else if self.selected_rule_idx >= self.filtered_indices.len() {
             self.selected_rule_idx = self.filtered_indices.len().saturating_sub(1);
+            self.rules_state.select(Some(self.selected_rule_idx));
+        } else {
+            self.rules_state.select(Some(self.selected_rule_idx));
         }
     }
 
@@ -328,18 +343,21 @@ impl App {
                 if !self.filtered_indices.is_empty() {
                     self.selected_rule_idx =
                         (self.selected_rule_idx + 1).min(self.filtered_indices.len() - 1);
+                    self.rules_state.select(Some(self.selected_rule_idx));
                 }
             }
             ActiveTab::Sessions => {
                 if !self.sessions.is_empty() {
                     self.selected_session_idx =
                         (self.selected_session_idx + 1).min(self.sessions.len() - 1);
+                    self.sessions_state.select(Some(self.selected_session_idx));
                 }
             }
             ActiveTab::Projects => {
                 if !self.projects.is_empty() {
                     self.selected_project_idx =
                         (self.selected_project_idx + 1).min(self.projects.len() - 1);
+                    self.projects_state.select(Some(self.selected_project_idx));
                 }
             }
             ActiveTab::Doctor => {
@@ -351,6 +369,7 @@ impl App {
                 if detected_count > 0 {
                     self.selected_client_idx =
                         (self.selected_client_idx + 1).min(detected_count - 1);
+                    self.clients_state.select(Some(self.selected_client_idx));
                 }
             }
             ActiveTab::Help => {}
@@ -361,15 +380,169 @@ impl App {
         match self.active_tab {
             ActiveTab::Rules => {
                 self.selected_rule_idx = self.selected_rule_idx.saturating_sub(1);
+                if !self.filtered_indices.is_empty() {
+                    self.rules_state.select(Some(self.selected_rule_idx));
+                }
             }
             ActiveTab::Sessions => {
                 self.selected_session_idx = self.selected_session_idx.saturating_sub(1);
+                if !self.sessions.is_empty() {
+                    self.sessions_state.select(Some(self.selected_session_idx));
+                }
             }
             ActiveTab::Projects => {
                 self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
+                if !self.projects.is_empty() {
+                    self.projects_state.select(Some(self.selected_project_idx));
+                }
             }
             ActiveTab::Doctor => {
                 self.selected_client_idx = self.selected_client_idx.saturating_sub(1);
+                let detected_count = self
+                    .client_statuses
+                    .iter()
+                    .filter(|c| c.installed || c.configured)
+                    .count();
+                if detected_count > 0 {
+                    self.clients_state.select(Some(self.selected_client_idx));
+                }
+            }
+            ActiveTab::Help => {}
+        }
+    }
+
+    pub fn page_down(&mut self) {
+        match self.active_tab {
+            ActiveTab::Rules => {
+                if !self.filtered_indices.is_empty() {
+                    self.selected_rule_idx =
+                        (self.selected_rule_idx + 10).min(self.filtered_indices.len() - 1);
+                    self.rules_state.select(Some(self.selected_rule_idx));
+                }
+            }
+            ActiveTab::Sessions => {
+                if !self.sessions.is_empty() {
+                    self.selected_session_idx =
+                        (self.selected_session_idx + 10).min(self.sessions.len() - 1);
+                    self.sessions_state.select(Some(self.selected_session_idx));
+                }
+            }
+            ActiveTab::Projects => {
+                if !self.projects.is_empty() {
+                    self.selected_project_idx =
+                        (self.selected_project_idx + 10).min(self.projects.len() - 1);
+                    self.projects_state.select(Some(self.selected_project_idx));
+                }
+            }
+            ActiveTab::Doctor => {
+                let detected_count = self
+                    .client_statuses
+                    .iter()
+                    .filter(|c| c.installed || c.configured)
+                    .count();
+                if detected_count > 0 {
+                    self.selected_client_idx =
+                        (self.selected_client_idx + 10).min(detected_count - 1);
+                    self.clients_state.select(Some(self.selected_client_idx));
+                }
+            }
+            ActiveTab::Help => {}
+        }
+    }
+
+    pub fn page_up(&mut self) {
+        match self.active_tab {
+            ActiveTab::Rules => {
+                self.selected_rule_idx = self.selected_rule_idx.saturating_sub(10);
+                if !self.filtered_indices.is_empty() {
+                    self.rules_state.select(Some(self.selected_rule_idx));
+                }
+            }
+            ActiveTab::Sessions => {
+                self.selected_session_idx = self.selected_session_idx.saturating_sub(10);
+                if !self.sessions.is_empty() {
+                    self.sessions_state.select(Some(self.selected_session_idx));
+                }
+            }
+            ActiveTab::Projects => {
+                self.selected_project_idx = self.selected_project_idx.saturating_sub(10);
+                if !self.projects.is_empty() {
+                    self.projects_state.select(Some(self.selected_project_idx));
+                }
+            }
+            ActiveTab::Doctor => {
+                self.selected_client_idx = self.selected_client_idx.saturating_sub(10);
+                let detected_count = self
+                    .client_statuses
+                    .iter()
+                    .filter(|c| c.installed || c.configured)
+                    .count();
+                if detected_count > 0 {
+                    self.clients_state.select(Some(self.selected_client_idx));
+                }
+            }
+            ActiveTab::Help => {}
+        }
+    }
+
+    pub fn first_item(&mut self) {
+        match self.active_tab {
+            ActiveTab::Rules => {
+                if !self.filtered_indices.is_empty() {
+                    self.selected_rule_idx = 0;
+                    self.rules_state.select(Some(0));
+                }
+            }
+            ActiveTab::Sessions => {
+                if !self.sessions.is_empty() {
+                    self.selected_session_idx = 0;
+                    self.sessions_state.select(Some(0));
+                }
+            }
+            ActiveTab::Projects => {
+                if !self.projects.is_empty() {
+                    self.selected_project_idx = 0;
+                    self.projects_state.select(Some(0));
+                }
+            }
+            ActiveTab::Doctor => {
+                self.selected_client_idx = 0;
+                self.clients_state.select(Some(0));
+            }
+            ActiveTab::Help => {}
+        }
+    }
+
+    pub fn last_item(&mut self) {
+        match self.active_tab {
+            ActiveTab::Rules => {
+                if !self.filtered_indices.is_empty() {
+                    self.selected_rule_idx = self.filtered_indices.len() - 1;
+                    self.rules_state.select(Some(self.selected_rule_idx));
+                }
+            }
+            ActiveTab::Sessions => {
+                if !self.sessions.is_empty() {
+                    self.selected_session_idx = self.sessions.len() - 1;
+                    self.sessions_state.select(Some(self.selected_session_idx));
+                }
+            }
+            ActiveTab::Projects => {
+                if !self.projects.is_empty() {
+                    self.selected_project_idx = self.projects.len() - 1;
+                    self.projects_state.select(Some(self.selected_project_idx));
+                }
+            }
+            ActiveTab::Doctor => {
+                let detected_count = self
+                    .client_statuses
+                    .iter()
+                    .filter(|c| c.installed || c.configured)
+                    .count();
+                if detected_count > 0 {
+                    self.selected_client_idx = detected_count - 1;
+                    self.clients_state.select(Some(self.selected_client_idx));
+                }
             }
             ActiveTab::Help => {}
         }
@@ -411,6 +584,10 @@ impl App {
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.next_item(),
                 KeyCode::Char('k') | KeyCode::Up => self.prev_item(),
+                KeyCode::PageDown => self.page_down(),
+                KeyCode::PageUp => self.page_up(),
+                KeyCode::Home | KeyCode::Char('g') => self.first_item(),
+                KeyCode::End | KeyCode::Char('G') => self.last_item(),
                 KeyCode::Char('a') if self.active_tab == ActiveTab::Rules => {
                     self.toggle_archive_selected()?;
                 }
@@ -654,7 +831,7 @@ fn run_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut A
     Ok(())
 }
 
-fn render_ui(f: &mut ratatui::Frame, app: &App) {
+pub fn render_ui(f: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -775,7 +952,7 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(meta, header_chunks[2]);
 }
 
-fn render_rules_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
+fn render_rules_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
@@ -875,15 +1052,41 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
         format!(" Rules ({}) ", app.rules.len())
     };
 
-    let rules_list = List::new(items).block(
-        Block::default()
-            .title(list_title)
-            .title_style(Style::default().fg(MUTED))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(SUBTLE)),
-    );
-    f.render_widget(rules_list, left_chunks[1]);
+    let rules_list = List::new(items)
+        .block(
+            Block::default()
+                .title(list_title)
+                .title_style(Style::default().fg(MUTED))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(SUBTLE)),
+        )
+        .highlight_style(Style::default().bg(BG_SELECT));
+
+    let selected = if app.filtered_indices.is_empty() {
+        None
+    } else {
+        Some(app.selected_rule_idx)
+    };
+    app.rules_state.select(selected);
+    f.render_stateful_widget(rules_list, left_chunks[1], &mut app.rules_state);
+
+    if app.filtered_indices.len() > left_chunks[1].height.saturating_sub(2) as usize {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(app.filtered_indices.len())
+            .position(app.selected_rule_idx);
+        f.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .thumb_symbol("█")
+                .track_symbol(None)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .style(Style::default().fg(SUBTLE)),
+            left_chunks[1],
+            &mut scrollbar_state,
+        );
+    }
 
     // Right column: Detail Inspector
     let selected_rule = app.current_selected_rule();
@@ -991,7 +1194,7 @@ fn render_rules_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_sessions_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
+fn render_sessions_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
@@ -1018,15 +1221,41 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let list = List::new(session_items).block(
-        Block::default()
-            .title(format!(" Checkpoints ({}) ", app.sessions.len()))
-            .title_style(Style::default().fg(MUTED))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(SUBTLE)),
-    );
-    f.render_widget(list, chunks[0]);
+    let list = List::new(session_items)
+        .block(
+            Block::default()
+                .title(format!(" Checkpoints ({}) ", app.sessions.len()))
+                .title_style(Style::default().fg(MUTED))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(SUBTLE)),
+        )
+        .highlight_style(Style::default().bg(BG_SELECT));
+
+    let selected = if app.sessions.is_empty() {
+        None
+    } else {
+        Some(app.selected_session_idx)
+    };
+    app.sessions_state.select(selected);
+    f.render_stateful_widget(list, chunks[0], &mut app.sessions_state);
+
+    if app.sessions.len() > chunks[0].height.saturating_sub(2) as usize {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(app.sessions.len())
+            .position(app.selected_session_idx);
+        f.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .thumb_symbol("█")
+                .track_symbol(None)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .style(Style::default().fg(SUBTLE)),
+            chunks[0],
+            &mut scrollbar_state,
+        );
+    }
 
     let detail_block = Block::default()
         .title(" Checkpoint Summary ")
@@ -1061,7 +1290,7 @@ fn render_sessions_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_projects_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
+fn render_projects_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
@@ -1100,18 +1329,44 @@ fn render_projects_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let list = List::new(project_items).block(
-        Block::default()
-            .title(format!(
-                " Registered Repositories ({}) ",
-                app.projects.len()
-            ))
-            .title_style(Style::default().fg(MUTED))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(SUBTLE)),
-    );
-    f.render_widget(list, chunks[0]);
+    let list = List::new(project_items)
+        .block(
+            Block::default()
+                .title(format!(
+                    " Registered Repositories ({}) ",
+                    app.projects.len()
+                ))
+                .title_style(Style::default().fg(MUTED))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(SUBTLE)),
+        )
+        .highlight_style(Style::default().bg(BG_SELECT));
+
+    let selected = if app.projects.is_empty() {
+        None
+    } else {
+        Some(app.selected_project_idx)
+    };
+    app.projects_state.select(selected);
+    f.render_stateful_widget(list, chunks[0], &mut app.projects_state);
+
+    if app.projects.len() > chunks[0].height.saturating_sub(2) as usize {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(app.projects.len())
+            .position(app.selected_project_idx);
+        f.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .thumb_symbol("█")
+                .track_symbol(None)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .style(Style::default().fg(SUBTLE)),
+            chunks[0],
+            &mut scrollbar_state,
+        );
+    }
 
     let detail_block = Block::default()
         .title(" Repository Overview & Cockpit ")
@@ -1211,7 +1466,7 @@ fn render_projects_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_doctor_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
+fn render_doctor_tab(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let top_bottom = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(9), Constraint::Min(8)])
@@ -1386,15 +1641,41 @@ fn render_doctor_tab(f: &mut ratatui::Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let client_list = List::new(client_items).block(
-        Block::default()
-            .title(format!(" Detected AI Clients & MCP ({} on system) - [i] Install selected, [I] Install ALL ", detected_clients.len()))
-            .title_style(Style::default().fg(MUTED))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(SUBTLE)),
-    );
-    f.render_widget(client_list, top_bottom[1]);
+    let client_list = List::new(client_items)
+        .block(
+            Block::default()
+                .title(format!(" Detected AI Clients & MCP ({} on system) - [i] Install selected, [I] Install ALL ", detected_clients.len()))
+                .title_style(Style::default().fg(MUTED))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(SUBTLE)),
+        )
+        .highlight_style(Style::default().bg(BG_SELECT));
+
+    let selected = if detected_clients.is_empty() {
+        None
+    } else {
+        Some(app.selected_client_idx)
+    };
+    app.clients_state.select(selected);
+    f.render_stateful_widget(client_list, top_bottom[1], &mut app.clients_state);
+
+    if detected_clients.len() > top_bottom[1].height.saturating_sub(2) as usize {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(detected_clients.len())
+            .position(app.selected_client_idx);
+        f.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .thumb_symbol("█")
+                .track_symbol(None)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .style(Style::default().fg(SUBTLE)),
+            top_bottom[1],
+            &mut scrollbar_state,
+        );
+    }
 }
 
 fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
@@ -1412,6 +1693,20 @@ fn render_help_tab(f: &mut ratatui::Frame, area: Rect) {
             Span::styled("    j / ↓ , k / ↑ ", Style::default().fg(ACCENT)),
             Span::styled(
                 "Move cursor up/down across items",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("    PgDn / PgUp   ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Jump down/up by 10 items",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("    Home / End, g/G ", Style::default().fg(ACCENT)),
+            Span::styled(
+                "Jump to first/last item in list",
                 Style::default().fg(MUTED),
             ),
         ]),
