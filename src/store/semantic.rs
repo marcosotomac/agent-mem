@@ -5,6 +5,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::VecDeque;
 use std::env;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -91,12 +92,28 @@ fn with_model<T>(operation: impl FnOnce(&mut TextEmbedding) -> Result<T>) -> Res
     if guard.is_none() {
         let cache_dir = model_cache_dir();
         fs::create_dir_all(&cache_dir)?;
+        let is_tty = std::io::stderr().is_terminal() && env::var("AGENT_MEM_QUIET").is_err();
+        let model_dir = cache_dir.join("models--intfloat--multilingual-e5-small");
+        let needs_download = !model_dir.exists();
+
+        if is_tty && needs_download {
+            eprintln!(
+                "  \x1b[38;5;150m↓\x1b[0m  \x1b[38;5;245mdownloading local embedding model\x1b[0m \x1b[1;37m{MODEL_ID}\x1b[0m \x1b[38;5;240m(first-time setup, cached globally)\x1b[0m"
+            );
+        }
+
         let options = TextInitOptions::new(EmbeddingModel::MultilingualE5Small)
             .with_cache_dir(cache_dir)
             .with_max_length(MODEL_MAX_TOKENS)
             .with_intra_threads(configured_threads())
-            .with_show_download_progress(false);
-        *guard = Some(TextEmbedding::try_new(options).map_err(semantic_error)?);
+            .with_show_download_progress(is_tty);
+        let embedding = TextEmbedding::try_new(options).map_err(semantic_error)?;
+
+        if is_tty && needs_download {
+            eprintln!("  \x1b[38;5;150m✓\x1b[0m  \x1b[38;5;245mmodel ready\x1b[0m");
+        }
+
+        *guard = Some(embedding);
     }
     operation(guard.as_mut().expect("embedding model initialized"))
 }
@@ -258,6 +275,12 @@ impl Store {
         let mut corpus = (0x243f6a8885a308d3, 0x13198a2e03707344);
 
         if records_count > 0 {
+            if std::io::stderr().is_terminal() && env::var("AGENT_MEM_QUIET").is_err() {
+                eprintln!(
+                    "  \x1b[38;5;150m⟳\x1b[0m  \x1b[38;5;245mindexing semantic embeddings for\x1b[0m \x1b[1;37m{} memories\x1b[0m...",
+                    records_count
+                );
+            }
             with_model(|model| {
                 let mut stmt = self.conn.prepare(
                     "SELECT key, val, anchor, kind FROM memories

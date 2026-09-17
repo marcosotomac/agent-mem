@@ -614,29 +614,63 @@ pub fn print_help() {
 }
 
 pub fn print_semantic_build(report: &crate::store::SemanticBuildReport) {
-    println!(
-        "semantic index built: {} records, {} bytes, {} ms ({})",
-        report.records_count, report.index_bytes, report.elapsed_ms, report.model_id
-    );
+    if io::stdout().is_terminal() {
+        println!(
+            "  {EMERALD}✓{RESET}  {MUTED}semantic index{RESET}  {ACCENT}{} records{RESET}  {SUBTLE}·{RESET}  {MUTED}{} KB{RESET}  {SUBTLE}·{RESET}  {MUTED}{} ms{RESET}  {SUBTLE}({}){RESET}",
+            report.records_count,
+            report.index_bytes.div_ceil(1024),
+            report.elapsed_ms,
+            report.model_id
+        );
+    } else {
+        println!(
+            "semantic index built: {} records, {} bytes, {} ms ({})",
+            report.records_count, report.index_bytes, report.elapsed_ms, report.model_id
+        );
+    }
 }
 
 pub fn print_semantic_status(status: &crate::store::SemanticStatus) {
+    let is_tty = io::stdout().is_terminal();
     if !status.enabled {
-        println!("semantic fallback: disabled");
+        if is_tty {
+            println!("  {SUBTLE}◇{RESET}  {MUTED}semantic fallback{RESET}  {AMBER}disabled{RESET}");
+        } else {
+            println!("semantic fallback: disabled");
+        }
         return;
     }
-    let freshness = if status.dirty { "stale" } else { "fresh" };
-    println!(
-        "semantic fallback: enabled, {} records, {} bytes, {} ({})",
-        status.records_count,
-        status.index_bytes,
-        freshness,
-        status.model_id.as_deref().unwrap_or("unknown model")
-    );
+    let (dot, freshness) = if status.dirty {
+        (AMBER, "stale")
+    } else {
+        (EMERALD, "fresh")
+    };
+    if is_tty {
+        println!(
+            "  {dot}●{RESET}  {MUTED}semantic fallback{RESET}  {ACCENT}enabled{RESET}  {SUBTLE}·{RESET}  {MUTED}{} records{RESET}  {SUBTLE}·{RESET}  {MUTED}{} KB{RESET}  {SUBTLE}·{RESET}  {dot}{freshness}{RESET}  {SUBTLE}({}){RESET}",
+            status.records_count,
+            status.index_bytes.div_ceil(1024),
+            status.model_id.as_deref().unwrap_or("unknown model")
+        );
+    } else {
+        println!(
+            "semantic fallback: enabled, {} records, {} bytes, {} ({})",
+            status.records_count,
+            status.index_bytes,
+            freshness,
+            status.model_id.as_deref().unwrap_or("unknown model")
+        );
+    }
 }
 
 pub fn print_semantic_clear(removed_files: usize) {
-    println!("semantic fallback disabled: removed {removed_files} index file(s)");
+    if io::stdout().is_terminal() {
+        println!(
+            "  {EMERALD}✓{RESET}  {MUTED}semantic fallback{RESET}  {AMBER}disabled{RESET}  {SUBTLE}·{RESET}  {MUTED}purged {removed_files} index file(s){RESET}"
+        );
+    } else {
+        println!("semantic fallback disabled: removed {removed_files} index file(s)");
+    }
 }
 
 pub fn print_doctor(
