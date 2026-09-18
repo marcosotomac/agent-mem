@@ -1,4 +1,5 @@
 use agent_mem::mcp::{JsonRpcRequest, LEGACY_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION, McpServer};
+use agent_mem::registry::{ProjectRecord, ProjectRegistry};
 use agent_mem::store::Store;
 use serde_json::json;
 use std::fs;
@@ -10,6 +11,94 @@ fn modern_meta(version: &str) -> serde_json::Value {
         "io.modelcontextprotocol/protocolVersion": version,
         "io.modelcontextprotocol/clientCapabilities": {}
     })
+}
+
+#[test]
+fn test_mcp_routes_explicit_projects_from_global_client_cwd() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_routing_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let launcher = temp_dir.join("launcher");
+    let registry_dir = temp_dir.join("registry");
+    let alpha = temp_dir.join("alpha");
+    let beta = temp_dir.join("beta");
+    for path in [&launcher, &registry_dir, &alpha, &beta] {
+        fs::create_dir_all(path).unwrap();
+    }
+    Store::open(&alpha.join(".agent-mem/mem.db"), true).unwrap();
+    Store::open(&beta.join(".agent-mem/mem.db"), true).unwrap();
+
+    let record = |id: &str, name: &str, path: &std::path::Path| ProjectRecord {
+        id: id.into(),
+        name: name.into(),
+        canonical_path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
+        git_remote: None,
+        last_accessed: 0,
+        rules_count: 0,
+        archived_count: 0,
+        sessions_count: 0,
+        db_size_bytes: 0,
+    };
+    let registry = ProjectRegistry {
+        projects: vec![record("a1", "alpha", &alpha), record("b1", "beta", &beta)],
+    };
+    fs::write(
+        registry_dir.join("projects.json"),
+        serde_json::to_string(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-mem"))
+        .arg("mcp")
+        .current_dir(&launcher)
+        .env("AGENT_MEM_GLOBAL_DIR", &registry_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start MCP server");
+    let stdin = child.stdin.as_mut().unwrap();
+    for request in [
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mem_set","arguments":{"key":"routing/a","val":"alpha","project":"a1"}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mem_set","arguments":{"key":"routing/b","val":"beta","project":"beta"}}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mem_find","arguments":{"query":"routing","scope":"project"}}}),
+    ] {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[2]["result"]["isError"], true);
+    assert!(
+        responses[2]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Project is required")
+    );
+
+    let alpha_store = Store::open(&alpha.join(".agent-mem/mem.db"), false).unwrap();
+    let beta_store = Store::open(&beta.join(".agent-mem/mem.db"), false).unwrap();
+    assert_eq!(
+        alpha_store.get("routing/a").unwrap().as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(
+        beta_store.get("routing/b").unwrap().as_deref(),
+        Some("beta")
+    );
+    assert!(!launcher.join(".agent-mem").exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
@@ -380,6 +469,39 @@ fn test_mcp_tool_execution_and_dual_scopes() {
     assert!(text.contains("personal/editor: Neovim with Zellij"));
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcp_rejects_oversized_batch_without_partial_writes() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("agent_mem_mcp_batch_limit_{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+    let batch: Vec<_> = (0..257)
+        .map(|index| json!({"key": format!("rule/{index}"), "val": "bounded"}))
+        .collect();
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {"scope": "project", "batch": batch}
+        }),
+    };
+
+    let response = server.handle_request(&request).unwrap();
+    let result = response.result.unwrap();
+
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("256-item limit")
+    );
+    assert!(!temp_dir.join(".agent-mem/mem.db").exists());
+    fs::remove_dir_all(temp_dir).unwrap();
 }
 
 #[test]
@@ -881,6 +1003,168 @@ fn test_mcp_invalid_relation_is_rejected_before_storage_io() {
     let result = server.handle_request(&request).unwrap().result.unwrap();
     assert_eq!(result["isError"], true);
     assert!(!temp_dir.join(".agent-mem").join("mem.db").exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcp_context_full_rule_packing_and_global_space_reservation() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_packing_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let project_db = temp_dir.join(".agent-mem").join("mem.db");
+    let global_db = temp_dir.join("global.db");
+
+    // 1. Seed project with a huge 10KB rule AND a critical short authorization rule
+    let mut p_store = Store::open(&project_db, true).unwrap();
+    p_store
+        .set(
+            "gotcha/traceback",
+            &format!("Large stack trace: {}", "A".repeat(10 * 1024)),
+        )
+        .unwrap();
+    p_store
+        .set_entry(
+            "decision/auth",
+            "Require JWT RS256 authentication on all endpoints",
+            Some("src/auth/jwt.rs:1"),
+            Some("decision"),
+        )
+        .unwrap();
+    let _ = p_store
+        .session_add("feat: implement token verification")
+        .unwrap();
+    drop(p_store);
+
+    // 2. Seed global preferences
+    let mut g_store = Store::open(&global_db, true).unwrap();
+    g_store
+        .set("personal/style", "Favor immutability and pure functions")
+        .unwrap();
+    drop(g_store);
+
+    let server = McpServer::with_paths(temp_dir.clone(), global_db);
+
+    // 3. Call mem_context with scope="all" and limit=5
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_context",
+            "arguments": { "scope": "all", "limit": 5 }
+        }),
+    };
+    let res = server.handle_request(&req).unwrap().result.unwrap();
+    let text = res["content"][0]["text"].as_str().unwrap();
+
+    // A. Verify critical decision/auth is NOT hidden or crowded out by the large traceback rule
+    assert!(
+        text.contains(
+            "[decision] decision/auth: Require JWT RS256 authentication on all endpoints"
+        ),
+        "Critical brief authorization rule must be present in full"
+    );
+
+    // B. Verify large traceback rule was compactly bounded without starving the rest of the context
+    assert!(text.contains("gotcha/traceback"));
+    assert!(
+        text.contains("... [truncated; use mem_find key=\"gotcha/traceback\" for full content]")
+    );
+
+    // C. Verify sessions were not crowded out
+    assert!(text.contains("== SESSIONS =="));
+    assert!(text.contains("feat: implement token verification"));
+
+    // D. Verify global preferences were NOT starved out when scope="all"
+    assert!(text.contains("== GLOBAL PREFERENCES =="));
+    assert!(text.contains("personal/style: Favor immutability and pure functions"));
+
+    // E. Total text does not exceed budget
+    assert!(text.len() <= 16 * 1024);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcp_mem_set_batch_writes_and_single_export() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_batch_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let rules_path = temp_dir.join(".agent-rules");
+    fs::write(&rules_path, "# initial rules\n").unwrap();
+
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+
+    let batch_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {
+                "scope": "project",
+                "batch": [
+                    {
+                        "key": "gotcha/jwt_issuer",
+                        "val": "Validate issuer before expiration",
+                        "anchor": "src/auth.rs:15",
+                        "kind": "gotcha"
+                    },
+                    {
+                        "key": "decision/constant_time",
+                        "val": "Use constant time string comparison",
+                        "anchor": "src/crypto.rs:40",
+                        "kind": "decision",
+                        "rel": "relates_to:gotcha/jwt_issuer"
+                    },
+                    {
+                        "key": "rule/cache_ttl",
+                        "val": "Set redis cache TTL to 300s"
+                    }
+                ]
+            }
+        }),
+    };
+
+    let resp = server.handle_request(&batch_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"].as_bool(), None);
+    let text = res["content"][0]["text"].as_str().unwrap();
+    assert_eq!(text, "saved [project] 3 memories in batch");
+
+    // Verify .agent-rules exported with all 3 rules
+    let exported = fs::read_to_string(&rules_path).unwrap();
+    assert!(exported.contains("gotcha/jwt_issuer = Validate issuer before expiration"));
+    assert!(exported.contains("decision/constant_time = Use constant time string comparison"));
+    assert!(exported.contains("rule/cache_ttl = Set redis cache TTL to 300s"));
+
+    // Verify relations and find in SQLite
+    let find_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_find",
+            "arguments": { "query": "constant time", "scope": "project" }
+        }),
+    };
+    let find_resp = server.handle_request(&find_req).unwrap();
+    let find_text = find_resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(find_text.contains("[decision] decision/constant_time"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

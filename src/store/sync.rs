@@ -1,4 +1,4 @@
-use super::{Store, now_epoch};
+use super::{Store, insert_memory_routes, mark_semantic_dirty, now_epoch};
 use crate::error::{Error, Result};
 use crate::store::models::{ParsedRules, RuleRecord, SyncReport, infer_kind};
 use rusqlite::{Row, TransactionBehavior, params, types::Type, types::ValueRef};
@@ -382,6 +382,7 @@ impl Store {
             temp.write_all(content.as_bytes())?;
             drop(temp);
             fs::rename(&temp_path, path)?;
+            let _ = self.record_sync_state(path, &content);
             Ok(())
         })();
 
@@ -389,6 +390,41 @@ impl Store {
             let _ = fs::remove_file(&temp_path);
         }
         result
+    }
+
+    fn compute_content_hash(content: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub(crate) fn get_db_fingerprint(&self) -> Result<String> {
+        let fp: String = self.conn.query_row(
+            "SELECT printf('%d:%d:%d',
+                (SELECT COUNT(*) FROM memories),
+                (SELECT COALESCE(MAX(updated_at), 0) FROM memories),
+                (SELECT COUNT(*) FROM relations)
+            );",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(fp)
+    }
+
+    pub(crate) fn record_sync_state(&self, path: &Path, content: &str) -> Result<()> {
+        let content_hash = Self::compute_content_hash(content) as i64;
+        let db_state = self.get_db_fingerprint()?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS _sync_state (path TEXT PRIMARY KEY, content_hash INTEGER NOT NULL, db_state TEXT NOT NULL);",
+            [],
+        )?;
+        self.conn.execute(
+            "INSERT INTO _sync_state (path, content_hash, db_state) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash, db_state = excluded.db_state;",
+            rusqlite::params![path.to_string_lossy(), content_hash, db_state],
+        )?;
+        Ok(())
     }
 
     /// Reconcile SQLite database with a plain-text rules file (.agent-rules).
@@ -404,13 +440,77 @@ impl Store {
                 total,
                 file_created: true,
                 file_updated: false,
+                conflicts_resolved: 0,
             });
         }
 
+        const MAX_RULES_FILE_BYTES: u64 = 32 * 1024 * 1024;
+        let file_size = fs::metadata(path)?.len();
+        if file_size > MAX_RULES_FILE_BYTES {
+            return Err(crate::error::Error::Usage(format!(
+                "Rules file exceeds the {}-byte import limit",
+                MAX_RULES_FILE_BYTES
+            )));
+        }
         let content = fs::read_to_string(path)?;
+        let content_hash = Self::compute_content_hash(&content) as i64;
+        let db_state = self.get_db_fingerprint()?;
+
+        // Fast path: if the file content and database state have not changed since last sync/export,
+        // bypass parsing, memory allocation, transaction locking, and diffing entirely.
+        let is_noop: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sync_state');",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false)
+            && self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _sync_state WHERE path = ?1 AND content_hash = ?2 AND db_state = ?3);",
+                    rusqlite::params![path.to_string_lossy(), content_hash, db_state],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+
+        if is_noop {
+            let total: usize = self
+                .conn
+                .query_row("SELECT count(*) FROM memories;", [], |r| r.get(0))?;
+            return Ok(SyncReport {
+                path: path.to_path_buf(),
+                imported: total,
+                total,
+                file_created: false,
+                file_updated: false,
+                conflicts_resolved: 0,
+            });
+        }
+
         let (parsed, parse_error) = Self::parse_rules_with_error(&content);
         if let Some(error) = parse_error {
             return Err(error);
+        }
+
+        for rule in &parsed.rules {
+            super::validate_batch_rule(&super::BatchRule {
+                key: &rule.key,
+                val: &rule.val,
+                anchor: rule.anchor.as_deref(),
+                kind: Some(&rule.kind),
+                relation: None,
+            })?;
+        }
+        for (source, rel_type, target) in &parsed.relations {
+            super::validate_batch_rule(&super::BatchRule {
+                key: source,
+                val: "relation",
+                anchor: None,
+                kind: None,
+                relation: Some((rel_type, target)),
+            })?;
         }
 
         struct ParsedEntry<'a> {
@@ -421,9 +521,19 @@ impl Store {
             kind: &'a str,
         }
 
-        // Deduplicate in memory: if multiple conflict markers or duplicate lines exist, last one wins
+        // Deduplicate in memory: if multiple conflict markers or duplicate lines exist,
+        // resolve deterministically and detect contradictions for explicit provenance.
         let mut unique_rules: BTreeMap<&str, ParsedEntry> = BTreeMap::new();
+        let mut conflicts: Vec<(&str, &str, &str)> = Vec::new();
+
         for r in &parsed.rules {
+            if let Some(prev) = unique_rules.get(r.key.as_str())
+                && (prev.val != r.val.as_str()
+                    || prev.kind != r.kind.as_str()
+                    || prev.anchor != r.anchor.as_deref())
+            {
+                conflicts.push((r.key.as_str(), prev.val, r.val.as_str()));
+            }
             unique_rules.insert(
                 r.key.as_str(),
                 ParsedEntry {
@@ -436,15 +546,42 @@ impl Store {
             );
         }
 
+        let conflicts_resolved = conflicts.len();
+
+        // 1. Begin immediate transaction for atomic reconciliation and snapshot consistency
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("DELETE FROM memories;", [])?;
-        tx.execute("DELETE FROM memories_fts;", [])?;
-        tx.execute("DELETE FROM relations;", [])?;
 
         let now = now_epoch();
-        {
+
+        // Record conflict provenance in session audit log
+        if !conflicts.is_empty() {
+            let mut insert_sess =
+                tx.prepare_cached("INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);")?;
+            for (ckey, old_val, new_val) in &conflicts {
+                let summary = format!(
+                    "[conflict-resolved] '{}': superseded '{}' with '{}'",
+                    ckey, old_val, new_val
+                );
+                insert_sess.execute(params![summary, now])?;
+            }
+            drop(insert_sess);
+            tx.execute(
+                "DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY id DESC LIMIT 20);",
+                [],
+            )?;
+        }
+
+        let existing_count: usize =
+            tx.query_row("SELECT COUNT(*) FROM memories;", [], |r| r.get(0))?;
+        let rebuild_route_lookup = existing_count == 0 && unique_rules.len() >= 1_024;
+        if rebuild_route_lookup {
+            tx.execute("DROP INDEX IF EXISTS idx_memory_routes_lookup;", [])?;
+        }
+
+        if existing_count == 0 {
+            // Fast path for initial sync / empty database: direct inserts without diffing overhead
             let mut insert_mem = tx.prepare_cached(
                 "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
             )?;
@@ -456,7 +593,7 @@ impl Store {
                  ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
             )?;
 
-            for (key, entry) in unique_rules {
+            for (key, entry) in &unique_rules {
                 let arc_at = entry.archived_at.map(|_| now);
                 insert_mem.execute(params![
                     key,
@@ -474,13 +611,183 @@ impl Store {
                     entry.archive_reason,
                     entry.kind,
                 ])?;
+                insert_memory_routes(&tx, key, entry.anchor)?;
             }
 
             for (source, rel_type, target) in &parsed.relations {
                 insert_rel.execute(params![source, rel_type, target, now])?;
             }
+        } else {
+            // Incremental reconciliation: preserve timestamps for unmodified rules
+            struct ExistingRule {
+                val: String,
+                anchor: Option<String>,
+                archived_at: Option<i64>,
+                archive_reason: Option<String>,
+                kind: String,
+            }
+
+            let mut existing_map = std::collections::HashMap::with_capacity(existing_count);
+            {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT key, val, anchor, archived_at, archive_reason, kind FROM memories;",
+                )?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let key: String = row.get(0)?;
+                    existing_map.insert(
+                        key,
+                        ExistingRule {
+                            val: row.get(1)?,
+                            anchor: row.get(2)?,
+                            archived_at: row.get(3)?,
+                            archive_reason: row.get(4)?,
+                            kind: row.get(5)?,
+                        },
+                    );
+                }
+            }
+
+            let mut insert_mem = tx.prepare_cached(
+                "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(key) DO UPDATE SET
+                    val = excluded.val,
+                    updated_at = excluded.updated_at,
+                    anchor = excluded.anchor,
+                    archived_at = excluded.archived_at,
+                    archive_reason = excluded.archive_reason,
+                    kind = excluded.kind;",
+            )?;
+            let mut delete_mem = tx.prepare_cached("DELETE FROM memories WHERE key = ?1;")?;
+            let mut delete_fts = tx.prepare_cached("DELETE FROM memories_fts WHERE key = ?1;")?;
+            let mut insert_fts = tx.prepare_cached(
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, ?5);",
+            )?;
+            let mut delete_routes =
+                tx.prepare_cached("DELETE FROM memory_routes WHERE memory_key = ?1;")?;
+
+            for (key, entry) in &unique_rules {
+                match existing_map.get(*key) {
+                    Some(existing) => {
+                        let is_archived_match =
+                            existing.archived_at.is_some() == entry.archived_at.is_some();
+                        let is_unmodified = existing.val == entry.val
+                            && existing.kind == entry.kind
+                            && existing.anchor.as_deref() == entry.anchor
+                            && is_archived_match
+                            && existing.archive_reason.as_deref() == entry.archive_reason;
+
+                        if !is_unmodified {
+                            let arc = if entry.archived_at.is_some() {
+                                existing.archived_at.or(Some(now))
+                            } else {
+                                None
+                            };
+                            insert_mem.execute(params![
+                                key,
+                                entry.val,
+                                now,
+                                entry.anchor,
+                                arc,
+                                entry.archive_reason,
+                                entry.kind,
+                            ])?;
+                            delete_fts.execute(params![key])?;
+                            insert_fts.execute(params![
+                                key,
+                                entry.val,
+                                entry.anchor,
+                                entry.archive_reason,
+                                entry.kind,
+                            ])?;
+                            delete_routes.execute(params![key])?;
+                            insert_memory_routes(&tx, key, entry.anchor)?;
+                        }
+                    }
+                    None => {
+                        let arc = entry.archived_at.map(|_| now);
+                        insert_mem.execute(params![
+                            key,
+                            entry.val,
+                            now,
+                            entry.anchor,
+                            arc,
+                            entry.archive_reason,
+                            entry.kind,
+                        ])?;
+                        insert_fts.execute(params![
+                            key,
+                            entry.val,
+                            entry.anchor,
+                            entry.archive_reason,
+                            entry.kind,
+                        ])?;
+                        insert_memory_routes(&tx, key, entry.anchor)?;
+                    }
+                }
+            }
+
+            // Remove deleted rules not present in file
+            for key in existing_map.keys() {
+                if !unique_rules.contains_key(key.as_str()) {
+                    delete_mem.execute(params![key])?;
+                    delete_fts.execute(params![key])?;
+                    delete_routes.execute(params![key])?;
+                }
+            }
+
+            // Reconcile relations incrementally
+            let mut existing_relations = std::collections::HashSet::new();
+            {
+                let mut stmt =
+                    tx.prepare_cached("SELECT source_key, rel_type, target_key FROM relations;")?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let s: String = row.get(0)?;
+                    let r: String = row.get(1)?;
+                    let t: String = row.get(2)?;
+                    existing_relations.insert((s, r, t));
+                }
+            }
+
+            let target_relations: std::collections::HashSet<(String, String, String)> =
+                parsed.relations.iter().cloned().collect();
+
+            if existing_relations != target_relations {
+                let mut delete_rel = tx.prepare_cached(
+                    "DELETE FROM relations WHERE source_key = ?1 AND rel_type = ?2 AND target_key = ?3;",
+                )?;
+                let mut insert_rel = tx.prepare_cached(
+                    "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+                )?;
+
+                for rel in &existing_relations {
+                    if !target_relations.contains(rel) {
+                        delete_rel.execute(params![rel.0, rel.1, rel.2])?;
+                    }
+                }
+                for rel in &target_relations {
+                    if !existing_relations.contains(rel) {
+                        insert_rel.execute(params![rel.0, rel.1, rel.2, now])?;
+                    }
+                }
+            }
         }
+
+        if rebuild_route_lookup {
+            tx.execute(
+                "CREATE INDEX idx_memory_routes_lookup
+                 ON memory_routes(route_kind, route_hash, memory_key);",
+                [],
+            )?;
+        }
+
+        mark_semantic_dirty(&tx)?;
+
         tx.commit()?;
+        let _ = self.record_sync_state(path, &content);
 
         let total: usize = self
             .conn
@@ -492,6 +799,7 @@ impl Store {
             total,
             file_created: false,
             file_updated: false,
+            conflicts_resolved,
         })
     }
 
@@ -508,6 +816,7 @@ impl Store {
             total,
             file_created: !exists,
             file_updated: exists,
+            conflicts_resolved: 0,
         })
     }
 }

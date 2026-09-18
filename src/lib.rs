@@ -12,4 +12,4 @@ pub mod tui;
 
 pub use error::{Error, Result};
 pub use mcp::McpServer;
-pub use store::{RuleRecord, Store, SyncReport};
+pub use store::{BatchRule, RuleRecord, Store, SyncReport};

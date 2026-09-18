@@ -165,6 +165,119 @@ fn test_fts_porter_stemming_and_no_wildcard_pollution() {
 }
 
 #[test]
+fn test_fts_zero_hit_fallback_recovers_noisy_queries() {
+    let mut store = Store::open_in_memory().expect("open in memory db");
+    store
+        .set(
+            "decision/payments/idempotency",
+            "Require an Idempotency-Key header for every payment write",
+        )
+        .unwrap();
+    store
+        .set(
+            "decision/payments/retries",
+            "Retry payment reads with exponential backoff",
+        )
+        .unwrap();
+    store
+        .set(
+            "decision/orders/deduplication",
+            "Deduplicate order events by immutable event identifier",
+        )
+        .unwrap();
+
+    // The strict AND query has no hit because the stored rule does not contain
+    // "prevent" or "duplicate". The zero-hit OR fallback must still rank the
+    // rule containing the two discriminative terms first.
+    let results = store.find("prevent duplicate payment idempotency").unwrap();
+    assert!(!results.is_empty());
+    assert_eq!(results[0].key, "decision/payments/idempotency");
+}
+
+#[test]
+fn test_route_index_tracks_anchor_updates_without_stale_matches() {
+    let mut store = Store::open_in_memory().expect("open in memory db");
+    store
+        .set_with_anchor(
+            "decision/auth",
+            "Validate JWT issuer",
+            Some("services/api/src/auth.rs:10"),
+        )
+        .unwrap();
+
+    let (initial, _, _) = store
+        .context_for_files(&["services/api/src/auth.rs".into()], None, 10)
+        .unwrap();
+    assert!(initial.iter().any(|rule| rule.key == "decision/auth"));
+
+    store
+        .set_with_anchor(
+            "decision/auth",
+            "Validate JWT issuer in the worker",
+            Some("services/worker/src/token_validation.rs:20"),
+        )
+        .unwrap();
+
+    let (old_path, _, _) = store
+        .context_for_files(&["services/api/src/auth.rs".into()], None, 10)
+        .unwrap();
+    assert!(!old_path.iter().any(|rule| rule.key == "decision/auth"));
+    let (new_path, _, _) = store
+        .context_for_files(
+            &["services/worker/src/token_validation.rs".into()],
+            None,
+            10,
+        )
+        .unwrap();
+    assert!(new_path.iter().any(|rule| rule.key == "decision/auth"));
+}
+
+#[test]
+fn test_v3_migration_backfills_route_index() {
+    let dir =
+        std::env::temp_dir().join(format!("agent_mem_route_migration_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+
+    {
+        let mut store = Store::open(&db_path, true).unwrap();
+        store
+            .set_with_anchor(
+                "decision/api",
+                "Keep handlers idempotent",
+                Some("services/api/src/routes.rs:12"),
+            )
+            .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("DROP TABLE memory_routes; PRAGMA user_version = 3;")
+            .unwrap();
+    }
+
+    let store = Store::open(&db_path, false).expect("migrate v3 database");
+    let (rules, _, _) = store
+        .context_for_files(&["services/api/src/routes.rs".into()], None, 10)
+        .unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].key, "decision/api");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .unwrap();
+    let route_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memory_routes;", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 5);
+    assert!(route_count > 0);
+
+    drop(conn);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn test_zero_byte_database_resilience() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_zero_byte_{}",
@@ -754,6 +867,267 @@ fn test_export_uses_one_snapshot_during_concurrent_archiving() {
         );
     }
     writer.join().unwrap();
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_sync_preserves_historic_timestamps_for_unmodified_rules() {
+    let dir =
+        std::env::temp_dir().join(format!("agent_mem_sync_timestamps_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let rules_path = dir.join(".agent-rules");
+
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    // Seed rules with historic timestamps directly in SQLite
+    let historic_time = 1_600_000_000i64;
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind)
+             VALUES ('rule/preserved', 'value unchanged', ?1, 'src/lib.rs:1', NULL, NULL, 'rule'),
+                    ('rule/modified', 'old value', ?1, NULL, NULL, NULL, 'rule');",
+            rusqlite::params![historic_time],
+        )
+        .unwrap();
+    }
+
+    // Create file where rule/preserved is untouched and rule/modified has a new value
+    let file_content =
+        "rule/preserved = value unchanged (@ src/lib.rs:1)\nrule/modified = new upgraded value\n";
+    std::fs::write(&rules_path, file_content).unwrap();
+
+    let report = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report.total, 2);
+    assert_eq!(report.conflicts_resolved, 0);
+
+    // Verify timestamps in SQLite
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let preserved_updated: i64 = conn
+        .query_row(
+            "SELECT updated_at FROM memories WHERE key = 'rule/preserved';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved_updated, historic_time,
+        "Unmodified rule must retain historic timestamp"
+    );
+
+    let modified_updated: i64 = conn
+        .query_row(
+            "SELECT updated_at FROM memories WHERE key = 'rule/modified';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        modified_updated > historic_time,
+        "Modified rule must receive a fresh timestamp"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_sync_detects_and_logs_conflicts_with_provenance() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_sync_conflicts_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let rules_path = dir.join(".agent-rules");
+
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    // .agent-rules containing conflicting definitions for the same key
+    let file_content = r#"
+# Branch merge with conflicting rule definitions
+gotcha/auth = validate JWT issuer before expiration (@ src/auth.rs:12)
+gotcha/auth = use constant-time comparison for tokens (@ src/crypto.rs:45)
+"#;
+    std::fs::write(&rules_path, file_content).unwrap();
+
+    let report = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report.total, 1);
+    assert_eq!(
+        report.conflicts_resolved, 1,
+        "Must detect 1 conflict resolution"
+    );
+
+    // The winning value should be the last definition
+    let stored = store
+        .get_entry("gotcha/auth")
+        .unwrap()
+        .expect("Rule must exist");
+    assert_eq!(stored.val, "use constant-time comparison for tokens");
+    assert_eq!(stored.anchor.as_deref(), Some("src/crypto.rs:45"));
+
+    // Verify session audit log provenance
+    let sessions = store.session_list(10).unwrap();
+    assert!(
+        sessions.iter().any(|(_, summary)| {
+            summary.contains("[conflict-resolved] 'gotcha/auth'")
+                && summary.contains("validate JWT issuer")
+                && summary.contains("use constant-time comparison")
+        }),
+        "Session audit log must record conflict resolution with full provenance"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_store_set_batch_atomic_transaction() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_batch_set_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    let rules = [
+        agent_mem::BatchRule {
+            key: "auth/jwt",
+            val: "Use RS256 with key rotation",
+            anchor: Some("src/auth.rs:10"),
+            kind: Some("decision"),
+            relation: Some(("relates_to", "crypto/keys")),
+        },
+        agent_mem::BatchRule {
+            key: "crypto/keys",
+            val: "Rotate RSA keys every 90 days",
+            anchor: Some("src/crypto.rs:25"),
+            kind: Some("rule"),
+            relation: None,
+        },
+        agent_mem::BatchRule {
+            key: "db/wal",
+            val: "Enable WAL mode",
+            anchor: None,
+            kind: Some("rule"),
+            relation: None,
+        },
+    ];
+
+    let count = store.set_batch(&rules).unwrap();
+    assert_eq!(count, 3);
+
+    // Verify all memories, FTS, and relations were saved
+    assert_eq!(
+        store.get("auth/jwt").unwrap(),
+        Some("Use RS256 with key rotation".into())
+    );
+    assert_eq!(
+        store.get("crypto/keys").unwrap(),
+        Some("Rotate RSA keys every 90 days".into())
+    );
+    assert_eq!(store.get("db/wal").unwrap(), Some("Enable WAL mode".into()));
+
+    let relations = store.get_relations("auth/jwt").unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].0, "relates_to");
+    assert_eq!(relations[0].1, "crypto/keys");
+
+    let fts_hits = store.find("rotation").unwrap();
+    assert_eq!(fts_hits.len(), 2);
+
+    // Verify atomic rollback on invalid entry in batch
+    let invalid_rules = [
+        agent_mem::BatchRule {
+            key: "valid/one",
+            val: "Valid value",
+            anchor: None,
+            kind: None,
+            relation: None,
+        },
+        agent_mem::BatchRule {
+            key: "", // invalid empty key!
+            val: "Should trigger rollback",
+            anchor: None,
+            kind: None,
+            relation: None,
+        },
+    ];
+    let err = store.set_batch(&invalid_rules);
+    assert!(err.is_err());
+    assert_eq!(
+        store.get("valid/one").unwrap(),
+        None,
+        "Rollback must ensure no partial writes"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_sync_noop_detection_and_invalidation() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_sync_noop_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let rules_path = dir.join(".agent-rules");
+    let mut store = Store::open(&db_path, true).unwrap();
+
+    let initial_content = "rule/one = first rule\nrule/two = second rule\n";
+    std::fs::write(&rules_path, initial_content).unwrap();
+
+    // First sync imports rules
+    let report1 = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report1.total, 2);
+
+    // Second sync without modifications hits no-op path
+    let report2 = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report2.total, 2);
+
+    // File change invalidates no-op cache and triggers sync
+    std::fs::write(
+        &rules_path,
+        "rule/one = first rule\nrule/two = updated second rule\nrule/three = third rule\n",
+    )
+    .unwrap();
+    let report3 = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report3.total, 3);
+    assert_eq!(
+        store.get("rule/two").unwrap(),
+        Some("updated second rule".into())
+    );
+
+    // DB modification invalidates cache
+    store.set("rule/four", "fourth rule").unwrap();
+    // Subsequent sync reconciles to match the file (which only has three rules)
+    let report4 = store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(report4.total, 3);
+    assert_eq!(store.get("rule/four").unwrap(), None);
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_write_limits_reject_oversized_values_before_mutation() {
+    let mut store = Store::open_in_memory().unwrap();
+    let oversized = "x".repeat(agent_mem::store::MAX_VALUE_BYTES + 1);
+
+    let error = store.set("too-large", &oversized).unwrap_err();
+
+    assert!(error.to_string().contains("65536-byte limit"));
+    assert_eq!(store.get("too-large").unwrap(), None);
+}
+
+#[test]
+fn test_sync_rejects_oversized_rules_file_before_reading_it() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_sync_limit_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rules_path = dir.join(".agent-rules");
+    let file = std::fs::File::create(&rules_path).unwrap();
+    file.set_len(32 * 1024 * 1024 + 1).unwrap();
+    let mut store = Store::open(&dir.join("mem.db"), true).unwrap();
+
+    let error = store.sync_with_file(&rules_path).unwrap_err();
+
+    assert!(error.to_string().contains("33554432-byte import limit"));
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }

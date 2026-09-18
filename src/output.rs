@@ -499,6 +499,11 @@ pub fn print_sync(report: &crate::store::SyncReport) {
                 "  {EMERALD}✓{RESET}  {MUTED}exported{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules written{RESET}",
                 report.total
             );
+        } else if report.conflicts_resolved > 0 {
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active ({} conflict(s) resolved){RESET}",
+                report.total, report.conflicts_resolved
+            );
         } else {
             println!(
                 "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active{RESET}",
@@ -509,8 +514,13 @@ pub fn print_sync(report: &crate::store::SyncReport) {
         println!("created {} ({} rules)", file_name, report.total);
     } else if report.file_updated {
         println!("exported {} ({} rules)", file_name, report.total);
+    } else if report.conflicts_resolved > 0 {
+        println!(
+            "synchronized {} ({} rules, {} conflicts resolved)",
+            file_name, report.total, report.conflicts_resolved
+        );
     } else {
-        println!("sync: {} rules in {}", report.total, file_name);
+        println!("synchronized {} ({} rules)", file_name, report.total);
     }
 }
 
@@ -561,6 +571,9 @@ pub fn print_help() {
             "    {ACCENT}sync{RESET}    {MUTED}[file] [--export]{RESET} Synchronize team rules (.agent-rules)"
         );
         println!(
+            "    {ACCENT}semantic{RESET} {MUTED}[build|status|clear]{RESET} Manage local semantic fallback"
+        );
+        println!(
             "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>]{RESET} Export dense context"
         );
         println!(
@@ -594,9 +607,69 @@ pub fn print_help() {
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, clean, find, dump, context, session add, session list, hook post-commit, sync, mcp, mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, clean, find, dump, context, session add, session list, hook post-commit, sync, semantic, mcp, mcp install, doctor, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
+    }
+}
+
+pub fn print_semantic_build(report: &crate::store::SemanticBuildReport) {
+    if io::stdout().is_terminal() {
+        println!(
+            "  {EMERALD}✓{RESET}  {MUTED}semantic index{RESET}  {ACCENT}{} records{RESET}  {SUBTLE}·{RESET}  {MUTED}{} KB{RESET}  {SUBTLE}·{RESET}  {MUTED}{} ms{RESET}  {SUBTLE}({}){RESET}",
+            report.records_count,
+            report.index_bytes.div_ceil(1024),
+            report.elapsed_ms,
+            report.model_id
+        );
+    } else {
+        println!(
+            "semantic index built: {} records, {} bytes, {} ms ({})",
+            report.records_count, report.index_bytes, report.elapsed_ms, report.model_id
+        );
+    }
+}
+
+pub fn print_semantic_status(status: &crate::store::SemanticStatus) {
+    let is_tty = io::stdout().is_terminal();
+    if !status.enabled {
+        if is_tty {
+            println!("  {SUBTLE}◇{RESET}  {MUTED}semantic fallback{RESET}  {AMBER}disabled{RESET}");
+        } else {
+            println!("semantic fallback: disabled");
+        }
+        return;
+    }
+    let (dot, freshness) = if status.dirty {
+        (AMBER, "stale")
+    } else {
+        (EMERALD, "fresh")
+    };
+    if is_tty {
+        println!(
+            "  {dot}●{RESET}  {MUTED}semantic fallback{RESET}  {ACCENT}enabled{RESET}  {SUBTLE}·{RESET}  {MUTED}{} records{RESET}  {SUBTLE}·{RESET}  {MUTED}{} KB{RESET}  {SUBTLE}·{RESET}  {dot}{freshness}{RESET}  {SUBTLE}({}){RESET}",
+            status.records_count,
+            status.index_bytes.div_ceil(1024),
+            status.model_id.as_deref().unwrap_or("unknown model")
+        );
+    } else {
+        println!(
+            "semantic fallback: enabled, {} records, {} bytes, {} ({})",
+            status.records_count,
+            status.index_bytes,
+            freshness,
+            status.model_id.as_deref().unwrap_or("unknown model")
+        );
+    }
+}
+
+pub fn print_semantic_clear(removed_files: usize) {
+    if io::stdout().is_terminal() {
+        println!(
+            "  {EMERALD}✓{RESET}  {MUTED}semantic fallback{RESET}  {AMBER}disabled{RESET}  {SUBTLE}·{RESET}  {MUTED}purged {removed_files} index file(s){RESET}"
+        );
+    } else {
+        println!("semantic fallback disabled: removed {removed_files} index file(s)");
     }
 }
 

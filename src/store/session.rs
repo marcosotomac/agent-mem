@@ -1,4 +1,4 @@
-use super::{Store, now_epoch};
+use super::{Store, insert_memory_routes, now_epoch};
 use crate::error::Result;
 use crate::store::models::{SessionEntry, infer_kind};
 use rusqlite::{TransactionBehavior, params};
@@ -94,6 +94,11 @@ impl Store {
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
                 params![trimmed_key, trimmed_val, trimmed_anchor, effective_kind],
             )?;
+            tx.execute(
+                "DELETE FROM memory_routes WHERE memory_key = ?1;",
+                params![trimmed_key],
+            )?;
+            insert_memory_routes(&tx, trimmed_key, trimmed_anchor)?;
         }
 
         for (source, rel_type, target) in relations {

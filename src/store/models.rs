@@ -1,4 +1,20 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+
+pub(crate) const ROUTE_BASENAME: i64 = 1;
+pub(crate) const ROUTE_DIRECTORY: i64 = 2;
+pub(crate) const ROUTE_PATH_SUFFIX: i64 = 3;
+
+pub(crate) fn route_hash(route: &str) -> i64 {
+    // Stable FNV-1a. Hash collisions can only add a candidate: graph retrieval
+    // always validates the original anchor path before returning a rule.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in route.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash as i64
+}
 
 pub type RuleEntry = (String, String, Option<String>);
 pub type SessionEntry = (i64, String);
@@ -59,6 +75,58 @@ pub fn extract_anchor_paths(raw: &str) -> Vec<String> {
     paths
 }
 
+/// Build compact lookup routes for one normalized repository-relative path.
+/// The full path handles exact matches, directory ancestors handle sibling and
+/// parent/child matches, and the basename supplies validated relative matches.
+/// Single-segment directories are omitted because routes such as `src` or
+/// `services` produce excessively broad candidates in large monorepos.
+pub(crate) fn routing_entries_for_path(raw_path: &str) -> Vec<(i64, i64)> {
+    let normalized = raw_path
+        .trim()
+        .trim_start_matches('@')
+        .trim()
+        .replace('\\', "/");
+    let clean = normalized.trim_start_matches("./").trim_matches('/');
+    if clean.is_empty() {
+        return Vec::new();
+    }
+
+    let parts: Vec<&str> = clean.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut routes = Vec::with_capacity(parts.len() + 1);
+    routes.push((ROUTE_PATH_SUFFIX, route_hash(&parts.join("/"))));
+
+    if parts.len() >= 2 {
+        let directory = &parts[..parts.len() - 1];
+        for end in (2..=directory.len()).rev().take(8) {
+            routes.push((ROUTE_DIRECTORY, route_hash(&directory[..end].join("/"))));
+        }
+    }
+
+    routes.push((
+        ROUTE_BASENAME,
+        route_hash(&parts[parts.len() - 1].to_ascii_lowercase()),
+    ));
+
+    routes
+}
+
+pub(crate) fn memory_routes_for_anchor(anchor: Option<&str>) -> Vec<(i64, i64)> {
+    let mut routes = BTreeSet::new();
+    if let Some(anchor) = anchor {
+        for path in extract_anchor_paths(anchor).into_iter().take(8) {
+            routes.extend(routing_entries_for_path(&path));
+            if routes.len() >= 64 {
+                break;
+            }
+        }
+    }
+    routes.into_iter().take(64).collect()
+}
+
 pub fn infer_kind(key: &str) -> &'static str {
     // Prefixes are ASCII; avoid allocating a lowercase copy of every key.
     let starts_with = |prefix: &str| {
@@ -92,6 +160,7 @@ pub struct SyncReport {
     pub total: usize,
     pub file_created: bool,
     pub file_updated: bool,
+    pub conflicts_resolved: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,4 +172,24 @@ pub struct StoreStats {
     pub active_rules_count: usize,
     pub archived_rules_count: usize,
     pub sessions_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticStatus {
+    pub enabled: bool,
+    pub dirty: bool,
+    pub model_id: Option<String>,
+    pub records_count: usize,
+    pub built_at: Option<i64>,
+    pub index_path: Option<PathBuf>,
+    pub index_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticBuildReport {
+    pub records_count: usize,
+    pub elapsed_ms: u128,
+    pub index_path: PathBuf,
+    pub index_bytes: u64,
+    pub model_id: String,
 }

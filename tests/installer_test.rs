@@ -128,6 +128,34 @@ fn test_installer_injects_and_preserves_servers() {
     // Verify both agent-mem and other-tool exist!
     assert!(content2["mcpServers"]["agent-mem"].is_object());
     assert!(content2["mcpServers"]["other-tool"].is_object());
+    assert!(res2.path.with_file_name("mcp.json.agent-mem.bak").exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_installer_refuses_invalid_or_non_object_config_without_mutation() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_install_safety_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("mcp.json");
+
+    for invalid in ["{ broken", "[]"] {
+        fs::write(&config_path, invalid).unwrap();
+        let error = install_to_path(&config_path, TargetClient::Cursor).unwrap_err();
+        assert!(error.to_string().contains("Refusing to modify"));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), invalid);
+        assert!(
+            !config_path
+                .with_file_name("mcp.json.agent-mem.bak")
+                .exists()
+        );
+    }
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

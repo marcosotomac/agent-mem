@@ -58,6 +58,9 @@ pub enum Command {
         file: Option<String>,
         export: bool,
     },
+    SemanticBuild,
+    SemanticStatus,
+    SemanticClear,
     Mcp,
     McpInstall {
         client: Option<String>,
@@ -93,6 +96,8 @@ impl Command {
                 | Command::Clean { dry_run: false }
                 | Command::SessionAdd { .. }
                 | Command::Sync { export: false, .. }
+                | Command::SemanticBuild
+                | Command::SemanticClear
                 | Command::HookPostCommit { dry_run: false }
         )
     }
@@ -315,6 +320,14 @@ where
             }
             Ok(Command::Sync { file, export })
         }
+        "semantic" => match args.get(2).map(String::as_str) {
+            Some("build" | "rebuild" | "enable") => Ok(Command::SemanticBuild),
+            Some("status") => Ok(Command::SemanticStatus),
+            Some("clear" | "disable") => Ok(Command::SemanticClear),
+            _ => Err(Error::Usage(
+                "Usage: agent-mem semantic [build|status|clear]".to_string(),
+            )),
+        },
         "mcp" => {
             if args.len() >= 3 && args[2] == "install" {
                 let client = if args.len() >= 4 {
@@ -620,6 +633,48 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                         store.sync_with_file(&file_path)?
                     };
                     print_sync(&report);
+                }
+                Command::SemanticBuild => {
+                    #[cfg(feature = "semantic-local")]
+                    {
+                        let report = store.semantic_rebuild()?;
+                        print_semantic_build(&report);
+                    }
+                    #[cfg(not(feature = "semantic-local"))]
+                    {
+                        return Err(Error::Usage(
+                            "Local semantic search is not compiled in. Reinstall with '--features semantic-local'."
+                                .to_string(),
+                        ));
+                    }
+                }
+                Command::SemanticStatus => {
+                    #[cfg(feature = "semantic-local")]
+                    {
+                        let status = store.semantic_status()?;
+                        print_semantic_status(&status);
+                    }
+                    #[cfg(not(feature = "semantic-local"))]
+                    {
+                        return Err(Error::Usage(
+                            "Local semantic search is not compiled in. Reinstall with '--features semantic-local'."
+                                .to_string(),
+                        ));
+                    }
+                }
+                Command::SemanticClear => {
+                    #[cfg(feature = "semantic-local")]
+                    {
+                        let removed = store.semantic_clear()?;
+                        print_semantic_clear(removed);
+                    }
+                    #[cfg(not(feature = "semantic-local"))]
+                    {
+                        return Err(Error::Usage(
+                            "Local semantic search is not compiled in. Reinstall with '--features semantic-local'."
+                                .to_string(),
+                        ));
+                    }
                 }
                 Command::Init { .. }
                 | Command::Help

@@ -36,16 +36,32 @@ case "$OS" in
 esac
 
 if [ "$TAG" = "latest" ]; then
-  URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
+  RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
 else
-  URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+  RELEASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 fi
+URL="${RELEASE_URL}/${ASSET}"
 
 echo "Downloading agent-mem from ${URL}..."
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
 curl -sSfL "$URL" -o "${TEMP_DIR}/${ASSET}"
+curl -sSfL "${RELEASE_URL}/SHA256SUMS.txt" -o "${TEMP_DIR}/SHA256SUMS.txt"
+EXPECTED_SHA="$(awk -v asset="$ASSET" '$2 == asset { print $1 }' "${TEMP_DIR}/SHA256SUMS.txt")"
+if [ -z "$EXPECTED_SHA" ]; then
+  echo "Error: No published SHA-256 checksum for ${ASSET}" >&2
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_SHA="$(sha256sum "${TEMP_DIR}/${ASSET}" | awk '{ print $1 }')"
+else
+  ACTUAL_SHA="$(shasum -a 256 "${TEMP_DIR}/${ASSET}" | awk '{ print $1 }')"
+fi
+if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+  echo "Error: SHA-256 verification failed for ${ASSET}" >&2
+  exit 1
+fi
 tar -xzf "${TEMP_DIR}/${ASSET}" -C "${TEMP_DIR}"
 
 mkdir -p "$INSTALL_DIR"

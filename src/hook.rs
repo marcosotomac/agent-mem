@@ -62,6 +62,7 @@ pub struct ParsedCommit {
 pub struct ParsedTrailers {
     pub explicit_kind: Option<EntityKind>,
     pub explicit_content: Option<String>,
+    pub explicit_key: Option<String>,
     pub relations: Vec<(String, String)>, // (rel_type, target_key)
     pub breaking_change: Option<String>,
     pub non_trailer_body: Vec<String>,
@@ -175,6 +176,11 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
                     continuation_trailer = Some("pattern");
                     continue;
                 }
+                "key" | "memory-key" | "memory_key" => {
+                    trailers.explicit_key = Some(val_trim.to_string());
+                    continuation_trailer = None;
+                    continue;
+                }
                 "breaking change" | "breaking-change" => {
                     trailers.breaking_change = Some(val_trim.to_string());
                     continuation_trailer = Some("breaking");
@@ -261,6 +267,54 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
     trailers
 }
 
+/// Generate a concise, token-efficient slug from a commit summary.
+/// Bounded to at most 4 significant words and 32 characters, using zero intermediate allocations.
+pub fn slugify(s: &str) -> String {
+    let mut slug = String::with_capacity(32);
+    let mut word_count = 0;
+    let mut in_word = false;
+
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if !in_word {
+                if word_count >= 4 || slug.len() >= 26 {
+                    break;
+                }
+                if !slug.is_empty() {
+                    slug.push('-');
+                }
+                word_count += 1;
+                in_word = true;
+            }
+            slug.push(ch.to_ascii_lowercase());
+        } else {
+            in_word = false;
+        }
+    }
+
+    if slug.is_empty() {
+        "general".to_string()
+    } else {
+        slug
+    }
+}
+
+fn derive_entity_key(
+    prefix: &str,
+    scope: Option<&str>,
+    summary: &str,
+    explicit_key: Option<&str>,
+) -> String {
+    if let Some(ek) = explicit_key.map(str::trim).filter(|k| !k.is_empty()) {
+        return ek.to_string();
+    }
+    let slug = slugify(summary);
+    match scope.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sc) => format!("{}/{}/{}", prefix, sc, slug),
+        None => format!("{}/{}", prefix, slug),
+    }
+}
+
 /// Parse conventional commit subject and body deterministically in pure Rust.
 pub fn parse_conventional_commit(subject: &str, body: &str) -> ParsedCommit {
     let clean_subject = subject.trim();
@@ -319,10 +373,12 @@ pub fn parse_conventional_commit(subject: &str, body: &str) -> ParsedCommit {
     // Determine hypergraph entity
     let entity = if let Some(explicit_kind) = trailers.explicit_kind {
         let prefix = explicit_kind.default_key_prefix();
-        let key = match &scope {
-            Some(sc) => format!("{}/{}", prefix, sc),
-            None => format!("{}/general", prefix),
-        };
+        let key = derive_entity_key(
+            prefix,
+            scope.as_deref(),
+            &summary,
+            trailers.explicit_key.as_deref(),
+        );
         let val = trailers.explicit_content.unwrap_or_else(|| summary.clone());
         Some(EntityProposal {
             kind: explicit_kind,
@@ -330,10 +386,12 @@ pub fn parse_conventional_commit(subject: &str, body: &str) -> ParsedCommit {
             val,
         })
     } else if is_breaking {
-        let key = match &scope {
-            Some(sc) => format!("architecture/{}", sc),
-            None => "architecture/general".to_string(),
-        };
+        let key = derive_entity_key(
+            "architecture",
+            scope.as_deref(),
+            &summary,
+            trailers.explicit_key.as_deref(),
+        );
         let val = trailers
             .breaking_change
             .or(breaking_text_in_subject)
@@ -347,7 +405,12 @@ pub fn parse_conventional_commit(subject: &str, body: &str) -> ParsedCommit {
         match c_type.as_str() {
             "chore" | "docs" | "ci" | "test" | "tests" | "style" | "build" => None,
             "fix" | "bugfix" => scope.as_ref().map(|sc| {
-                let key = format!("gotcha/{}", sc);
+                let key = derive_entity_key(
+                    "gotcha",
+                    Some(sc),
+                    &summary,
+                    trailers.explicit_key.as_deref(),
+                );
                 let val = if !trailers.non_trailer_body.is_empty() {
                     let desc = trailers.non_trailer_body.join(" ");
                     format!("{}: {}", summary, desc)
@@ -361,7 +424,12 @@ pub fn parse_conventional_commit(subject: &str, body: &str) -> ParsedCommit {
                 }
             }),
             "feat" => scope.as_ref().map(|sc| {
-                let key = format!("decision/{}", sc);
+                let key = derive_entity_key(
+                    "decision",
+                    Some(sc),
+                    &summary,
+                    trailers.explicit_key.as_deref(),
+                );
                 EntityProposal {
                     kind: EntityKind::Decision,
                     key,
@@ -369,7 +437,12 @@ pub fn parse_conventional_commit(subject: &str, body: &str) -> ParsedCommit {
                 }
             }),
             "refactor" | "perf" => scope.as_ref().map(|sc| {
-                let key = format!("pattern/{}", sc);
+                let key = derive_entity_key(
+                    "pattern",
+                    Some(sc),
+                    &summary,
+                    trailers.explicit_key.as_deref(),
+                );
                 EntityProposal {
                     kind: EntityKind::Pattern,
                     key,
@@ -426,6 +499,31 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
     };
     let body = split.next().unwrap_or("").trim().to_string();
 
+    let deleted_output = Command::new("git")
+        .args([
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "--diff-filter=D",
+            "-r",
+            "HEAD",
+        ])
+        .current_dir(root)
+        .output();
+
+    let deleted_files: Vec<String> = match deleted_output {
+        Ok(out) if out.status.success() => {
+            let diff_str = String::from_utf8_lossy(&out.stdout);
+            diff_str
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     let diff_output = Command::new("git")
         .args([
             "diff-tree",
@@ -444,32 +542,7 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
             diff_str
                 .lines()
                 .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        }
-        _ => Vec::new(),
-    };
-
-    let deleted_output = Command::new("git")
-        .args([
-            "diff-tree",
-            "--root",
-            "--no-commit-id",
-            "--name-only",
-            "--diff-filter=D",
-            "-r",
-            "HEAD",
-        ])
-        .current_dir(root)
-        .output();
-
-    let deleted_files = match deleted_output {
-        Ok(out) if out.status.success() => {
-            let diff_str = String::from_utf8_lossy(&out.stdout);
-            diff_str
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
+                .filter(|l| !l.is_empty() && !deleted_files.contains(l))
                 .collect()
         }
         _ => Vec::new(),
@@ -555,7 +628,13 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
         .map(|(s, r, t)| (s.as_str(), r.as_str(), t.as_str()))
         .collect();
 
-    let session_id = store.capture_commit(entity_tuple, &rel_tuples, &commit_info.subject)?;
+    let short_hash = &commit_info.hash[..7.min(commit_info.hash.len())];
+    let session_summary = if !short_hash.is_empty() {
+        format!("[{}] {}", short_hash, commit_info.subject)
+    } else {
+        commit_info.subject.clone()
+    };
+    let session_id = store.capture_commit(entity_tuple, &rel_tuples, &session_summary)?;
 
     let zombies = if !commit_info.deleted_files.is_empty() {
         store.clean_deleted_files(&commit_info.deleted_files, false)?

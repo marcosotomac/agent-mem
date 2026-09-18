@@ -73,31 +73,34 @@ fn test_massive_scale_5k_records_and_sub_millisecond_latency() {
 }
 
 #[test]
-fn test_extreme_1mb_payload_handling() {
+fn test_payload_boundary_and_oversized_rejection() {
     let mut store = Store::open_in_memory().unwrap();
 
-    // 1 Megabyte payload
-    let mega_payload = "E".repeat(1024 * 1024);
+    let max_payload = "E".repeat(agent_mem::store::MAX_VALUE_BYTES);
     let key = "enterprise/large_spec";
     let anchor = "specs/openapi.json:1";
 
     let write_start = Instant::now();
     store
-        .set_with_anchor(key, &mega_payload, Some(anchor))
+        .set_with_anchor(key, &max_payload, Some(anchor))
         .unwrap();
     let write_duration = write_start.elapsed();
-    println!("1MB payload write duration: {:?}", write_duration);
+    println!("bounded payload write duration: {:?}", write_duration);
 
     let read_start = Instant::now();
-    let retrieved = store.get(key).unwrap().expect("1mb value retrieved");
+    let retrieved = store.get(key).unwrap().expect("bounded value retrieved");
     let read_duration = read_start.elapsed();
-    println!("1MB payload read duration: {:?}", read_duration);
+    println!("bounded payload read duration: {:?}", read_duration);
 
-    assert_eq!(retrieved.len(), 1024 * 1024);
+    assert_eq!(retrieved.len(), agent_mem::store::MAX_VALUE_BYTES);
     assert!(
         read_duration.as_millis() < 10,
-        "1MB memory mapped read must execute in < 10ms"
+        "bounded memory mapped read must execute in < 10ms"
     );
+
+    let oversized = "E".repeat(agent_mem::store::MAX_VALUE_BYTES + 1);
+    assert!(store.set("enterprise/rejected", &oversized).is_err());
+    assert_eq!(store.get("enterprise/rejected").unwrap(), None);
 }
 
 #[test]
@@ -200,6 +203,18 @@ fn test_massive_sync_reconciliation_scale() {
     assert!(
         sync_duration.as_millis() < 500,
         "2,000 rules sync must finish in < 500ms"
+    );
+
+    // Second sync on untouched file must hit no-op fast path (< 5ms)
+    let noop_start = Instant::now();
+    let noop_report = store.sync_with_file(&rules_path).unwrap();
+    let noop_duration = noop_start.elapsed();
+    assert_eq!(noop_report.total, 2_000);
+    assert_eq!(noop_report.conflicts_resolved, 0);
+    assert!(
+        noop_duration.as_millis() < 5,
+        "Unchanged 2,000 rules sync must hit no-op path in < 5ms, took {:?}",
+        noop_duration
     );
 
     // BM25 verify

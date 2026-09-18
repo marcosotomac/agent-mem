@@ -1,0 +1,32 @@
+name: Scheduled Scale Validation
+
+on:
+  schedule:
+    - cron: "30 4 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  indexed-routing-100k:
+    name: Indexed routing at 100k records
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run release-scale gate
+        run: cargo test --locked --release --test indexed_routing_scale_test -- --ignored --nocapture
+
+  semantic-quality:
+    name: Local semantic retrieval
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run model-backed retrieval gate
+        run: cargo test --locked --features semantic-local --test semantic_retrieval_test -- --ignored --nocapture

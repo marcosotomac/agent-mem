@@ -1,5 +1,11 @@
 use crate::error::Result;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
+#[cfg(feature = "semantic-local")]
+use std::cell::RefCell;
+use std::collections::HashSet;
+#[cfg(feature = "semantic-local")]
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn now_epoch() -> i64 {
@@ -13,11 +19,121 @@ pub mod graph;
 pub mod models;
 pub use models::*;
 pub mod schema;
+#[cfg(feature = "semantic-local")]
+pub mod semantic;
 pub mod session;
 pub mod sync;
 
+pub const MAX_KEY_BYTES: usize = 512;
+pub const MAX_VALUE_BYTES: usize = 64 * 1024;
+pub const MAX_ANCHOR_BYTES: usize = 4 * 1024;
+pub const MAX_KIND_BYTES: usize = 64;
+pub const MAX_RELATION_TYPE_BYTES: usize = 64;
+
 pub struct Store {
     pub(crate) conn: Connection,
+    #[cfg(feature = "semantic-local")]
+    pub(crate) db_path: Option<PathBuf>,
+    #[cfg(feature = "semantic-local")]
+    pub(crate) semantic_runtime: RefCell<semantic::SemanticRuntime>,
+}
+
+pub(crate) fn mark_semantic_dirty(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "UPDATE semantic_state SET dirty = 1 WHERE singleton = 1;",
+        [],
+    )?;
+    Ok(())
+}
+
+fn route_insert_sql(route_count: usize) -> &'static str {
+    static SQL: OnceLock<Vec<String>> = OnceLock::new();
+    &SQL.get_or_init(|| {
+        (0..=64)
+            .map(|count| {
+                let values = (0..count)
+                    .map(|index| {
+                        let kind_param = index * 2 + 2;
+                        let hash_param = kind_param + 1;
+                        format!("(?1, ?{kind_param}, ?{hash_param})")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "INSERT OR IGNORE INTO memory_routes (memory_key, route_kind, route_hash) VALUES {values};"
+                )
+            })
+            .collect()
+    })[route_count]
+}
+
+pub(crate) fn insert_memory_routes(
+    tx: &Transaction<'_>,
+    key: &str,
+    anchor: Option<&str>,
+) -> Result<()> {
+    let routes = memory_routes_for_anchor(anchor);
+    if routes.is_empty() {
+        return Ok(());
+    }
+    let mut values = Vec::with_capacity(routes.len() * 2 + 1);
+    values.push(rusqlite::types::Value::Text(key.to_owned()));
+    for (kind, hash) in &routes {
+        values.push(rusqlite::types::Value::Integer(*kind));
+        values.push(rusqlite::types::Value::Integer(*hash));
+    }
+    let mut stmt = tx.prepare_cached(route_insert_sql(routes.len()))?;
+    stmt.execute(params_from_iter(values))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchRule<'a> {
+    pub key: &'a str,
+    pub val: &'a str,
+    pub anchor: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub relation: Option<(&'a str, &'a str)>,
+}
+
+fn reject_oversized(field: &str, value: &str, max: usize) -> Result<()> {
+    if value.len() > max {
+        return Err(crate::error::Error::Usage(format!(
+            "Memory {field} exceeds the {max}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_batch_rule(rule: &BatchRule<'_>) -> Result<()> {
+    if rule.key.trim().is_empty() {
+        return Err(crate::error::Error::Usage(
+            "Memory key cannot be empty".into(),
+        ));
+    }
+    if rule.val.trim().is_empty() {
+        return Err(crate::error::Error::Usage(
+            "Memory value cannot be empty".into(),
+        ));
+    }
+    reject_oversized("key", rule.key, MAX_KEY_BYTES)?;
+    reject_oversized("value", rule.val, MAX_VALUE_BYTES)?;
+    if let Some(anchor) = rule.anchor {
+        reject_oversized("anchor", anchor, MAX_ANCHOR_BYTES)?;
+    }
+    if let Some(kind) = rule.kind {
+        reject_oversized("kind", kind, MAX_KIND_BYTES)?;
+    }
+    if let Some((rel_type, target)) = rule.relation {
+        if rel_type.trim().is_empty() || target.trim().is_empty() {
+            return Err(crate::error::Error::Usage(
+                "Relation type and target cannot be empty".into(),
+            ));
+        }
+        reject_oversized("relation type", rel_type, MAX_RELATION_TYPE_BYTES)?;
+        reject_oversized("relation target", target, MAX_KEY_BYTES)?;
+    }
+    Ok(())
 }
 
 impl Store {
@@ -32,6 +148,103 @@ impl Store {
         self.set_entry_with_relation(key, val, anchor, kind, None)
     }
 
+    /// Atomically insert or update a batch of memory rules in a single SQLite transaction.
+    pub fn set_batch<'a>(&mut self, rules: &[BatchRule<'a>]) -> Result<usize> {
+        if rules.is_empty() {
+            return Ok(0);
+        }
+
+        // Validate all rules up front before any transaction or I/O
+        for rule in rules {
+            validate_batch_rule(rule)?;
+        }
+
+        let now = now_epoch();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let empty_store: bool =
+            tx.query_row("SELECT COUNT(*) = 0 FROM memories;", [], |row| row.get(0))?;
+        let mut seen_batch_keys = HashSet::with_capacity(rules.len());
+        let unique_initial_load = empty_store
+            && rules
+                .iter()
+                .all(|rule| seen_batch_keys.insert(rule.key.trim()));
+        let rebuild_route_lookup = rules.len() >= 1_024 && empty_store;
+        if rebuild_route_lookup {
+            tx.execute("DROP INDEX IF EXISTS idx_memory_routes_lookup;", [])?;
+        }
+
+        {
+            let mut insert_mem = tx.prepare_cached(
+                "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
+                 ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor, archived_at = NULL, archive_reason = NULL, kind = excluded.kind;",
+            )?;
+            let mut delete_fts = tx.prepare_cached("DELETE FROM memories_fts WHERE key = ?1;")?;
+            let mut insert_fts = tx.prepare_cached(
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
+            )?;
+            let mut insert_rel = tx.prepare_cached(
+                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+            )?;
+            let mut delete_routes =
+                tx.prepare_cached("DELETE FROM memory_routes WHERE memory_key = ?1;")?;
+
+            for r in rules {
+                let trimmed_key = r.key.trim();
+                let trimmed_val = r.val.trim();
+                let trimmed_anchor = r.anchor.map(|a| a.trim()).filter(|a| !a.is_empty());
+                let effective_kind = r
+                    .kind
+                    .map(|k| k.trim())
+                    .filter(|k| !k.is_empty())
+                    .unwrap_or_else(|| infer_kind(trimmed_key));
+
+                insert_mem.execute(params![
+                    trimmed_key,
+                    trimmed_val,
+                    now,
+                    trimmed_anchor,
+                    effective_kind
+                ])?;
+                if !unique_initial_load {
+                    delete_fts.execute(params![trimmed_key])?;
+                    delete_routes.execute(params![trimmed_key])?;
+                }
+                insert_fts.execute(params![
+                    trimmed_key,
+                    trimmed_val,
+                    trimmed_anchor,
+                    effective_kind
+                ])?;
+                insert_memory_routes(&tx, trimmed_key, trimmed_anchor)?;
+
+                if let Some((rel_type, target)) = r.relation {
+                    insert_rel.execute(params![
+                        trimmed_key,
+                        rel_type.trim(),
+                        target.trim(),
+                        now
+                    ])?;
+                }
+            }
+        }
+
+        if rebuild_route_lookup {
+            tx.execute(
+                "CREATE INDEX idx_memory_routes_lookup
+                 ON memory_routes(route_kind, route_hash, memory_key);",
+                [],
+            )?;
+        }
+
+        mark_semantic_dirty(&tx)?;
+
+        tx.commit()?;
+        Ok(rules.len())
+    }
+
     /// Atomically set a memory and, optionally, one directed relation.
     pub fn set_entry_with_relation(
         &mut self,
@@ -41,64 +254,13 @@ impl Store {
         kind: Option<&str>,
         relation: Option<(&str, &str)>,
     ) -> Result<()> {
-        let trimmed_key = key.trim();
-        let trimmed_val = val.trim();
-        if trimmed_key.is_empty() {
-            return Err(crate::error::Error::Usage(
-                "Memory key cannot be empty".into(),
-            ));
-        }
-        if trimmed_val.is_empty() {
-            return Err(crate::error::Error::Usage(
-                "Memory value cannot be empty".into(),
-            ));
-        }
-
-        let trimmed_anchor = anchor.map(|a| a.trim()).filter(|a| !a.is_empty());
-        let effective_kind = kind
-            .map(|k| k.trim())
-            .filter(|k| !k.is_empty())
-            .unwrap_or_else(|| infer_kind(trimmed_key));
-        let relation = match relation {
-            Some((rel_type, target)) => {
-                let rel_type = rel_type.trim();
-                let target = target.trim();
-                if rel_type.is_empty() || target.is_empty() {
-                    return Err(crate::error::Error::Usage(
-                        "Relation type and target cannot be empty".into(),
-                    ));
-                }
-                Some((rel_type, target))
-            }
-            None => None,
-        };
-
-        let now = now_epoch();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
-             ON CONFLICT(key) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at, anchor = excluded.anchor, archived_at = NULL, archive_reason = NULL, kind = excluded.kind;",
-            params![trimmed_key, trimmed_val, now, trimmed_anchor, effective_kind],
-        )?;
-        tx.execute(
-            "DELETE FROM memories_fts WHERE key = ?1;",
-            params![trimmed_key],
-        )?;
-        tx.execute(
-            "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
-            params![trimmed_key, trimmed_val, trimmed_anchor, effective_kind],
-        )?;
-        if let Some((rel_type, target)) = relation {
-            tx.execute(
-                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
-                params![trimmed_key, rel_type, target, now],
-            )?;
-        }
-        tx.commit()?;
-
+        self.set_batch(&[BatchRule {
+            key,
+            val,
+            anchor,
+            kind,
+            relation,
+        }])?;
         Ok(())
     }
 
@@ -141,6 +303,7 @@ impl Store {
                  SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
                 params![trimmed_key],
             )?;
+            mark_semantic_dirty(&tx)?;
         }
 
         tx.commit()?;
@@ -174,6 +337,7 @@ impl Store {
                  SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
                 params![trimmed_key],
             )?;
+            mark_semantic_dirty(&tx)?;
         }
 
         tx.commit()?;
@@ -260,9 +424,14 @@ impl Store {
                 params![key.trim()],
             )?;
             tx.execute(
+                "DELETE FROM memory_routes WHERE memory_key = ?1;",
+                params![key.trim()],
+            )?;
+            tx.execute(
                 "DELETE FROM relations WHERE source_key = ?1 OR target_key = ?1;",
                 params![key.trim()],
             )?;
+            mark_semantic_dirty(&tx)?;
         }
         tx.commit()?;
         Ok(changes > 0)
@@ -342,59 +511,63 @@ impl Store {
         Ok(list)
     }
 
-    /// Build a safe FTS5 query string from user input without breaking Porter stemming.
+    /// Build bounded, safe FTS5 terms from user input without breaking Porter stemming.
+    fn sanitized_fts_terms(raw: &str) -> Vec<String> {
+        raw.split(|c: char| {
+            c.is_whitespace() || (c.is_ascii_punctuation() && c != '_' && c != '-' && c != '*')
+        })
+        .filter_map(|token| {
+            let is_prefix = token.ends_with('*');
+            let trimmed = if is_prefix {
+                token.trim_end_matches('*')
+            } else {
+                token
+            };
+            let sanitized: String = trimmed
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .take(64)
+                .collect();
+
+            if sanitized.is_empty() {
+                None
+            } else if is_prefix {
+                Some(format!("\"{}\"*", sanitized))
+            } else {
+                Some(format!("\"{}\"", sanitized))
+            }
+        })
+        .take(16)
+        .collect()
+    }
+
     fn sanitize_fts_query(raw: &str) -> String {
-        let clean_tokens: Vec<String> = raw
-            .split(|c: char| {
-                c.is_whitespace() || (c.is_ascii_punctuation() && c != '_' && c != '-' && c != '*')
-            })
-            .filter_map(|token| {
-                let is_prefix = token.ends_with('*');
-                let trimmed = if is_prefix {
-                    token.trim_end_matches('*')
-                } else {
-                    token
-                };
-                let sanitized: String = trimmed
-                    .chars()
-                    .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                    .collect();
-
-                if sanitized.is_empty() {
-                    None
-                } else if is_prefix {
-                    Some(format!("\"{}\"*", sanitized))
-                } else {
-                    Some(format!("\"{}\"", sanitized))
-                }
-            })
-            .collect();
-
-        if clean_tokens.is_empty() {
-            format!("\"{}\"", raw.replace('"', "\"\""))
+        let terms = Self::sanitized_fts_terms(raw);
+        if terms.is_empty() {
+            let bounded: String = raw.chars().take(256).collect();
+            format!("\"{}\"", bounded.replace('"', "\"\""))
         } else {
-            clean_tokens.join(" ")
+            terms.join(" ")
         }
     }
 
-    /// Search rules via BM25 full-text search.
-    pub fn find(&self, query: &str) -> Result<Vec<RuleRecord>> {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
+    fn relaxed_fts_query(raw: &str) -> Option<String> {
+        let terms = Self::sanitized_fts_terms(raw);
+        (terms.len() > 1).then(|| terms.join(" OR "))
+    }
 
-        let fts_query = Self::sanitize_fts_query(trimmed);
+    fn find_fts(&self, fts_query: &str) -> Result<Vec<RuleRecord>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT m.key, m.val, m.anchor, m.archived_at, m.archive_reason, m.kind 
-             FROM memories_fts 
-             JOIN memories m ON m.key = memories_fts.key 
-             WHERE memories_fts MATCH ?1 
-             ORDER BY rank LIMIT 10;",
+            "SELECT m.key, m.val, m.anchor, m.archived_at, m.archive_reason, m.kind
+             FROM memories_fts
+             JOIN memories m ON m.key = memories_fts.key
+             WHERE memories_fts MATCH ?1
+               AND memories_fts.rank MATCH 'bm25(8.0, 2.0, 4.0, 0.25, 1.0)'
+             ORDER BY memories_fts.rank
+             LIMIT 10;",
         )?;
         let mut rows = stmt.query(params![fts_query])?;
         let mut results = Vec::new();
-
         while let Some(row) = rows.next()? {
             results.push(RuleRecord {
                 key: row.get(0)?,
@@ -405,7 +578,97 @@ impl Store {
                 kind: row.get(5)?,
             });
         }
-
         Ok(results)
+    }
+
+    /// Search rules via BM25 full-text search.
+    pub fn find(&self, query: &str) -> Result<Vec<RuleRecord>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let fts_query = Self::sanitize_fts_query(trimmed);
+        let strict_results = self.find_fts(&fts_query)?;
+        if !strict_results.is_empty() {
+            return Ok(strict_results);
+        }
+
+        let relaxed_results = match Self::relaxed_fts_query(trimmed) {
+            Some(relaxed) if relaxed != fts_query => self.find_fts(&relaxed)?,
+            _ => Vec::new(),
+        };
+
+        #[cfg(feature = "semantic-local")]
+        if !Self::has_strong_lexical_evidence(trimmed, &relaxed_results)
+            && let Ok(semantic_results) = self.find_semantic(trimmed)
+            && !semantic_results.is_empty()
+        {
+            return Ok(Self::merge_semantic_results(
+                semantic_results,
+                relaxed_results,
+            ));
+        }
+
+        Ok(relaxed_results)
+    }
+
+    #[cfg(feature = "semantic-local")]
+    fn lexical_terms(raw: &str) -> Vec<String> {
+        const STOP_WORDS: &[&str] = &[
+            "and", "are", "con", "como", "del", "for", "las", "los", "para", "por", "que", "the",
+            "una", "use", "using", "with",
+        ];
+        let mut terms = Vec::new();
+        for token in raw.split(|c: char| !c.is_alphanumeric()) {
+            let normalized = token.to_lowercase();
+            if normalized.chars().count() >= 3
+                && !STOP_WORDS.contains(&normalized.as_str())
+                && !terms.contains(&normalized)
+            {
+                terms.push(normalized);
+            }
+        }
+        terms
+    }
+
+    #[cfg(feature = "semantic-local")]
+    fn has_strong_lexical_evidence(query: &str, results: &[RuleRecord]) -> bool {
+        if results.is_empty() {
+            return false;
+        }
+        let terms = Self::lexical_terms(query);
+        if terms.len() <= 1 {
+            return true;
+        }
+        results.iter().take(3).any(|rule| {
+            let haystack = format!(
+                "{} {} {} {}",
+                rule.key,
+                rule.val,
+                rule.anchor.as_deref().unwrap_or_default(),
+                rule.kind
+            )
+            .to_lowercase();
+            let matched = terms
+                .iter()
+                .filter(|term| haystack.contains(term.as_str()))
+                .count();
+            matched >= 2 && matched * 2 >= terms.len()
+        })
+    }
+
+    #[cfg(feature = "semantic-local")]
+    fn merge_semantic_results(
+        semantic: Vec<RuleRecord>,
+        lexical: Vec<RuleRecord>,
+    ) -> Vec<RuleRecord> {
+        let mut seen = HashSet::with_capacity(10);
+        semantic
+            .into_iter()
+            .chain(lexical)
+            .filter(|rule| seen.insert(rule.key.clone()))
+            .take(10)
+            .collect()
     }
 }

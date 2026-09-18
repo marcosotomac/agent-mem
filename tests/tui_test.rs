@@ -361,3 +361,93 @@ fn test_tui_projects_navigation_and_switch() {
     let _ = fs::remove_dir_all(&dir_b);
     let _ = fs::remove_dir_all(&global_dir);
 }
+
+#[test]
+fn test_tui_rules_list_scrolling() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let _lock = TUI_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_tui_scroll_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let db_path = temp_dir.join(".agent-mem").join("mem.db");
+
+    // Populate 35 rules
+    {
+        let mut store = Store::open(&db_path, true).unwrap();
+        for i in 0..35 {
+            store
+                .set(
+                    &format!("rule/{:02}", i),
+                    &format!("Description for rule {:02}", i),
+                )
+                .unwrap();
+        }
+    }
+
+    let mut app = App::new(temp_dir.clone()).unwrap();
+    assert_eq!(app.rules.len(), 35);
+    assert_eq!(app.filtered_indices.len(), 35);
+
+    let backend = TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Initial render: selection is at index 0, offset must be 0
+    terminal
+        .draw(|f| agent_mem::tui::render_ui(f, &mut app))
+        .unwrap();
+    assert_eq!(app.selected_rule_idx, 0);
+    assert_eq!(app.rules_state.offset(), 0);
+
+    // Navigate down 25 times
+    for _ in 0..25 {
+        app.handle_key(key(KeyCode::Down)).unwrap();
+    }
+    assert_eq!(app.selected_rule_idx, 25);
+
+    // Draw again - viewport MUST scroll down so rule 25 is visible!
+    terminal
+        .draw(|f| agent_mem::tui::render_ui(f, &mut app))
+        .unwrap();
+    assert!(
+        app.rules_state.offset() > 0,
+        "List viewport offset must be > 0 when selection moves past visible height, was {}",
+        app.rules_state.offset()
+    );
+
+    // Test End key jumps to the very end
+    app.handle_key(key(KeyCode::End)).unwrap();
+    assert_eq!(app.selected_rule_idx, 34);
+    terminal
+        .draw(|f| agent_mem::tui::render_ui(f, &mut app))
+        .unwrap();
+    assert!(
+        app.rules_state.offset() >= 15,
+        "Offset at end of 35 items should be >= 15, was {}",
+        app.rules_state.offset()
+    );
+
+    // Test Home key jumps back to the beginning
+    app.handle_key(key(KeyCode::Home)).unwrap();
+    assert_eq!(app.selected_rule_idx, 0);
+    terminal
+        .draw(|f| agent_mem::tui::render_ui(f, &mut app))
+        .unwrap();
+    assert_eq!(app.rules_state.offset(), 0);
+
+    // Test PageDown jumps by 10
+    app.handle_key(key(KeyCode::PageDown)).unwrap();
+    assert_eq!(app.selected_rule_idx, 10);
+
+    // Test PageUp jumps back by 10
+    app.handle_key(key(KeyCode::PageUp)).unwrap();
+    assert_eq!(app.selected_rule_idx, 0);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

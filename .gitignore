@@ -5,3 +5,7 @@
 *.db-shm
 .DS_Store
 .codegraph/
+evals/generated/
+evals/jobs/
+evals/results.csv
+__pycache__/

@@ -1,11 +1,13 @@
 use crate::error::Result;
 use crate::init::{find_project_root, global_db_path};
+use crate::registry::{ProjectRecord, ProjectRegistry};
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cell::{RefCell, RefMut};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -16,6 +18,9 @@ const CACHE_TTL_MS: u64 = 86_400_000;
 const DEFAULT_CONTEXT_LIMIT: usize = 10;
 const MAX_CONTEXT_LIMIT: usize = 50;
 const MAX_TEXT_RESULT_BYTES: usize = 16 * 1024;
+const MAX_BATCH_ITEMS: usize = 256;
+const MAX_BATCH_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProtocolEra {
@@ -58,9 +63,11 @@ pub struct JsonRpcError {
 }
 
 pub struct McpServer {
-    project_root: PathBuf,
+    default_project_root: Option<PathBuf>,
+    allow_project_create: bool,
+    projects: Vec<ProjectRecord>,
     global_path: PathBuf,
-    project_store: RefCell<Option<Store>>,
+    project_stores: RefCell<HashMap<PathBuf, Store>>,
     global_store: RefCell<Option<Store>>,
 }
 
@@ -72,48 +79,160 @@ impl Default for McpServer {
 
 impl McpServer {
     pub fn new() -> Self {
+        let root = find_project_root();
+        let default_project_root = root
+            .join(".agent-mem")
+            .join("mem.db")
+            .exists()
+            .then(|| ProjectRegistry::canonicalize_path(&root));
         Self {
-            project_root: find_project_root(),
+            default_project_root,
+            allow_project_create: false,
+            projects: ProjectRegistry::load().unwrap_or_default().projects,
             global_path: global_db_path(),
-            project_store: RefCell::new(None),
+            project_stores: RefCell::new(HashMap::new()),
             global_store: RefCell::new(None),
         }
     }
 
     pub fn with_paths(project_root: PathBuf, global_path: PathBuf) -> Self {
         Self {
-            project_root,
+            default_project_root: Some(ProjectRegistry::canonicalize_path(&project_root)),
+            allow_project_create: true,
+            projects: Vec::new(),
             global_path,
-            project_store: RefCell::new(None),
+            project_stores: RefCell::new(HashMap::new()),
             global_store: RefCell::new(None),
         }
     }
 
-    fn project_db_path(&self) -> PathBuf {
-        self.project_root.join(".agent-mem").join("mem.db")
+    fn live_registered_projects(&self) -> impl Iterator<Item = &ProjectRecord> {
+        self.projects.iter().filter(|project| {
+            Path::new(&project.canonical_path)
+                .join(".agent-mem")
+                .join("mem.db")
+                .exists()
+        })
     }
 
-    fn open_store(&self, scope: &str, need_write: bool) -> Result<RefMut<'_, Store>> {
-        let (slot, path) = match scope {
-            "global" => (&self.global_store, self.global_path.clone()),
-            "project" => (&self.project_store, self.project_db_path()),
-            other => Err(crate::error::Error::Usage(format!(
-                "Invalid scope '{}'. Supported scopes: 'project', 'global'",
-                other
-            )))?,
-        };
+    fn resolve_project_root(&self, selector: Option<&str>) -> Result<PathBuf> {
+        if let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(default) = &self.default_project_root
+                && (selector == default.to_string_lossy()
+                    || selector
+                        == default
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(""))
+            {
+                return Ok(default.clone());
+            }
 
-        let mut cached = slot.borrow_mut();
+            let matches: Vec<&ProjectRecord> = self
+                .live_registered_projects()
+                .filter(|project| {
+                    project.id == selector
+                        || project.name == selector
+                        || project.canonical_path == selector
+                })
+                .collect();
+            return match matches.as_slice() {
+                [project] => Ok(PathBuf::from(&project.canonical_path)),
+                [] => Err(crate::error::Error::Usage(format!(
+                    "Unknown project '{selector}'. Use an id, unique name, or registered path"
+                ))),
+                _ => Err(crate::error::Error::Usage(format!(
+                    "Ambiguous project name '{selector}'. Use its id or registered path"
+                ))),
+            };
+        }
+
+        if let Some(default) = &self.default_project_root {
+            return Ok(default.clone());
+        }
+
+        let projects: Vec<&ProjectRecord> = self.live_registered_projects().collect();
+        match projects.as_slice() {
+            [project] => Ok(PathBuf::from(&project.canonical_path)),
+            [] => Err(crate::error::Error::Usage(
+                "No initialized project is available. Run 'agent-mem init' in a repository".into(),
+            )),
+            _ => {
+                let choices = projects
+                    .iter()
+                    .take(8)
+                    .map(|project| format!("{}:{}", project.id, project.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(crate::error::Error::Usage(format!(
+                    "Project is required. Registered projects: {choices}"
+                )))
+            }
+        }
+    }
+
+    fn project_for_scope(&self, args: &Value, scope: &str) -> Result<Option<PathBuf>> {
+        if scope == "global" {
+            return Ok(None);
+        }
+        self.resolve_project_root(args.get("project").and_then(Value::as_str))
+            .map(Some)
+    }
+
+    fn open_project_store(&self, root: &Path, need_write: bool) -> Result<RefMut<'_, Store>> {
+        let root = ProjectRegistry::canonicalize_path(root);
+        let db_path = root.join(".agent-mem").join("mem.db");
+        if !db_path.exists() && !self.allow_project_create {
+            return Err(crate::error::Error::NotInitialized);
+        }
+
+        let mut stores = self.project_stores.borrow_mut();
+        if !stores.contains_key(&root) {
+            stores.insert(root.clone(), Store::open(&db_path, need_write)?);
+        }
+        Ok(RefMut::map(stores, |stores| {
+            stores
+                .get_mut(&root)
+                .expect("project store cache initialized")
+        }))
+    }
+
+    fn open_global_store(&self, need_write: bool) -> Result<RefMut<'_, Store>> {
+        let mut cached = self.global_store.borrow_mut();
         if cached.is_none() {
-            *cached = Some(Store::open(&path, need_write)?);
+            *cached = Some(Store::open(&self.global_path, need_write)?);
         }
         Ok(RefMut::map(cached, |store| {
             store.as_mut().expect("store cache was initialized")
         }))
     }
 
-    fn open_read_store(&self, scope: &str) -> Result<Option<RefMut<'_, Store>>> {
-        match self.open_store(scope, false) {
+    fn open_store(
+        &self,
+        scope: &str,
+        project_root: Option<&Path>,
+        need_write: bool,
+    ) -> Result<RefMut<'_, Store>> {
+        match scope {
+            "global" => self.open_global_store(need_write),
+            "project" => self.open_project_store(
+                project_root.ok_or_else(|| {
+                    crate::error::Error::Usage("Project scope requires a project".into())
+                })?,
+                need_write,
+            ),
+            other => Err(crate::error::Error::Usage(format!(
+                "Invalid scope '{other}'. Supported scopes: 'project', 'global'"
+            ))),
+        }
+    }
+
+    fn open_read_store(
+        &self,
+        scope: &str,
+        project_root: Option<&Path>,
+    ) -> Result<Option<RefMut<'_, Store>>> {
+        match self.open_store(scope, project_root, false) {
             Ok(store) => Ok(Some(store)),
             Err(crate::error::Error::NotInitialized) => Ok(None),
             Err(e) => Err(e),
@@ -280,14 +399,15 @@ impl McpServer {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
+                            "batch": { "type": "array" },
                             "key": { "type": "string" },
                             "val": { "type": "string" },
-                            "anchor": { "type": "string", "description": "path[:line]" },
+                            "anchor": { "type": "string" },
                             "kind": { "type": "string", "enum": ["rule", "decision", "gotcha", "pattern"] },
-                            "rel": { "type": "string", "description": "type:target" },
+                            "rel": { "type": "string" },
+                            "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["project", "global"] }
-                        },
-                        "required": ["key", "val"]
+                        }
                     }
                 },
                 {
@@ -297,6 +417,7 @@ impl McpServer {
                         "type": "object",
                         "properties": {
                             "query": { "type": "string" },
+                            "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["all", "project", "global"] }
                         },
                         "required": ["query"]
@@ -309,10 +430,11 @@ impl McpServer {
                         "type": "object",
                         "properties": {
                             "diff": { "type": "boolean" },
-                            "files": { "type": "string", "description": "Comma-separated paths" },
+                            "files": { "type": "string" },
                             "anchor": { "type": "string" },
                             "topic": { "type": "string" },
                             "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                            "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["all", "project", "global"] }
                         }
                     }
@@ -329,7 +451,8 @@ impl McpServer {
                             },
                             "key": { "type": "string" },
                             "reason": { "type": "string" },
-                            "rel": { "type": "string", "description": "type:target" },
+                            "rel": { "type": "string" },
+                            "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["project", "global"] }
                         },
                         "required": ["action", "key"]
@@ -445,9 +568,133 @@ impl McpServer {
         }
     }
 
+    fn format_context_rule(
+        kind: &str,
+        key: &str,
+        val: &str,
+        anchor: Option<&str>,
+        compact: bool,
+    ) -> String {
+        let kind_badge = if kind != "rule" {
+            format!("[{}] ", kind)
+        } else {
+            String::new()
+        };
+        let effective_val = if compact && val.len() > 1024 {
+            let mut end = 1024;
+            while !val.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!(
+                "{} ... [truncated; use mem_find key=\"{}\" for full content]",
+                &val[..end],
+                key
+            )
+        } else {
+            val.to_string()
+        };
+        match anchor {
+            Some(a) => format!("{}{}: {} ({})", kind_badge, key, effective_val, a),
+            None => format!("{}{}: {}", kind_badge, key, effective_val),
+        }
+    }
+
     fn dispatch_tool(&self, name: &str, args: &Value) -> Result<String> {
         match name {
             "mem_set" => {
+                let scope = args
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("project");
+                let project_root = self.project_for_scope(args, scope)?;
+
+                if let Some(batch_val) = args.get("batch").and_then(|v| v.as_array()) {
+                    if batch_val.is_empty() {
+                        return Err(crate::error::Error::Usage(
+                            "Batch array cannot be empty".into(),
+                        ));
+                    }
+                    if batch_val.len() > MAX_BATCH_ITEMS {
+                        return Err(crate::error::Error::Usage(format!(
+                            "Batch exceeds the {MAX_BATCH_ITEMS}-item limit"
+                        )));
+                    }
+
+                    let batch_bytes = batch_val.iter().try_fold(0usize, |total, item| {
+                        let item_bytes = ["key", "val", "anchor", "kind", "rel"]
+                            .iter()
+                            .filter_map(|field| item.get(field).and_then(Value::as_str))
+                            .try_fold(0usize, |sum, value| sum.checked_add(value.len()))?;
+                        total.checked_add(item_bytes)
+                    });
+                    if batch_bytes.is_none_or(|bytes| bytes > MAX_BATCH_BYTES) {
+                        return Err(crate::error::Error::Usage(format!(
+                            "Batch exceeds the {MAX_BATCH_BYTES}-byte payload limit"
+                        )));
+                    }
+
+                    struct ParsedBatchItem {
+                        key: String,
+                        val: String,
+                        anchor: Option<String>,
+                        kind: Option<String>,
+                        rel: Option<(String, String)>,
+                    }
+
+                    let mut items = Vec::with_capacity(batch_val.len());
+                    for (idx, item) in batch_val.iter().enumerate() {
+                        let key = item.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+                            crate::error::Error::Usage(format!("Batch item #{} missing 'key'", idx))
+                        })?;
+                        let val = item.get("val").and_then(|v| v.as_str()).ok_or_else(|| {
+                            crate::error::Error::Usage(format!("Batch item #{} missing 'val'", idx))
+                        })?;
+                        let anchor = item
+                            .get("anchor")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let kind = item.get("kind").and_then(|v| v.as_str()).map(String::from);
+                        let rel = item
+                            .get("rel")
+                            .and_then(|v| v.as_str())
+                            .map(Self::parse_relation)
+                            .transpose()?
+                            .map(|(t, r)| (t.to_string(), r.to_string()));
+
+                        items.push(ParsedBatchItem {
+                            key: key.to_string(),
+                            val: val.to_string(),
+                            anchor,
+                            kind,
+                            rel,
+                        });
+                    }
+
+                    let batch_rules: Vec<crate::store::BatchRule> = items
+                        .iter()
+                        .map(|it| crate::store::BatchRule {
+                            key: &it.key,
+                            val: &it.val,
+                            anchor: it.anchor.as_deref(),
+                            kind: it.kind.as_deref(),
+                            relation: it.rel.as_ref().map(|(t, r)| (t.as_str(), r.as_str())),
+                        })
+                        .collect();
+
+                    let mut store = self.open_store(scope, project_root.as_deref(), true)?;
+                    let count = store.set_batch(&batch_rules)?;
+                    if scope == "project" {
+                        let rules_file = project_root
+                            .as_ref()
+                            .expect("project scope was resolved")
+                            .join(".agent-rules");
+                        if rules_file.exists() {
+                            store.export_to_file(&rules_file)?;
+                        }
+                    }
+                    return Ok(format!("saved [{}] {} memories in batch", scope, count));
+                }
+
                 let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
                     crate::error::Error::Usage("Missing required argument 'key'".into())
                 })?;
@@ -457,16 +704,15 @@ impl McpServer {
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
                 let kind = args.get("kind").and_then(|v| v.as_str());
                 let rel = args.get("rel").and_then(|v| v.as_str());
-                let scope = args
-                    .get("scope")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("project");
 
                 let relation = rel.map(Self::parse_relation).transpose()?;
-                let mut store = self.open_store(scope, true)?;
+                let mut store = self.open_store(scope, project_root.as_deref(), true)?;
                 store.set_entry_with_relation(key, val, anchor, kind, relation)?;
                 if scope == "project" {
-                    let rules_file = self.project_root.join(".agent-rules");
+                    let rules_file = project_root
+                        .as_ref()
+                        .expect("project scope was resolved")
+                        .join(".agent-rules");
                     if rules_file.exists() {
                         store.export_to_file(&rules_file)?;
                     }
@@ -494,11 +740,12 @@ impl McpServer {
                         scope
                     )));
                 }
+                let project_root = self.project_for_scope(args, scope)?;
 
                 let mut lines = Vec::new();
 
                 if (scope == "all" || scope == "project")
-                    && let Some(store) = self.open_read_store("project")?
+                    && let Some(store) = self.open_read_store("project", project_root.as_deref())?
                 {
                     let results = store.find(query)?;
                     for r in results {
@@ -529,7 +776,7 @@ impl McpServer {
                 }
 
                 if (scope == "all" || scope == "global")
-                    && let Some(store) = self.open_read_store("global")?
+                    && let Some(store) = self.open_read_store("global", None)?
                 {
                     let results = store.find(query)?;
                     for r in results {
@@ -581,6 +828,7 @@ impl McpServer {
                         scope
                     )));
                 }
+                let project_root = self.project_for_scope(args, scope)?;
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
                 let topic = args.get("topic").and_then(|v| v.as_str());
                 let diff = args.get("diff").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -595,7 +843,12 @@ impl McpServer {
                     }
                 }
                 if diff {
-                    let diff_files = crate::hook::get_diff_files(&self.project_root);
+                    let root = project_root.as_ref().ok_or_else(|| {
+                        crate::error::Error::Usage(
+                            "diff context requires project or all scope".into(),
+                        )
+                    })?;
+                    let diff_files = crate::hook::get_diff_files(root);
                     for df in diff_files {
                         if !files.contains(&df) {
                             files.push(df);
@@ -603,63 +856,143 @@ impl McpServer {
                     }
                 }
 
+                let compact = limit > 1;
+
+                let (project_rule_limit, mut global_rule_limit) = if scope == "all" {
+                    let global_reserved = if limit >= 4 {
+                        (limit / 4).clamp(2, 10)
+                    } else {
+                        1
+                    };
+                    let proj_lim = limit.saturating_sub(global_reserved).max(1);
+                    (proj_lim, global_reserved)
+                } else if scope == "project" {
+                    (limit, 0)
+                } else {
+                    (0, limit)
+                };
+
+                const NOTICE_LEN: usize = 32;
+                let total_byte_budget = MAX_TEXT_RESULT_BYTES.saturating_sub(NOTICE_LEN);
+                let mut current_bytes = 0;
+
+                let reserved_global_bytes = if scope == "all" { 2560 } else { 0 };
+                let reserved_meta_bytes = if scope == "all" || scope == "project" {
+                    1536
+                } else {
+                    0
+                };
+
+                let project_byte_budget = total_byte_budget
+                    .saturating_sub(reserved_global_bytes)
+                    .saturating_sub(reserved_meta_bytes);
+
                 let mut lines = Vec::new();
-                let mut remaining_rules = limit;
+                let mut actual_project_rule_count = 0;
 
                 if (scope == "all" || scope == "project")
-                    && let Some(store) = self.open_read_store("project")?
+                    && let Some(store) = self.open_read_store("project", project_root.as_deref())?
                 {
                     let (rules, rels, sessions) = if !files.is_empty() {
-                        store.context_for_files(&files, topic, limit)?
+                        store.context_for_files(&files, topic, project_rule_limit)?
                     } else {
-                        store.context_filtered(anchor, topic, limit)?
+                        store.context_filtered(anchor, topic, project_rule_limit)?
                     };
-                    remaining_rules = remaining_rules.saturating_sub(rules.len());
-                    if !rules.is_empty() {
-                        lines.push("== PROJECT RULES ==".to_string());
-                        for r in rules {
-                            let kind_badge = if r.kind != "rule" {
-                                format!("[{}] ", r.kind)
-                            } else {
-                                String::new()
-                            };
-                            match r.anchor {
-                                Some(a) => lines
-                                    .push(format!("{}{}: {} ({})", kind_badge, r.key, r.val, a)),
-                                None => lines.push(format!("{}{}: {}", kind_badge, r.key, r.val)),
-                            }
+
+                    actual_project_rule_count = rules.len();
+
+                    let mut project_rule_lines = Vec::new();
+                    for r in rules {
+                        let line = Self::format_context_rule(
+                            &r.kind,
+                            &r.key,
+                            &r.val,
+                            r.anchor.as_deref(),
+                            compact,
+                        );
+                        let cost = line.len() + 1;
+                        if current_bytes + cost <= project_byte_budget {
+                            current_bytes += cost;
+                            project_rule_lines.push(line);
+                        } else if project_rule_lines.is_empty() {
+                            // First rule is allowed even if long (e.g. limit=1 with large payload)
+                            current_bytes += cost;
+                            project_rule_lines.push(line);
+                            break;
                         }
                     }
-                    if !rels.is_empty() {
-                        lines.push("== RELATIONS ==".to_string());
-                        for rel in rels {
-                            lines.push(format!(
-                                "{} -> {} -> {}",
-                                rel.source_key, rel.rel_type, rel.target_key
-                            ));
+
+                    if !project_rule_lines.is_empty() {
+                        let header = "== PROJECT RULES ==";
+                        current_bytes += header.len() + 1;
+                        lines.push(header.to_string());
+                        lines.extend(project_rule_lines);
+                    }
+
+                    let mut rel_lines = Vec::new();
+                    for rel in rels {
+                        let line = format!(
+                            "{} -> {} -> {}",
+                            rel.source_key, rel.rel_type, rel.target_key
+                        );
+                        let cost = line.len() + 1;
+                        if current_bytes + cost
+                            <= total_byte_budget.saturating_sub(reserved_global_bytes)
+                        {
+                            current_bytes += cost;
+                            rel_lines.push(line);
                         }
                     }
-                    if !sessions.is_empty() {
-                        lines.push("== SESSIONS ==".to_string());
-                        for (id, summary) in sessions {
-                            lines.push(format!("[#{}] {}", id, summary));
+                    if !rel_lines.is_empty() {
+                        let header = "== RELATIONS ==";
+                        current_bytes += header.len() + 1;
+                        lines.push(header.to_string());
+                        lines.extend(rel_lines);
+                    }
+
+                    let mut session_lines = Vec::new();
+                    for (id, summary) in sessions {
+                        let line = format!("[#{}] {}", id, summary);
+                        let cost = line.len() + 1;
+                        if current_bytes + cost
+                            <= total_byte_budget.saturating_sub(reserved_global_bytes)
+                        {
+                            current_bytes += cost;
+                            session_lines.push(line);
                         }
+                    }
+                    if !session_lines.is_empty() {
+                        let header = "== SESSIONS ==";
+                        current_bytes += header.len() + 1;
+                        lines.push(header.to_string());
+                        lines.extend(session_lines);
                     }
                 }
 
-                if remaining_rules > 0
+                // If scope is "all", expand global slots to claim any unused project slots
+                if scope == "all" {
+                    global_rule_limit = limit
+                        .saturating_sub(actual_project_rule_count)
+                        .max(global_rule_limit);
+                }
+
+                if global_rule_limit > 0
                     && (scope == "all" || scope == "global")
-                    && let Some(store) = self.open_read_store("global")?
+                    && let Some(store) = self.open_read_store("global", None)?
                 {
-                    let rules = store.dump_limited(remaining_rules)?;
-                    if !rules.is_empty() {
-                        lines.push("== GLOBAL PREFERENCES ==".to_string());
-                        for (k, v, a) in rules {
-                            match a {
-                                Some(anchor) => lines.push(format!("{}: {} ({})", k, v, anchor)),
-                                None => lines.push(format!("{}: {}", k, v)),
-                            }
+                    let rules = store.dump_limited(global_rule_limit)?;
+                    let mut global_lines = Vec::new();
+                    for (k, v, a) in rules {
+                        let line = Self::format_context_rule("rule", &k, &v, a.as_deref(), compact);
+                        let cost = line.len() + 1;
+                        if current_bytes + cost <= total_byte_budget {
+                            current_bytes += cost;
+                            global_lines.push(line);
                         }
+                    }
+                    if !global_lines.is_empty() {
+                        lines.push("== GLOBAL PREFERENCES ==".to_string());
+                        lines.extend(global_lines);
                     }
                 }
 
@@ -681,6 +1014,7 @@ impl McpServer {
                     .get("scope")
                     .and_then(|v| v.as_str())
                     .unwrap_or("project");
+                let project_root = self.project_for_scope(args, scope)?;
 
                 let parsed_relation = match action {
                     "archive" | "unarchive" | "delete" | "del" | "rm" => None,
@@ -701,7 +1035,7 @@ impl McpServer {
                     }
                 };
 
-                let mut store = self.open_store(scope, true)?;
+                let mut store = self.open_store(scope, project_root.as_deref(), true)?;
 
                 let msg = match action {
                     "archive" => {
@@ -711,7 +1045,10 @@ impl McpServer {
                             return Err(crate::error::Error::NotFound(key.to_string()));
                         }
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -727,7 +1064,10 @@ impl McpServer {
                             return Err(crate::error::Error::NotFound(key.to_string()));
                         }
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -740,7 +1080,10 @@ impl McpServer {
                             return Err(crate::error::Error::NotFound(key.to_string()));
                         }
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -751,7 +1094,10 @@ impl McpServer {
                         let (rel_type, target) = parsed_relation.expect("relation was validated");
                         store.relate(key, rel_type, target)?;
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -768,7 +1114,10 @@ impl McpServer {
                             )));
                         }
                         if scope == "project" {
-                            let rules_file = self.project_root.join(".agent-rules");
+                            let rules_file = project_root
+                                .as_ref()
+                                .expect("project scope was resolved")
+                                .join(".agent-rules");
                             if rules_file.exists() {
                                 store.export_to_file(&rules_file)?;
                             }
@@ -787,13 +1136,46 @@ impl McpServer {
         }
     }
 
-    /// Run MCP loop reading line by line from stdin and replying to stdout.
-    pub fn run_stdio(&self) -> Result<()> {
-        let stdin = io::stdin();
-        let mut stdout = io::stdout();
-
-        for line in stdin.lock().lines() {
-            let line = line?;
+    fn run_stream<R: BufRead, W: Write>(&self, mut input: R, mut output: W) -> Result<()> {
+        loop {
+            let mut line = String::new();
+            let mut bounded = std::io::Read::take(&mut input, (MAX_REQUEST_BYTES + 1) as u64);
+            let bytes_read = bounded.read_line(&mut line)?;
+            if bytes_read == 0 {
+                break;
+            }
+            if line.len() > MAX_REQUEST_BYTES {
+                if !line.ends_with('\n') {
+                    loop {
+                        let buffered = input.fill_buf()?;
+                        if buffered.is_empty() {
+                            break;
+                        }
+                        if let Some(newline) = buffered.iter().position(|byte| *byte == b'\n') {
+                            input.consume(newline + 1);
+                            break;
+                        }
+                        let buffered_len = buffered.len();
+                        input.consume(buffered_len);
+                    }
+                }
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0",
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32600,
+                        message: format!("Request exceeds the {MAX_REQUEST_BYTES}-byte limit"),
+                        data: None,
+                    }),
+                };
+                serde_json::to_writer(&mut output, &resp).map_err(|e| {
+                    crate::error::Error::Usage(format!("JSON serialization error: {e}"))
+                })?;
+                output.write_all(b"\n")?;
+                output.flush()?;
+                continue;
+            }
             if line.trim().is_empty() {
                 continue;
             }
@@ -817,11 +1199,48 @@ impl McpServer {
                     crate::error::Error::Usage(format!("JSON serialization error: {}", e))
                 })?;
                 serialized.push('\n');
-                stdout.write_all(serialized.as_bytes())?;
-                stdout.flush()?;
+                output.write_all(serialized.as_bytes())?;
+                output.flush()?;
             }
         }
 
         Ok(())
+    }
+
+    /// Run MCP stdio with bounded, newline-delimited JSON-RPC requests.
+    pub fn run_stdio(&self) -> Result<()> {
+        self.run_stream(io::stdin().lock(), io::stdout())
+    }
+}
+
+#[cfg(test)]
+mod bounded_input_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn oversized_request_is_rejected_and_next_request_is_processed() {
+        let root = std::env::temp_dir().join(format!(
+            "agent_mem_mcp_bounded_{}_{}",
+            std::process::id(),
+            crate::store::now_epoch()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let server = McpServer::with_paths(root.clone(), root.join("global.db"));
+        let mut input = vec![b'x'; MAX_REQUEST_BYTES + 32];
+        input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n");
+        let mut output = Vec::new();
+
+        server.run_stream(Cursor::new(input), &mut output).unwrap();
+
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert_eq!(responses[1]["result"], json!({}));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

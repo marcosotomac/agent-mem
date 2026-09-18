@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetClient {
@@ -462,6 +463,46 @@ fn resolve_binary_command() -> String {
     "agent-mem".to_string()
 }
 
+fn backup_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config".to_string());
+    path.with_file_name(format!("{name}.agent-mem.bak"))
+}
+
+fn write_config_safely(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if path.exists() {
+        fs::copy(path, backup_path(path))?;
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config".to_string());
+    let temp_path = path.with_file_name(format!(".{name}.agent-mem.{nonce}.tmp"));
+    fs::write(&temp_path, content)?;
+
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 pub fn install_to_path(
     config_path: &std::path::Path,
     client: TargetClient,
@@ -495,10 +536,7 @@ pub fn install_to_path(
         };
 
         if !already_configured || !config_path.exists() {
-            if let Some(parent) = config_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(config_path, updated_content)?;
+            write_config_safely(config_path, &updated_content)?;
         }
 
         return Ok(InstallResult {
@@ -511,13 +549,22 @@ pub fn install_to_path(
     let mut root_json: Value = if config_path.exists() {
         let raw = fs::read_to_string(config_path)?;
         let clean = strip_json_comments(&raw);
-        serde_json::from_str(&clean).unwrap_or_else(|_| json!({}))
+        serde_json::from_str(&clean).map_err(|error| {
+            Error::Usage(format!(
+                "Refusing to modify invalid JSON/JSONC config '{}': {}",
+                config_path.display(),
+                error
+            ))
+        })?
     } else {
         json!({})
     };
 
     if !root_json.is_object() {
-        root_json = json!({});
+        return Err(Error::Usage(format!(
+            "Refusing to modify config '{}': root value must be an object",
+            config_path.display()
+        )));
     }
 
     let already_configured = match client {
@@ -669,14 +716,10 @@ pub fn install_to_path(
         }
     };
 
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     let formatted = serde_json::to_string_pretty(&root_json)
         .map_err(|e| Error::Usage(format!("Failed to format JSON: {}", e)))?;
 
-    fs::write(config_path, format!("{}\n", formatted))?;
+    write_config_safely(config_path, &format!("{}\n", formatted))?;
 
     Ok(InstallResult {
         client,
@@ -990,7 +1033,7 @@ pub fn uninstall_from_path(config_path: &Path, client: TargetClient) -> Result<U
     if removed {
         let formatted =
             serde_json::to_string_pretty(&root_json).map_err(|e| Error::Usage(e.to_string()))?;
-        fs::write(config_path, formatted)?;
+        write_config_safely(config_path, &formatted)?;
     }
 
     Ok(UninstallResult {
