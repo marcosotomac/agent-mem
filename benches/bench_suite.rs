@@ -465,5 +465,9 @@ The default report goes to target/benchmark.md, so tests do not rewrite tracked 
     }
     fs::write(&report_path, report).expect("write benchmark report");
     println!("Benchmark report generated at {}", report_path.display());
+    // Windows denies directory removal while either SQLite connection is open.
+    // Close both the direct store and MCP's cached per-project store first.
+    drop(mcp);
+    drop(store);
     fs::remove_dir_all(&temp_dir).expect("remove benchmark fixture");
 }
