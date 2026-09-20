@@ -94,9 +94,70 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}
 
+  verify-install:
+    name: Clean install (${{ matrix.name }})
+    needs: build-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            asset_name: agent-mem-linux-x86_64.tar.gz
+            windows: false
+          - name: macOS
+            os: macos-13
+            asset_name: agent-mem-darwin-x86_64.tar.gz
+            windows: false
+          - name: Windows
+            os: windows-latest
+            asset_name: agent-mem-windows-x86_64.zip
+            windows: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: release-under-test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify clean Unix install and npm launcher
+        if: ${{ matrix.windows == false }}
+        shell: bash
+        run: |
+          tar -xzf "release-under-test/${{ matrix.asset_name }}" -C release-under-test
+          binary="$PWD/release-under-test/agent-mem"
+          test "$("$binary" --version)" = "agent-mem ${GITHUB_REF_NAME#v}"
+          sandbox="$(mktemp -d)"
+          "$binary" init "$sandbox"
+          cd "$sandbox"
+          "$binary" set release/smoke verified
+          test "$("$binary" get release/smoke)" = "verified"
+          cd "$GITHUB_WORKSPACE"
+          AGENT_MEM_BINARY="$binary" node npm/bin/agent-mem.js --version
+      - name: Verify clean Windows install and npm launcher
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          Expand-Archive -LiteralPath "release-under-test/${{ matrix.asset_name }}" -DestinationPath release-under-test -Force
+          $binary = (Resolve-Path "release-under-test/agent-mem.exe").Path
+          if ((& $binary --version) -ne "agent-mem $($env:GITHUB_REF_NAME.TrimStart('v'))") { throw "version mismatch" }
+          $sandbox = Join-Path $env:RUNNER_TEMP "agent-mem-clean-install"
+          New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
+          & $binary init $sandbox
+          Push-Location $sandbox
+          & $binary set release/smoke verified
+          if ((& $binary get release/smoke) -ne "verified") { throw "round-trip failed" }
+          Pop-Location
+          $env:AGENT_MEM_BINARY = $binary
+          node npm/bin/agent-mem.js --version
+
   publish-release:
     name: Publish GitHub Release
-    needs: build-release
+    needs: [build-release, verify-install]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -139,10 +200,10 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - name: Use npm with trusted publishing support
+        run: npm install --global npm@latest
       - run: npm publish --provenance --access public
         working-directory: npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-homebrew:
     name: Publish Homebrew formula
