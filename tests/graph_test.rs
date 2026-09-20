@@ -306,3 +306,56 @@ fn test_cli_relate_unrelate_and_context_filtered() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_context_budget_reserves_graph_and_universal_qrels() {
+    let mut store = Store::open_in_memory().unwrap();
+    for index in 0..40 {
+        store
+            .set_entry(
+                &format!("direct/{index:02}"),
+                &format!("Routine local convention {index}"),
+                Some("src/payments.rs:10"),
+                Some("rule"),
+            )
+            .unwrap();
+    }
+    for index in 0..5 {
+        let key = format!("critical/related-{index}");
+        store
+            .set(&key, &format!("Critical failure evidence {index}"))
+            .unwrap();
+        store
+            .relate(&format!("direct/{index:02}"), "mitigates", &key)
+            .unwrap();
+    }
+    store
+        .set("00-universal/security", "Never expose credentials")
+        .unwrap();
+    store
+        .set("01-universal/compatibility", "Preserve public behavior")
+        .unwrap();
+
+    let naive_direct_only: Vec<_> = (0..20).map(|index| format!("direct/{index:02}")).collect();
+    assert!(
+        naive_direct_only
+            .iter()
+            .all(|key| !key.starts_with("critical/") && !key.contains("universal"))
+    );
+
+    let (rules, _, _) = store
+        .context_for_files(&["src/payments.rs".into()], None, 20)
+        .unwrap();
+    let keys: std::collections::HashSet<_> = rules.iter().map(|rule| rule.key.as_str()).collect();
+    for index in 0..5 {
+        assert!(keys.contains(format!("critical/related-{index}").as_str()));
+    }
+    assert!(keys.contains("00-universal/security"));
+    assert!(keys.contains("01-universal/compatibility"));
+    assert_eq!(rules.len(), 20);
+
+    let (unbounded, _, _) = store
+        .context_for_files(&["src/payments.rs".into()], None, 2_000)
+        .unwrap();
+    assert_eq!(unbounded.len(), 47);
+}
