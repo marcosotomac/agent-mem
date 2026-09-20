@@ -108,7 +108,7 @@ jobs:
             asset_name: agent-mem-linux-x86_64.tar.gz
             windows: false
           - name: macOS
-            os: macos-13
+            os: macos-latest
             asset_name: agent-mem-darwin-x86_64.tar.gz
             windows: false
           - name: Windows
