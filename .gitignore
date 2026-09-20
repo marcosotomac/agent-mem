@@ -7,5 +7,6 @@
 .codegraph/
 evals/generated/
 evals/jobs/
+evals/.cache/
 evals/results.csv
 __pycache__/

@@ -47,8 +47,28 @@ python3 evals/run_matrix.py --execute
 Narrow smoke runs before the full campaign:
 
 ```bash
-python3 evals/run_matrix.py --execute --baseline native --model openai/gpt-5.2-codex
-python3 evals/run_matrix.py --execute --baseline agent-mem --model openai/gpt-5.2-codex
+python3 evals/run_matrix.py --execute --baseline native --model openai/gpt-5.2-2025-12-11 \
+  --attempts 1 --task-glob '*astropy__astropy-*'
+python3 evals/run_matrix.py --execute --baseline agent-mem --model openai/gpt-5.2-2025-12-11 \
+  --attempts 1 --task-glob '*astropy__astropy-*'
+```
+
+The first local trial populates `evals/.cache/` with the pinned Codex/NVM
+installation. Later isolated containers mount that cache and skip repeated
+agent installation. The runner also reuses uv's package-download cache for the
+SWE-bench verifier; task repositories and result directories remain isolated.
+For the `agent-mem` baseline, the runner also builds the current source in a
+pinned slim Linux/amd64 Rust container and mounts that binary into SWE-bench. This
+prevents host binaries (for example macOS/ARM) from invalidating MCP startup.
+The build is reused until `Cargo.toml`, `Cargo.lock`, or a Rust source file changes.
+
+Once both smokes complete without infrastructure errors, use a unique immutable
+campaign id for the full 72 trials. Job directories are never overwritten:
+
+```bash
+python3 evals/run_matrix.py --execute --campaign v1-3-0
+python3 evals/report.py --campaign v1-3-0 --gate
+python3 evals/package_evidence.py --campaign v1-3-0
 ```
 
 Summarize retained evidence:
@@ -57,7 +77,13 @@ Summarize retained evidence:
 python3 evals/summarize.py > evals/results.csv
 ```
 
-The summarizer exits nonzero if tokens or latency are absent; missing evidence is
+The campaign reporter writes tracked Markdown and JSON summaries under
+`evals/published/`. Its gate requires all 72 trials, zero infrastructure errors,
+complete success/token/latency evidence, observed agent-mem success no lower than
+native in every model/task cell, required MCP tool calls in every memory trial,
+and fewer aggregate tokens than native. This is
+an observed release gate, not a claim of statistical non-inferiority. The legacy
+CSV summarizer exits nonzero if tokens or latency are absent; missing evidence is
 never replaced by an estimate. Infrastructure failures (build, credential,
 adapter, timeout, or verifier failure) are not scored as agent failures and must
 be reported separately from task success.
