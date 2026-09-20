@@ -1,6 +1,6 @@
 # agent-mem benchmark
 
-Version: 1.2.0. Platform: macos/aarch64. Profile: release/bench.
+Version: 1.3.0. Platform: macos/aarch64. Profile: release/bench.
 
 ## Method
 
@@ -12,14 +12,14 @@ These measurements describe this machine and workload, not a universal latency g
 
 | Operation | Samples | p50 | p95 | p99 |
 |---|---:|---:|---:|---:|
-| Point lookup | 5000 | 1.33 µs | 1.46 µs | 2.04 µs |
-| FTS5 search | 1000 | 305.67 µs | 1.13 ms | 1.15 ms |
-| Outgoing edge lookup (one edge) | 1000 | 1.17 µs | 1.25 µs | 1.58 µs |
-| MCP search (warm, in-process) | 1000 | 1.12 ms | 1.17 ms | 1.20 ms |
-| Anchor context (limit 20, including relations/sessions) | 200 | 326.21 µs | 338.79 µs | 343.46 µs |
-| Export serialization (no file I/O) | 100 | 774.25 µs | 799.46 µs | 882.08 µs |
-| Full export (serialization + atomic rename) | 100 | 1.35 ms | 2.13 ms | 2.25 ms |
-| Set + full export | 100 | 1.62 ms | 2.06 ms | 4.17 ms |
+| Point lookup | 5000 | 1.29 µs | 1.42 µs | 2.08 µs |
+| FTS5 search | 1000 | 315.42 µs | 1.27 ms | 2.31 ms |
+| Outgoing edge lookup (one edge) | 1000 | 1.21 µs | 1.33 µs | 1.96 µs |
+| MCP search (warm, in-process) | 1000 | 1.15 ms | 1.26 ms | 1.73 ms |
+| Anchor context (limit 20, including relations/sessions) | 200 | 398.96 µs | 410.42 µs | 416.25 µs |
+| Export serialization (no file I/O) | 100 | 774.83 µs | 814.62 µs | 837.00 µs |
+| Full export (serialization + atomic rename) | 100 | 1.13 ms | 1.57 ms | 1.83 ms |
+| Set + full export | 100 | 1.47 ms | 1.95 ms | 3.39 ms |
 
 ## Context efficiency and retrieval quality
 
@@ -30,7 +30,7 @@ This is not a tokenizer measurement. MCP schema: 1366 bytes (~341 tokens using b
 |---|---:|---:|---:|---:|
 | Full corpus | 2000 | 249790 | 0% | 100% |
 | Anchor + outgoing one hop, without truncation | 266 | 32604 | 86.9% | 100% |
-| Same filter, limit 20 | 20 | 2455 | 99.0% | 7.5% |
+| Same filter, limit 20 | 20 | 2453 | 99.0% | 7.5% |
 
 The untruncated result is checked against an independent set of exact file matches and their outgoing neighbors.
 Savings from the result cap must not be attributed to filtering; the cap can omit relevant rules.
@@ -39,9 +39,17 @@ Savings from the result cap must not be attributed to filtering; the cap can omi
 
 The separate ignored release-scale gate seeds 100,000 anchored memories through one atomic batch,
 checks that all exact-path rules outrank sibling candidates, and runs 1,000 selective context calls.
-On the same macOS/arm64 machine, schema v4 measured 1.44 s initial ingest, 1.255 ms p50,
-1.281 ms p95, 1.300 ms p99, a 116,682,752-byte database, and 99.9800% fewer key/value
-bytes than the full corpus. These figures describe this fixture and machine.
+On the same macOS/arm64 machine, schema v6 measured 1.85 s initial ingest, 1.736 ms p50,
+1.797 ms p95, 1.838 ms p99, a 123,531,264-byte database, and 99.9800% fewer key/value
+bytes than the full corpus. A full 100,000-record export took 0.05 s and produced
+17,762,027 bytes. Two writers, two readers, and one exporter then ran concurrently;
+the exported replica retained all 100,000 records and left no temporary artifacts.
+These figures describe this fixture and machine.
+
+The fixed 20-slot graph-context test contains 40 exact-path distractors, five
+decision-changing related memories, and two repository-wide rules. Direct-only
+packing retained 0/7 declared qrels; diversity reservation retains 7/7 under the
+same 20-record budget. This controlled qrel result does not imply end-to-end task success.
 
 The deterministic noisy-query eval contains 20 fixed queries, 10 independently declared qrels,
 and 600 vocabulary-overlapping distractors. It gates Recall@5, mean reciprocal rank, and returned

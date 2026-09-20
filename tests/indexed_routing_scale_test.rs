@@ -1,4 +1,6 @@
 use agent_mem::store::{BatchRule, Store};
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::Instant;
 
 fn percentile(sorted: &[f64], percentile: usize) -> f64 {
@@ -100,6 +102,122 @@ fn indexed_context_remains_bounded_at_100k_records() {
         "payload reduction must exceed {minimum_reduction:.4}%"
     );
 
+    let rules_path = dir.join(".agent-rules");
+    let export_started = Instant::now();
+    store.export_to_file(&rules_path).unwrap();
+    let export_seconds = export_started.elapsed().as_secs_f64();
+    let export_bytes = std::fs::metadata(&rules_path).unwrap().len();
+    assert!(export_bytes < 32 * 1024 * 1024);
+
+    // Exercise independent SQLite connections: two writers, two readers and
+    // one exporter all start together. Writers update existing records so the
+    // final cardinality is an exact, useful data-loss invariant.
+    drop(store);
+    let db_path = Arc::new(db_path);
+    let rules_path = Arc::new(rules_path);
+    let barrier = Arc::new(Barrier::new(5));
+    let mut handles = Vec::new();
+    for writer in 0..2usize {
+        let db_path = Arc::clone(&db_path);
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let mut store = Store::open(&db_path, false).unwrap();
+            let owned: Vec<(String, String, String)> = (0..128usize)
+                .map(|offset| {
+                    let index = writer * 128 + offset;
+                    (
+                        format!(
+                            "service-000/module-{:02}/rule-{index:06}",
+                            (index / 10) % 100
+                        ),
+                        format!("Concurrent verified update from writer {writer}, record {index}"),
+                        format!(
+                            "services/service-000/src/domain/module-{:02}.rs:{}",
+                            (index / 10) % 100,
+                            index % 400 + 1
+                        ),
+                    )
+                })
+                .collect();
+            let batch: Vec<BatchRule<'_>> = owned
+                .iter()
+                .map(|(key, value, anchor)| BatchRule {
+                    key,
+                    val: value,
+                    anchor: Some(anchor),
+                    kind: Some("rule"),
+                    relation: None,
+                })
+                .collect();
+            barrier.wait();
+            store.set_batch(&batch).unwrap();
+        }));
+    }
+    for _ in 0..2 {
+        let db_path = Arc::clone(&db_path);
+        let barrier = Arc::clone(&barrier);
+        let target = target.clone();
+        handles.push(thread::spawn(move || {
+            let store = Store::open(&db_path, false).unwrap();
+            barrier.wait();
+            for _ in 0..25 {
+                assert_eq!(
+                    store
+                        .context_for_files(std::slice::from_ref(&target), None, 20)
+                        .unwrap()
+                        .0
+                        .len(),
+                    20
+                );
+            }
+        }));
+    }
+    {
+        let db_path = Arc::clone(&db_path);
+        let rules_path = Arc::clone(&rules_path);
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let store = Store::open(&db_path, false).unwrap();
+            barrier.wait();
+            for _ in 0..3 {
+                store.export_to_file(&rules_path).unwrap();
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let store = Store::open(&db_path, false).unwrap();
+    assert_eq!(store.dump_all().unwrap().len(), total);
+    assert_eq!(
+        store
+            .get("service-000/module-00/rule-000000")
+            .unwrap()
+            .as_deref(),
+        Some("Concurrent verified update from writer 0, record 0")
+    );
+    store.export_to_file(&rules_path).unwrap();
+    let replica_path = dir.join("replica.db");
+    let mut replica = Store::open(&replica_path, true).unwrap();
+    replica.sync_with_file(&rules_path).unwrap();
+    assert_eq!(replica.dump_all().unwrap().len(), total);
+    assert_eq!(
+        replica.export_rules_text().unwrap(),
+        store.export_rules_text().unwrap()
+    );
+    let temp_artifacts = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+        .count();
+    assert_eq!(temp_artifacts, 0);
+
+    println!(
+        "100k durability: export={export_seconds:.2}s export_bytes={export_bytes} concurrent_writers=2 concurrent_readers=2 concurrent_exporters=1 replica_records={total}"
+    );
+
+    drop(replica);
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
 }

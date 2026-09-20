@@ -9,6 +9,64 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 impl Store {
+    fn select_diverse_context_keys(
+        direct: Vec<String>,
+        related: Vec<String>,
+        universal: Vec<String>,
+        limit: usize,
+    ) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        // Reserve bounded space for graph evidence and repository-wide rules so
+        // a large exact-path cluster cannot starve the information most likely
+        // to change an agent decision. Empty classes return their slots.
+        let direct_reserve = usize::from(!direct.is_empty());
+        let non_direct_budget = limit.saturating_sub(direct_reserve);
+        let related_target = if related.is_empty() {
+            0
+        } else {
+            (limit / 4).max(1).min(related.len()).min(non_direct_budget)
+        };
+        let universal_budget = non_direct_budget.saturating_sub(related_target);
+        let universal_target = if universal.is_empty() {
+            0
+        } else {
+            (limit / 10)
+                .max(1)
+                .min(universal.len())
+                .min(universal_budget)
+        };
+        let direct_target = limit.saturating_sub(related_target + universal_target);
+
+        let mut selected = Vec::with_capacity(limit.min(64));
+        let mut seen = HashSet::with_capacity(limit.min(64));
+        let mut append = |keys: &[String], take: usize| {
+            for key in keys.iter().take(take) {
+                if seen.insert(key.clone()) {
+                    selected.push(key.clone());
+                }
+            }
+        };
+        append(&direct, direct_target);
+        append(&related, related_target);
+        append(&universal, universal_target);
+
+        // Deterministic backfill ensures sparse classes never reduce recall.
+        for keys in [&direct, &related, &universal] {
+            for key in keys {
+                if selected.len() == limit {
+                    return selected;
+                }
+                if seen.insert(key.clone()) {
+                    selected.push(key.clone());
+                }
+            }
+        }
+        selected
+    }
+
     /// Create a directed relation between two memories (e.g. source mitigates target, or source depends_on target).
     pub fn relate(&mut self, source_key: &str, rel_type: &str, target_key: &str) -> Result<()> {
         let s = source_key.trim();
@@ -440,20 +498,19 @@ impl Store {
 
         let rules = match (clean_anchor, clean_topic) {
             (Some(a), maybe_topic) => {
-                let direct = self.ranked_anchor_keys(&[a], maybe_topic, max_limit)?;
+                let candidate_limit = max_limit.saturating_mul(4).min(512).max(max_limit);
+                let direct = self.ranked_anchor_keys(&[a], maybe_topic, candidate_limit)?;
                 let keys: Vec<&str> = direct.iter().map(String::as_str).collect();
-                let related = self.get_outgoing_targets(&keys, max_limit.saturating_mul(4))?;
-                let mut selected = direct;
-                for key in related {
-                    if selected.len() == max_limit {
-                        break;
-                    }
-                    if maybe_topic.is_none_or(|prefix| key.starts_with(prefix) || key == prefix)
-                        && !selected.contains(&key)
-                    {
-                        selected.push(key);
-                    }
-                }
+                let related = self
+                    .get_outgoing_targets(&keys, candidate_limit)?
+                    .into_iter()
+                    .filter(|key| {
+                        maybe_topic.is_none_or(|prefix| key.starts_with(prefix) || key == prefix)
+                    })
+                    .collect();
+                let universal = self.universal_keys(maybe_topic, candidate_limit)?;
+                let selected =
+                    Self::select_diverse_context_keys(direct, related, universal, max_limit);
                 self.materialize_active_rules(&selected)?
             }
             (None, Some(t)) => {
@@ -528,18 +585,19 @@ impl Store {
 
         let max_limit = if limit == 0 { 20 } else { limit };
         let clean_topic = topic.map(str::trim).filter(|s| !s.is_empty());
-        let direct_keys = self.ranked_anchor_keys(files, clean_topic, max_limit)?;
-        let mut direct_key_set = HashSet::with_capacity(max_limit.min(direct_keys.len()));
+        let candidate_limit = max_limit.saturating_mul(4).min(512).max(max_limit);
+        let direct_keys = self.ranked_anchor_keys(files, clean_topic, candidate_limit)?;
+        let mut direct_key_set = HashSet::with_capacity(candidate_limit.min(direct_keys.len()));
         for key in &direct_keys {
             direct_key_set.insert(key.clone());
         }
-        let universal_keys = self.universal_keys(clean_topic, max_limit)?;
+        let universal_keys = self.universal_keys(clean_topic, candidate_limit)?;
 
         // 2. Expand one graph hop through indexed source/target lookups.
         let mut related_keys = BTreeSet::new();
         if !direct_keys.is_empty() {
             let keys: Vec<&str> = direct_keys.iter().map(String::as_str).collect();
-            let touching = self.get_relations_touching(&keys, max_limit.saturating_mul(4))?;
+            let touching = self.get_relations_touching(&keys, candidate_limit)?;
             for rel in touching {
                 let candidate = if direct_key_set.contains(&rel.source_key) {
                     Some(rel.target_key)
@@ -562,20 +620,12 @@ impl Store {
         }
 
         // 3. Select a bounded, deterministic key set: direct, related, universal.
-        let mut selected_keys = Vec::with_capacity(max_limit.min(64));
-        let mut seen_keys = HashSet::new();
-        for key in direct_keys
-            .into_iter()
-            .chain(related_keys)
-            .chain(universal_keys)
-        {
-            if seen_keys.insert(key.clone()) {
-                selected_keys.push(key);
-                if selected_keys.len() == max_limit {
-                    break;
-                }
-            }
-        }
+        let selected_keys = Self::select_diverse_context_keys(
+            direct_keys,
+            related_keys.into_iter().collect(),
+            universal_keys,
+            max_limit,
+        );
 
         // 4. Materialize only selected records.
         let combined_rules = self.materialize_active_rules(&selected_keys)?;
