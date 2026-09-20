@@ -5,6 +5,8 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::fs;
 use std::path::Path;
 
+const SCHEMA_VERSION: u32 = 6;
+
 impl Store {
     /// Open SQLite database with performance-optimized PRAGMAs.
     pub fn open(db_path: &Path, need_write: bool) -> Result<Self> {
@@ -52,7 +54,12 @@ impl Store {
 
         let user_version: u32 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
 
-        if user_version >= 5 {
+        if user_version > SCHEMA_VERSION {
+            return Err(Error::Usage(format!(
+                "Database schema {user_version} is newer than supported schema {SCHEMA_VERSION}; upgrade agent-mem before writing"
+            )));
+        }
+        if user_version == SCHEMA_VERSION {
             // Fast path: schema and migrations already initialized. Bypass DDL and table scans.
             return Ok(());
         }
@@ -119,21 +126,35 @@ impl Store {
                     memory_key TEXT NOT NULL UNIQUE,
                     fingerprint_hi INTEGER NOT NULL,
                     fingerprint_lo INTEGER NOT NULL
-                );",
+                );
+                CREATE TABLE IF NOT EXISTS memory_metadata (
+                    memory_key TEXT PRIMARY KEY,
+                    provenance TEXT NOT NULL,
+                    trust TEXT NOT NULL CHECK (trust IN ('local', 'reviewed', 'untrusted')),
+                    created_at INTEGER NOT NULL,
+                    reviewed_at INTEGER
+                ) WITHOUT ROWID;",
             )?;
-            tx.execute("PRAGMA user_version = 5;", [])?;
+            tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
+            tx.commit()?;
+        } else if user_version == 5 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            create_metadata_schema(&tx)?;
+            tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 4 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             create_semantic_schema(&tx)?;
-            tx.execute("PRAGMA user_version = 5;", [])?;
+            create_metadata_schema(&tx)?;
+            tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 3 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             create_route_schema(&tx)?;
             backfill_routes(&tx)?;
             create_semantic_schema(&tx)?;
-            tx.execute("PRAGMA user_version = 5;", [])?;
+            create_metadata_schema(&tx)?;
+            tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -216,7 +237,8 @@ impl Store {
             create_route_schema(&tx)?;
             backfill_routes(&tx)?;
             create_semantic_schema(&tx)?;
-            tx.execute("PRAGMA user_version = 5;", [])?;
+            create_metadata_schema(&tx)?;
+            tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         }
 
@@ -289,6 +311,22 @@ fn create_semantic_schema(tx: &Transaction<'_>) -> Result<()> {
             fingerprint_hi INTEGER NOT NULL,
             fingerprint_lo INTEGER NOT NULL
         );",
+    )?;
+    Ok(())
+}
+
+fn create_metadata_schema(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_metadata (
+            memory_key TEXT PRIMARY KEY,
+            provenance TEXT NOT NULL,
+            trust TEXT NOT NULL CHECK (trust IN ('local', 'reviewed', 'untrusted')),
+            created_at INTEGER NOT NULL,
+            reviewed_at INTEGER
+        ) WITHOUT ROWID;
+        INSERT OR IGNORE INTO memory_metadata
+            (memory_key, provenance, trust, created_at, reviewed_at)
+        SELECT key, 'migration:legacy', 'local', updated_at, NULL FROM memories;",
     )?;
     Ok(())
 }

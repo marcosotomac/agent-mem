@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::security::{MAX_PROVENANCE_BYTES, reject_secret};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
 #[cfg(feature = "semantic-local")]
 use std::cell::RefCell;
@@ -29,6 +30,9 @@ pub const MAX_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_ANCHOR_BYTES: usize = 4 * 1024;
 pub const MAX_KIND_BYTES: usize = 64;
 pub const MAX_RELATION_TYPE_BYTES: usize = 64;
+pub const TRUST_LOCAL: &str = "local";
+pub const TRUST_REVIEWED: &str = "reviewed";
+pub const TRUST_UNTRUSTED: &str = "untrusted";
 
 pub struct Store {
     pub(crate) conn: Connection,
@@ -96,7 +100,7 @@ pub struct BatchRule<'a> {
     pub relation: Option<(&'a str, &'a str)>,
 }
 
-fn reject_oversized(field: &str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn reject_oversized(field: &str, value: &str, max: usize) -> Result<()> {
     if value.len() > max {
         return Err(crate::error::Error::Usage(format!(
             "Memory {field} exceeds the {max}-byte limit"
@@ -117,12 +121,16 @@ pub(crate) fn validate_batch_rule(rule: &BatchRule<'_>) -> Result<()> {
         ));
     }
     reject_oversized("key", rule.key, MAX_KEY_BYTES)?;
+    reject_secret(rule.key)?;
     reject_oversized("value", rule.val, MAX_VALUE_BYTES)?;
+    reject_secret(rule.val)?;
     if let Some(anchor) = rule.anchor {
         reject_oversized("anchor", anchor, MAX_ANCHOR_BYTES)?;
+        reject_secret(anchor)?;
     }
     if let Some(kind) = rule.kind {
         reject_oversized("kind", kind, MAX_KIND_BYTES)?;
+        reject_secret(kind)?;
     }
     if let Some((rel_type, target)) = rule.relation {
         if rel_type.trim().is_empty() || target.trim().is_empty() {
@@ -132,6 +140,8 @@ pub(crate) fn validate_batch_rule(rule: &BatchRule<'_>) -> Result<()> {
         }
         reject_oversized("relation type", rel_type, MAX_RELATION_TYPE_BYTES)?;
         reject_oversized("relation target", target, MAX_KEY_BYTES)?;
+        reject_secret(rel_type)?;
+        reject_secret(target)?;
     }
     Ok(())
 }
@@ -150,8 +160,32 @@ impl Store {
 
     /// Atomically insert or update a batch of memory rules in a single SQLite transaction.
     pub fn set_batch<'a>(&mut self, rules: &[BatchRule<'a>]) -> Result<usize> {
+        self.set_batch_with_metadata(rules, "local:api", TRUST_LOCAL)
+    }
+
+    /// Atomically insert memories and their audit metadata. Callers may provide
+    /// a compact provenance label, but trust is constrained to the closed set.
+    pub fn set_batch_with_metadata<'a>(
+        &mut self,
+        rules: &[BatchRule<'a>],
+        provenance: &str,
+        trust: &str,
+    ) -> Result<usize> {
         if rules.is_empty() {
             return Ok(0);
+        }
+
+        let provenance = provenance.trim();
+        if provenance.is_empty() || provenance.len() > MAX_PROVENANCE_BYTES {
+            return Err(crate::error::Error::Usage(format!(
+                "Memory provenance must be between 1 and {MAX_PROVENANCE_BYTES} bytes"
+            )));
+        }
+        reject_secret(provenance)?;
+        if !matches!(trust, TRUST_LOCAL | TRUST_REVIEWED | TRUST_UNTRUSTED) {
+            return Err(crate::error::Error::Usage(format!(
+                "Invalid trust state '{trust}'"
+            )));
         }
 
         // Validate all rules up front before any transaction or I/O
@@ -190,6 +224,22 @@ impl Store {
             )?;
             let mut delete_routes =
                 tx.prepare_cached("DELETE FROM memory_routes WHERE memory_key = ?1;")?;
+            let mut upsert_metadata = tx.prepare_cached(
+                "INSERT INTO memory_metadata (memory_key, provenance, trust, created_at, reviewed_at)
+                 VALUES (?1, ?2, ?3, ?4, CASE WHEN ?3 = 'reviewed' THEN ?4 ELSE NULL END)
+                 ON CONFLICT(memory_key) DO UPDATE SET
+                    provenance = excluded.provenance,
+                    trust = CASE
+                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local'
+                            THEN 'reviewed'
+                        ELSE excluded.trust
+                    END,
+                    reviewed_at = CASE
+                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local'
+                            THEN memory_metadata.reviewed_at
+                        ELSE excluded.reviewed_at
+                    END;",
+            )?;
 
             for r in rules {
                 let trimmed_key = r.key.trim();
@@ -219,6 +269,7 @@ impl Store {
                     effective_kind
                 ])?;
                 insert_memory_routes(&tx, trimmed_key, trimmed_anchor)?;
+                upsert_metadata.execute(params![trimmed_key, provenance, trust, now])?;
 
                 if let Some((rel_type, target)) = r.relation {
                     insert_rel.execute(params![
@@ -262,6 +313,43 @@ impl Store {
             relation,
         }])?;
         Ok(())
+    }
+
+    pub fn metadata(&self, key: &str) -> Result<Option<MemoryMetadata>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT memory_key, provenance, trust, created_at, reviewed_at
+             FROM memory_metadata WHERE memory_key = ?1 LIMIT 1;",
+        )?;
+        let mut rows = stmt.query(params![key.trim()])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(MemoryMetadata {
+                key: row.get(0)?,
+                provenance: row.get(1)?,
+                trust: row.get(2)?,
+                created_at: row.get(3)?,
+                reviewed_at: row.get(4)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Trust transitions are deliberately exposed through the native CLI only;
+    /// an MCP model cannot promote its own untrusted input.
+    pub fn set_trust(&mut self, key: &str, trust: &str) -> Result<bool> {
+        if !matches!(trust, TRUST_REVIEWED | TRUST_UNTRUSTED) {
+            return Err(crate::error::Error::Usage(
+                "Trust must be 'reviewed' or 'untrusted'".into(),
+            ));
+        }
+        let now = now_epoch();
+        let changed = self.conn.execute(
+            "UPDATE memory_metadata
+             SET trust = ?2, reviewed_at = CASE WHEN ?2 = 'reviewed' THEN ?3 ELSE NULL END
+             WHERE memory_key = ?1;",
+            params![key.trim(), trust, now],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Set or update a key-value memory rule with optional repo-relative code anchor.
@@ -425,6 +513,10 @@ impl Store {
             )?;
             tx.execute(
                 "DELETE FROM memory_routes WHERE memory_key = ?1;",
+                params![key.trim()],
+            )?;
+            tx.execute(
+                "DELETE FROM memory_metadata WHERE memory_key = ?1;",
                 params![key.trim()],
             )?;
             tx.execute(

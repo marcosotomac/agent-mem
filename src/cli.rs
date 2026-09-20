@@ -39,6 +39,13 @@ pub enum Command {
     Unarchive {
         key: String,
     },
+    Trust {
+        key: String,
+        reviewed: bool,
+    },
+    Metadata {
+        key: String,
+    },
     Find {
         query: String,
     },
@@ -61,7 +68,9 @@ pub enum Command {
     SemanticBuild,
     SemanticStatus,
     SemanticClear,
-    Mcp,
+    Mcp {
+        read_only: bool,
+    },
     McpInstall {
         client: Option<String>,
     },
@@ -93,6 +102,7 @@ impl Command {
                 | Command::Del { .. }
                 | Command::Archive { .. }
                 | Command::Unarchive { .. }
+                | Command::Trust { .. }
                 | Command::Clean { dry_run: false }
                 | Command::SessionAdd { .. }
                 | Command::Sync { export: false, .. }
@@ -214,6 +224,23 @@ where
                 return Err(Error::Usage("Usage: agent-mem unarchive <key>".to_string()));
             }
             Ok(Command::Unarchive {
+                key: args[2].clone(),
+            })
+        }
+        "trust" | "untrust" => {
+            if args.len() < 3 {
+                return Err(Error::Usage(format!("Usage: agent-mem {cmd_str} <key>")));
+            }
+            Ok(Command::Trust {
+                key: args[2].clone(),
+                reviewed: cmd_str == "trust",
+            })
+        }
+        "metadata" | "meta" => {
+            if args.len() < 3 {
+                return Err(Error::Usage("Usage: agent-mem metadata <key>".to_string()));
+            }
+            Ok(Command::Metadata {
                 key: args[2].clone(),
             })
         }
@@ -346,10 +373,15 @@ where
                 };
                 Ok(Command::McpUninstall { client })
             } else {
-                Ok(Command::Mcp)
+                Ok(Command::Mcp {
+                    read_only: args
+                        .iter()
+                        .skip(2)
+                        .any(|arg| arg == "--read-only" || arg == "-r"),
+                })
             }
         }
-        "--mcp" => Ok(Command::Mcp),
+        "--mcp" => Ok(Command::Mcp { read_only: false }),
         "tui" | "ui" => Ok(Command::Tui),
         "doctor" => Ok(Command::Doctor),
         "projects" => {
@@ -400,8 +432,8 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             print_init(&report);
             Ok(())
         }
-        Command::Mcp => {
-            let server = crate::mcp::McpServer::new();
+        Command::Mcp { read_only } => {
+            let server = crate::mcp::McpServer::new_with_mode(read_only);
             server.run_stdio()
         }
         Command::McpInstall { client } => {
@@ -571,6 +603,23 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     }
                     print_unarchive(&key);
                 }
+                Command::Trust { key, reviewed } => {
+                    let trust = if reviewed {
+                        crate::store::TRUST_REVIEWED
+                    } else {
+                        crate::store::TRUST_UNTRUSTED
+                    };
+                    if !store.set_trust(&key, trust)? {
+                        return Err(crate::error::Error::NotFound(key));
+                    }
+                    print_trust(&key, trust);
+                }
+                Command::Metadata { key } => {
+                    let metadata = store
+                        .metadata(&key)?
+                        .ok_or_else(|| crate::error::Error::NotFound(key.clone()))?;
+                    print_metadata(&metadata);
+                }
                 Command::Dump => {
                     let entries = store.dump()?;
                     print_dump(&entries);
@@ -683,7 +732,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 | Command::Projects { .. }
                 | Command::HookPostCommit { .. }
                 | Command::Tui
-                | Command::Mcp
+                | Command::Mcp { .. }
                 | Command::McpInstall { .. }
                 | Command::McpUninstall { .. } => unreachable!(),
             }

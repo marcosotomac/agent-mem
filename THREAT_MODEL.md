@@ -29,10 +29,24 @@ An attacker can store text such as instructions to run a command, ignore policy,
 or exfiltrate a secret. `agent-mem` does not execute rule contents, fetch URLs
 from them, or elevate them above normal tool data. The text format is reviewable
 in Git, malformed encoded records are rejected atomically, and archived rules
-are distinguishable from active ones. Consumers must treat returned values as
-quoted evidence and validate any requested action against higher-priority policy.
+are distinguishable from active ones. Imports from `.agent-rules` are recorded
+with `untrusted` trust and `rules-file:.agent-rules` provenance; MCP context and
+search label those values. Only the local CLI can promote a record to `reviewed`,
+so a model cannot approve its own input through MCP. Consumers must treat
+returned values as quoted evidence and validate any requested action against
+higher-priority policy.
 Semantic prompt-injection detection is intentionally not claimed: keyword filters
 are bypassable and would create false confidence.
+
+### Secret persistence
+
+Writes and imports reject high-confidence credential shapes (private-key PEMs,
+GitHub and AWS keys, JWTs, bearer credentials, and explicit secret assignments)
+before opening a transaction. Rejection is atomic and errors never echo the
+suspected credential. The scanner deliberately avoids entropy-only guesses and
+keyword-only matches, so it reduces accidental persistence but cannot prove that
+arbitrary text contains no secret. Upstream clients must still redact credentials
+and use dedicated secret scanners for repository-wide assurance.
 
 ### Resource exhaustion and oversized writes
 
@@ -51,6 +65,13 @@ canonical path. Ambiguous selection fails closed. The global MCP process does no
 create a project database in its launch directory. Global scope is separate from
 project scope.
 
+### Unauthorized MCP mutation
+
+`agent-mem mcp --read-only` and `AGENT_MEM_READ_ONLY=1` remove write tools from
+discovery and reject write dispatches independently. This is a process-wide
+capability boundary for clients that only need retrieval. Full-mode writes retain
+the limits above and record their MCP scope as provenance.
+
 ### Configuration and filesystem mutation
 
 Initialization is repository-local and does not modify AI-client configuration.
@@ -64,7 +85,11 @@ exclusive temporary file and rename.
 NPX and the shell installer download over HTTPS and verify the selected archive
 against `SHA256SUMS.txt` before extraction. The release workflow generates the
 manifest from built artifacts and emits GitHub build-provenance attestations.
-Package and Homebrew metadata are version-gated in CI. Checksums are integrity
+The NPX launcher never substitutes a binary found on `PATH`, version-checks its
+version-specific cache, and accepts a development override only when its version
+matches the package. Package and Homebrew metadata are version-gated in CI, and
+release archives run clean-install round trips on Linux, macOS, and Windows
+before publication. Checksums are integrity
 controls, not protection from a compromised release account; verify the GitHub
 attestation when that threat matters.
 

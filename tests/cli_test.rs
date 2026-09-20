@@ -219,11 +219,28 @@ fn test_parse_args() {
     // Mcp
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "mcp".into()]).unwrap(),
-        Command::Mcp
+        Command::Mcp { read_only: false }
     );
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "--mcp".into()]).unwrap(),
-        Command::Mcp
+        Command::Mcp { read_only: false }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "mcp".into(), "--read-only".into()]).unwrap(),
+        Command::Mcp { read_only: true }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "trust".into(), "rule/a".into()]).unwrap(),
+        Command::Trust {
+            key: "rule/a".into(),
+            reviewed: true,
+        }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "meta".into(), "rule/a".into()]).unwrap(),
+        Command::Metadata {
+            key: "rule/a".into(),
+        }
     );
 
     // Doctor

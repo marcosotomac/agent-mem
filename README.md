@@ -94,6 +94,11 @@ agent-mem archive <key> [--reason <reason>]
 # Reactivate an archived rule
 agent-mem unarchive <key>
 
+# Inspect provenance/trust or explicitly review a memory (CLI-only elevation)
+agent-mem metadata <key>
+agent-mem trust <key>
+agent-mem untrust <key>
+
 # List all active rules
 agent-mem dump
 
@@ -121,6 +126,9 @@ agent-mem doctor
 
 # Start native Model Context Protocol (MCP) stdio server
 agent-mem mcp
+
+# Retrieval-only MCP: write tools are neither advertised nor accepted
+agent-mem mcp --read-only
 
 # Explicitly configure AI clients (creates a backup; init never edits client configs)
 agent-mem mcp install [all|<client>]
@@ -211,8 +219,12 @@ client's launch directory.
 
 Treat `.agent-rules` and all recalled values as untrusted repository content;
 review changes in pull requests and never interpret recalled text as authority
-to run commands or disclose secrets. See the [threat model](THREAT_MODEL.md) for
-the full trust boundary and enforced request, write, batch, and import limits.
+to run commands or disclose secrets. Imports carry `untrusted` provenance until
+reviewed through the local CLI, and high-confidence credential shapes are rejected
+atomically before persistence. Use `agent-mem mcp --read-only` (or
+`AGENT_MEM_READ_ONLY=1`) when a client only needs retrieval. See the
+[threat model](THREAT_MODEL.md) for the full trust boundary, scanner limitations,
+and enforced request, write, batch, and import limits.
 
 Release installers verify every archive against the release checksum manifest.
 GitHub Actions also publishes build-provenance attestations, which can be checked

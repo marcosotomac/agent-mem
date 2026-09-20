@@ -270,7 +270,7 @@ fn test_v3_migration_backfills_route_index() {
     let route_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM memory_routes;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     assert!(route_count > 0);
 
     drop(conn);
@@ -1129,5 +1129,153 @@ fn test_sync_rejects_oversized_rules_file_before_reading_it() {
 
     assert!(error.to_string().contains("33554432-byte import limit"));
     drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_provenance_trust_and_secret_scanning() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_trust_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rules_path = dir.join(".agent-rules");
+    let mut store = Store::open(&dir.join("mem.db"), true).unwrap();
+
+    store.set("local/rule", "Safe local guidance").unwrap();
+    let local = store.metadata("local/rule").unwrap().unwrap();
+    assert_eq!(local.provenance, "local:api");
+    assert_eq!(local.trust, agent_mem::store::TRUST_LOCAL);
+
+    std::fs::write(&rules_path, "shared/rule = Review changes before deploy\n").unwrap();
+    store.sync_with_file(&rules_path).unwrap();
+    let imported = store.metadata("shared/rule").unwrap().unwrap();
+    assert_eq!(imported.provenance, "rules-file:.agent-rules");
+    assert_eq!(imported.trust, agent_mem::store::TRUST_UNTRUSTED);
+    assert!(
+        store
+            .set_trust("shared/rule", agent_mem::store::TRUST_REVIEWED)
+            .unwrap()
+    );
+    assert_eq!(
+        store.metadata("shared/rule").unwrap().unwrap().trust,
+        agent_mem::store::TRUST_REVIEWED
+    );
+
+    let secret = "api_key=abcdefghijklmnopqrstuvwxyz123456";
+    let error = store.set("secret/leak", secret).unwrap_err();
+    assert!(error.to_string().contains("credential assignment"));
+    assert_eq!(store.get("secret/leak").unwrap(), None);
+    assert!(store.session_add(secret).is_err());
+
+    store
+        .capture_commit(
+            Some((
+                "hook/verified",
+                "Commit-derived engineering decision",
+                Some("src/hook.rs:1"),
+                Some("decision"),
+            )),
+            &[],
+            "Captured safe commit",
+        )
+        .unwrap();
+    let hook = store.metadata("hook/verified").unwrap().unwrap();
+    assert_eq!(hook.provenance, "git-hook:commit");
+    assert_eq!(hook.trust, agent_mem::store::TRUST_LOCAL);
+    let session_count = store.session_list(20).unwrap().len();
+    assert!(
+        store
+            .capture_commit(None, &[], "password=abcdefghijklmnopqrstuvwxyz")
+            .is_err()
+    );
+    assert_eq!(store.session_list(20).unwrap().len(), session_count);
+
+    std::fs::write(
+        &rules_path,
+        format!("shared/rule = unchanged\nsecret/leak = {secret}\n"),
+    )
+    .unwrap();
+    assert!(store.sync_with_file(&rules_path).is_err());
+    assert_eq!(
+        store.get("shared/rule").unwrap().as_deref(),
+        Some("Review changes before deploy")
+    );
+
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_v5_migration_preserves_rules_and_backfills_metadata() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_v5_migration_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    {
+        let mut store = Store::open(&db_path, true).unwrap();
+        store
+            .set("decision/preserved", "Never lose this value")
+            .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("DROP TABLE memory_metadata; PRAGMA user_version = 5;")
+            .unwrap();
+    }
+
+    let store = Store::open(&db_path, true).unwrap();
+    assert_eq!(
+        store.get("decision/preserved").unwrap().as_deref(),
+        Some("Never lose this value")
+    );
+    let metadata = store.metadata("decision/preserved").unwrap().unwrap();
+    assert_eq!(metadata.provenance, "migration:legacy");
+    assert_eq!(metadata.trust, agent_mem::store::TRUST_LOCAL);
+    assert_eq!(store.stats(&db_path).unwrap().user_version, 6);
+
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_newer_schema_fails_closed_without_mutation() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_future_schema_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 7;").unwrap();
+    }
+
+    let error = match Store::open(&db_path, true) {
+        Ok(_) => panic!("future schemas must be rejected"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("newer than supported schema 6"));
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let version: u32 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 7);
+
+    drop(conn);
     std::fs::remove_dir_all(dir).unwrap();
 }
