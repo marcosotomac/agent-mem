@@ -1,0 +1,3863 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>agent-mem · the persistent memory runtime for AI coding agents</title>
+  <meta name="description" content="Persistent memory engine and knowledge hypergraph for Cursor, Claude Code, and autonomous coding agents. Zero daemons, SQLite WAL in Rust, and conflict-free Git sync." />
+
+  <!-- Instant theme init (defaults to dark, prevents FOUC) -->
+  <script>
+    (function() {
+      try {
+        var saved = localStorage.getItem('agent-mem-theme');
+        var theme = (saved === 'light') ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- Fonts: Archivo (Headings), Inter (Body), JetBrains Mono (Terminal & Code) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ─────────────────────────────────────────────────────────────
+       GHOSTTY + HERDR COLOR SYSTEM & DUAL THEME TOKENS
+       Exact Ghostty palette (Dark: User Dotfiles · Light: Ghostty Light)
+       Default: DARK MODE
+       ───────────────────────────────────────────────────────────── */
+    :root,
+    [data-theme="dark"] {
+      --bg: #0e1015;
+      --bg-elevated: #13161f;
+      --ink: #ffffff;
+      --ink-soft: #c9d1d9;
+      --muted: #8b949e;
+      --muted-2: #484f58;
+      --line: #21262d;
+      --line-strong: #30363d;
+
+      /* Ghostty Custom Dark Palette (~/.config/ghostty/config) */
+      --gt-bg: #12141c;
+      --gt-fg: #c9d1d9;
+      --gt-cursor: #89b4fa;
+      --gt-selection: #26334d;
+      --gt-black: #161b22;
+      --gt-red: #e89a9a;
+      --gt-green: #a6d189;
+      --gt-yellow: #e5c890;
+      --gt-blue: #8caaee;
+      --gt-purple: #ca9ee6;
+      --gt-cyan: #81c8be;
+      --gt-white: #c9d1d9;
+
+      /* Claude Code CLI tokens */
+      --cc-coral: #d97757;
+      --cc-coral-bright: #e58b6e;
+      --cc-file: #b1b9f9;
+
+      /* Herdr Multiplexer Tokens */
+      --herdr-sidebar-bg: #0f1118;
+      --herdr-tab-bg: #151822;
+      --herdr-tab-active-bg: #1a1e2b;
+      --herdr-border: #232836;
+
+      /* Titlebar & Window Chrome */
+      --ghostty-titlebar-bg: #10121a;
+      --ghostty-window-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.04);
+
+      /* Cockpit TUI */
+      --tui-header-bg: #161a24;
+      --tui-list-bg: #11131b;
+      --tui-hover-bg: rgba(255, 255, 255, 0.03);
+
+      --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --head: "Archivo", -apple-system, BlinkMacSystemFont, sans-serif;
+
+      --radius: 6px;
+      --max: 1140px;
+    }
+
+    [data-theme="light"] {
+      --bg: #f6f8fa;
+      --bg-elevated: #ffffff;
+      --ink: #1f2328;
+      --ink-soft: #24292f;
+      --muted: #656d76;
+      --muted-2: #8c959f;
+      --line: #d0d7de;
+      --line-strong: #afb8c1;
+
+      /* Ghostty Light Palette (GitHub Light / Paper / Solarized Light) */
+      --gt-bg: #ffffff;
+      --gt-fg: #1f2328;
+      --gt-cursor: #0969da;
+      --gt-selection: #b6e3ff;
+      --gt-black: #24292f;
+      --gt-red: #cf222e;
+      --gt-green: #1a7f37;
+      --gt-yellow: #9a6700;
+      --gt-blue: #0969da;
+      --gt-purple: #8250df;
+      --gt-cyan: #0969da;
+      --gt-white: #ffffff;
+
+      /* Claude Code CLI tokens in Light Mode */
+      --cc-coral: #bc4c2b;
+      --cc-coral-bright: #cf5c36;
+      --cc-file: #0550ae;
+
+      /* Herdr Multiplexer Tokens in Light Mode */
+      --herdr-sidebar-bg: #f6f8fa;
+      --herdr-tab-bg: #eaedf1;
+      --herdr-tab-active-bg: #ffffff;
+      --herdr-border: #d0d7de;
+
+      /* Titlebar & Window Chrome */
+      --ghostty-titlebar-bg: #eaeef2;
+      --ghostty-window-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.08);
+
+      /* Cockpit TUI */
+      --tui-header-bg: #eaedf1;
+      --tui-list-bg: #f6f8fa;
+      --tui-hover-bg: rgba(0, 0, 0, 0.04);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      background-color: var(--bg);
+      color: var(--ink-soft);
+      font-family: var(--sans);
+      font-size: 15px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    ::selection {
+      background: var(--gt-selection);
+      color: var(--gt-fg);
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       LAYOUT CONTAINER & NAVBAR
+       ───────────────────────────────────────────────────────────── */
+    .frame {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 0 1.5rem;
+    }
+
+    .nav {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 0.85rem;
+    }
+
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 700;
+      color: var(--ink);
+      letter-spacing: -0.01em;
+    }
+
+    .nav-brand .prompt-glyph {
+      color: var(--gt-cursor);
+      font-weight: 800;
+    }
+
+    .nav-badge {
+      font-size: 0.72rem;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--line-strong);
+      color: var(--gt-cyan);
+      font-weight: 500;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      transition: color 0.15s ease;
+    }
+
+    .nav-links a:hover {
+      color: var(--ink);
+    }
+
+    .theme-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 5px 9px;
+      border-radius: var(--radius);
+      background: var(--bg-elevated);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      user-select: none;
+    }
+
+    .theme-toggle-btn:hover {
+      color: var(--ink);
+      border-color: var(--line-strong);
+    }
+
+    .theme-sun {
+      display: none;
+    }
+    .theme-moon {
+      display: inline-block;
+    }
+
+    [data-theme="light"] .theme-sun {
+      display: inline-block;
+      color: var(--gt-yellow);
+    }
+    [data-theme="light"] .theme-moon {
+      display: none;
+    }
+
+    .nav-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 6px 12px;
+      border-radius: var(--radius);
+      background: var(--bg-elevated);
+      border: 1px solid var(--line-strong);
+      color: var(--ink);
+      font-size: 0.8rem;
+      font-weight: 600;
+      transition: all 0.15s ease;
+    }
+
+    .nav-btn:hover {
+      background: var(--line);
+      border-color: var(--gt-blue);
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       EDITORIAL HERO (AUTHENTIC & TYPOGRAPHIC)
+       ───────────────────────────────────────────────────────────── */
+    .hero-editorial {
+      padding: 3.2rem 0 1.8rem 0;
+      text-align: left;
+      max-width: 840px;
+    }
+
+    .hero-title {
+      font-family: var(--head);
+      font-size: clamp(2.3rem, 4.8vw, 3.8rem);
+      font-weight: 900;
+      line-height: 1.05;
+      letter-spacing: -0.04em;
+      color: var(--ink);
+      margin: 0 0 1.1rem 0;
+    }
+
+    .hero-lede {
+      font-size: clamp(1.02rem, 1.6vw, 1.18rem);
+      color: #9aa2b0;
+      line-height: 1.62;
+      margin-bottom: 1.8rem;
+    }
+
+    .hero-lede strong {
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    .hero-install-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .hero-install-box {
+      display: inline-flex;
+      align-items: center;
+      background: var(--gt-bg);
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      padding: 0.55rem 0.85rem;
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      color: var(--gt-fg);
+      cursor: pointer;
+      transition: border-color 0.15s ease;
+    }
+
+    .hero-install-box:hover {
+      border-color: var(--gt-blue);
+    }
+
+    .prompt-sym {
+      color: var(--gt-cursor);
+      margin-right: 0.65rem;
+      user-select: none;
+      font-weight: 700;
+    }
+
+    .hero-install-box code, .hero-install-alt code {
+      font-family: inherit;
+    }
+
+    .copy-pill {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      padding: 3px 8px;
+      margin-left: 1rem;
+      transition: all 0.15s ease;
+    }
+
+    .hero-install-box:hover .copy-pill, .hero-install-alt:hover .copy-pill {
+      background: rgba(255, 255, 255, 0.15);
+      color: var(--ink);
+    }
+
+    .hero-divider {
+      color: var(--line-strong);
+      font-family: var(--mono);
+      user-select: none;
+    }
+
+    .hero-install-alt {
+      display: inline-flex;
+      align-items: center;
+      background: transparent;
+      border: 1px dashed var(--line);
+      border-radius: var(--radius);
+      padding: 0.55rem 0.85rem;
+      font-family: var(--mono);
+      font-size: 0.84rem;
+      color: var(--muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .hero-install-alt:hover {
+      border-color: var(--muted);
+      color: var(--gt-fg);
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       3-STEP MENTAL MODEL RIBBON
+       ───────────────────────────────────────────────────────────── */
+    .how-it-works-bar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      align-items: center;
+      gap: 1.2rem;
+      margin: 2.2rem 0 2rem 0;
+      padding: 1.1rem 1.4rem;
+      background: var(--bg-elevated);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .hiw-card {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .hiw-step {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      font-weight: 700;
+      color: var(--gt-cyan);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .hiw-title {
+      font-family: var(--head);
+      font-weight: 700;
+      font-size: 0.95rem;
+      color: var(--ink);
+    }
+
+    .hiw-desc {
+      font-size: 0.78rem;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .hiw-desc code {
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 1px 4px;
+      border-radius: 3px;
+      color: var(--gt-fg);
+    }
+
+    .hiw-separator {
+      color: var(--line-strong);
+      font-family: var(--mono);
+      font-size: 1.2rem;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       THE CENTERPIECE: GHOSTTY + HERDR MULTIPLEXER PRODUCT SHOT
+       ───────────────────────────────────────────────────────────── */
+    .mock-caption-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.65rem;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--muted);
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .caption-left {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+    }
+
+    .caption-title {
+      color: var(--gt-blue);
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+
+    .caption-sub {
+      color: var(--muted);
+    }
+
+    .caption-right {
+      display: flex;
+      align-items: center;
+    }
+
+    /* Mode Switch Bar: Auto Demo vs Interactive */
+    .mode-switch-bar {
+      display: inline-flex;
+      background: var(--bg-elevated);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 2px;
+      gap: 2px;
+    }
+
+    .mode-toggle-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.73rem;
+      padding: 3px 11px;
+      border-radius: 16px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+      user-select: none;
+    }
+
+    .mode-toggle-btn:hover {
+      color: var(--ink);
+    }
+
+    .mode-toggle-btn.active {
+      background: var(--gt-selection);
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    .pulse-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--gt-green);
+      box-shadow: 0 0 6px var(--gt-green);
+      animation: pulseGreen 1.8s infinite;
+    }
+
+    @keyframes pulseGreen {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.35; transform: scale(0.8); }
+    }
+
+    /* Ghostty Window Chrome */
+    .ghostty-window {
+      background: var(--gt-bg);
+      border: 1px solid var(--herdr-border);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: var(--ghostty-window-shadow);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      height: 640px;
+    }
+
+    /* Virtual Mouse Cursor for Smooth Auto Demo */
+    .virtual-cursor {
+      position: absolute;
+      top: 0;
+      left: 0;
+      pointer-events: none;
+      z-index: 1200;
+      opacity: 0;
+      transform: translate3d(240px, 320px, 0);
+      transition: transform 0.85s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.35s ease;
+      filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.5));
+    }
+
+    .virtual-cursor svg {
+      transition: transform 0.12s ease;
+      transform-origin: 5px 3px;
+    }
+
+    .virtual-cursor.clicking svg {
+      transform: scale(0.82);
+    }
+
+    .cursor-ping {
+      position: absolute;
+      top: 1px;
+      left: 3px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      border: 2px solid var(--gt-cursor);
+      opacity: 0;
+      transform: scale(0.3);
+      pointer-events: none;
+    }
+
+    .virtual-cursor.clicking .cursor-ping {
+      animation: pingWave 0.45s cubic-bezier(0, 0, 0.2, 1) forwards;
+    }
+
+    @keyframes pingWave {
+      0% { opacity: 0.85; transform: scale(0.3); }
+      100% { opacity: 0; transform: scale(2.2); }
+    }
+
+    /* macOS Ghostty Titlebar */
+    .ghostty-titlebar {
+      height: 38px;
+      flex-shrink: 0;
+      background: var(--ghostty-titlebar-bg);
+      border-bottom: 1px solid var(--herdr-border);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      user-select: none;
+      position: relative;
+    }
+
+    .mac-dots {
+      display: flex;
+      gap: 7px;
+      position: absolute;
+      left: 14px;
+    }
+
+    .mac-dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+    }
+    .mac-dot.red { background: #ff5f56; border: 1px solid #e0443e; }
+    .mac-dot.yellow { background: #ffbd2e; border: 1px solid #dea123; }
+    .mac-dot.green { background: #27c93f; border: 1px solid #1aab29; }
+
+    .window-title {
+      margin: 0 auto;
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .window-title span {
+      color: var(--ink-soft);
+    }
+
+    /* Herdr Multiplexer Layout inside Ghostty */
+    .herdr-body {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 210px 1fr;
+      grid-template-rows: 100%;
+      min-height: 0;
+      height: calc(100% - 38px);
+      background: var(--gt-bg);
+      font-family: var(--mono);
+      overflow: hidden;
+    }
+
+    /* Herdr Left Sidebar (Workspaces & Agents) */
+    .herdr-sidebar {
+      background: var(--herdr-sidebar-bg);
+      border-right: 1px solid var(--herdr-border);
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+      min-height: 0;
+      height: 100%;
+      overflow-y: auto;
+    }
+
+    .sidebar-section {
+      padding: 0.85rem 0.9rem 0.4rem 0.9rem;
+      font-size: 0.68rem;
+      font-weight: 700;
+      color: var(--muted-2);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .sidebar-item {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      padding: 0.48rem 0.9rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      cursor: pointer;
+      transition: all 0.1s ease;
+    }
+
+    .sidebar-item:hover {
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--ink);
+    }
+
+    .sidebar-item.active {
+      background: var(--herdr-tab-active-bg);
+      color: var(--ink);
+      border-left: 2px solid var(--gt-blue);
+      padding-left: calc(0.9rem - 2px);
+    }
+
+    .sidebar-item .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-working { background: var(--gt-green); box-shadow: 0 0 6px var(--gt-green); }
+    .dot-idle { background: var(--gt-blue); }
+    .dot-blocked { background: var(--gt-yellow); }
+
+    .sidebar-item .item-meta {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.25;
+      overflow: hidden;
+    }
+
+    .sidebar-item .item-name {
+      font-weight: 600;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow: hidden;
+    }
+
+    .sidebar-item .item-sub {
+      font-size: 0.68rem;
+      color: var(--muted);
+    }
+
+    .sidebar-footer {
+      margin-top: auto;
+      padding: 0.75rem 0.9rem;
+      border-top: 1px solid var(--herdr-border);
+      font-size: 0.68rem;
+      color: var(--muted);
+      line-height: 1.4;
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .sidebar-footer .status-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 2px;
+    }
+
+    .sidebar-footer span.val {
+      color: var(--gt-cyan);
+    }
+
+    /* Herdr Main Area (Tab Bar + Panes) */
+    .herdr-main {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
+      height: 100%;
+    }
+
+    /* Multiplexer Tabs */
+    .herdr-tabs {
+      background: var(--herdr-tab-bg);
+      border-bottom: 1px solid var(--herdr-border);
+      display: flex;
+      align-items: center;
+      padding-left: 0.5rem;
+      overflow-x: auto;
+      flex-shrink: 0;
+    }
+
+    .herdr-tab {
+      padding: 0.5rem 1rem;
+      font-size: 0.76rem;
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      border-right: 1px solid var(--herdr-border);
+      border-bottom: 2px solid transparent;
+      user-select: none;
+      transition: all 0.12s ease;
+      white-space: nowrap;
+    }
+
+    .herdr-tab:hover {
+      color: var(--ink-soft);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .herdr-tab.active {
+      background: var(--gt-bg);
+      color: var(--ink);
+      font-weight: 600;
+      border-bottom: 2px solid var(--gt-blue);
+    }
+
+    .tab-badge {
+      font-size: 0.65rem;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--gt-cyan);
+    }
+
+    .tab-badge.badge-agent {
+      background: rgba(217, 119, 87, 0.2);
+      color: var(--cc-coral-bright);
+    }
+
+    /* Split Panes inside Herdr */
+    .herdr-panes {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 310px;
+      grid-template-rows: 100%;
+      background: var(--gt-bg);
+      overflow: hidden;
+      min-height: 0;
+      height: 100%;
+    }
+
+    /* Left Pane: Terminal / Agent Screen */
+    .terminal-pane {
+      display: flex;
+      flex-direction: column;
+      padding: 18px 20px;
+      border-right: 1px solid var(--herdr-border);
+      overflow: hidden;
+      font-size: 0.88rem;
+      line-height: 1.45;
+      color: var(--gt-fg);
+      position: relative;
+      min-height: 0;
+      height: 100%;
+      box-sizing: border-box;
+    }
+
+    .terminal-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      padding-right: 6px;
+    }
+
+    .terminal-scroll::-webkit-scrollbar {
+      width: 4px;
+    }
+    .terminal-scroll::-webkit-scrollbar-thumb {
+      background: var(--herdr-border);
+      border-radius: 2px;
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       CLAUDE CODE LIVE AGENT VIEW (EXACT CLI FIDELITY)
+       ───────────────────────────────────────────────────────────── */
+    .agent-view {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 0;
+      overflow-y: hidden;
+      font-size: 0.84rem;
+      color: var(--gt-fg);
+      line-height: 1.45;
+    }
+
+    .cc-header {
+      display: flex;
+      gap: 0.9rem;
+      align-items: center;
+      padding-bottom: 0.6rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      flex-shrink: 0;
+    }
+
+    .cc-logo-art {
+      margin: 0;
+      color: var(--cc-coral);
+      line-height: 1;
+      white-space: pre;
+      font-family: var(--mono);
+      font-weight: 700;
+      font-size: 0.95rem;
+    }
+
+    .cc-header-text b {
+      color: var(--ink);
+      font-size: 0.92rem;
+    }
+
+    .cc-dim {
+      color: var(--muted);
+      font-size: 0.74rem;
+    }
+
+    /* Agent dynamic transcript scroll area */
+    .agent-transcript {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      padding: 0.6rem 6px 0.6rem 0;
+    }
+
+    .agent-transcript::-webkit-scrollbar {
+      width: 4px;
+    }
+    .agent-transcript::-webkit-scrollbar-thumb {
+      background: var(--herdr-border);
+      border-radius: 2px;
+    }
+
+    .agent-prompt-user {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 600;
+      color: var(--ink);
+      margin-bottom: 2px;
+    }
+
+    .agent-prompt-user .glyph {
+      color: var(--cc-coral);
+    }
+
+    .agent-step {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      padding-left: 0.5rem;
+      border-left: 2px solid var(--line);
+      margin-left: 0.2rem;
+      transition: all 0.2s ease;
+    }
+
+    .agent-step.step-mcp {
+      border-left-color: var(--gt-purple);
+      background: rgba(202, 158, 230, 0.04);
+      padding: 6px 10px;
+      border-radius: 0 4px 4px 0;
+    }
+
+    .agent-step.step-highlight {
+      border-left-color: var(--gt-green);
+      background: rgba(166, 209, 137, 0.05);
+      padding: 6px 10px;
+      border-radius: 0 4px 4px 0;
+    }
+
+    .agent-step-title {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-weight: 600;
+      color: var(--ink);
+      font-size: 0.8rem;
+    }
+
+    .agent-bullet {
+      color: var(--cc-coral);
+      font-size: 0.85rem;
+    }
+
+    .agent-bullet.purple { color: var(--gt-purple); }
+    .agent-bullet.green { color: var(--gt-green); }
+    .agent-bullet.blue { color: var(--gt-blue); }
+
+    .agent-step-body {
+      font-size: 0.78rem;
+      color: var(--ink-soft);
+      line-height: 1.45;
+    }
+
+    .agent-step-code {
+      background: #090a0f;
+      border: 1px solid var(--herdr-border);
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      color: var(--gt-fg);
+      margin-top: 4px;
+    }
+
+    /* Claude Code Native TUI Bottom Area (Exact match of real Claude Code CLI) */
+    .cc-tui-bottom {
+      flex-shrink: 0;
+      margin-top: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .cc-rule {
+      margin: 0.4rem 0;
+      border-top: 1px solid var(--herdr-border);
+    }
+
+    .cc-prompt-row {
+      display: flex;
+      align-items: center;
+      padding: 2px 0;
+    }
+
+    .cc-prompt-glyph {
+      color: var(--ink);
+      font-weight: 700;
+      margin-right: 8px;
+    }
+
+    .cc-terminal-input {
+      flex: 1;
+      min-width: 0;
+      background: transparent;
+      border: none;
+      outline: none;
+      font-family: var(--mono);
+      font-size: 0.81rem;
+      color: var(--gt-fg);
+      caret-color: var(--cc-coral);
+    }
+
+    .cc-chips-tray {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.4rem;
+      font-size: 0.7rem;
+    }
+
+    .cc-chip {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--herdr-border);
+      border-radius: 3px;
+      color: var(--gt-fg);
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      cursor: pointer;
+      transition: all 0.12s ease;
+    }
+
+    .cc-chip:hover {
+      background: rgba(217, 119, 87, 0.15);
+      border-color: var(--cc-coral);
+      color: var(--ink);
+    }
+
+    .cc-status {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .cc-cyan { color: var(--gt-blue); }
+    .cc-yellow { color: var(--gt-yellow); }
+    .cc-coral { color: var(--cc-coral-bright); }
+    .cc-green { color: var(--gt-green); }
+
+    /* Starship Prompt Styling */
+    .starship-line {
+      display: block;
+      margin-bottom: 2px;
+      line-height: 1.3;
+    }
+
+    .starship-dir {
+      color: var(--gt-blue);
+      font-weight: 700;
+    }
+
+    .starship-branch {
+      color: var(--gt-purple);
+      font-weight: 700;
+    }
+
+    .starship-status {
+      color: var(--gt-yellow);
+      font-weight: 700;
+    }
+
+    .starship-char {
+      color: var(--gt-cursor);
+      font-weight: 700;
+      margin-right: 8px;
+    }
+
+    .ghostty-cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1.15em;
+      background-color: var(--gt-cursor);
+      vertical-align: -2px;
+      margin-left: 2px;
+      animation: cursorBlink 1s step-start infinite;
+    }
+
+    @keyframes cursorBlink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* Shell View Container */
+    #view-shell {
+      display: none;
+      flex-direction: column;
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* Terminal Input Box */
+    .terminal-cli-form {
+      flex-shrink: 0;
+      margin-top: 0.8rem;
+      padding-top: 0.8rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .input-line {
+      display: flex;
+      align-items: center;
+    }
+
+    .terminal-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      font-family: var(--mono);
+      font-size: 0.88rem;
+      color: var(--gt-fg);
+    }
+
+    .quick-chips {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+      margin-top: 0.5rem;
+    }
+
+    .quick-chips span {
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+
+    .chip-btn {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--herdr-border);
+      border-radius: 4px;
+      color: var(--gt-fg);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      padding: 2px 7px;
+      cursor: pointer;
+      transition: all 0.12s ease;
+    }
+
+    .chip-btn:hover {
+      background: rgba(137, 180, 250, 0.15);
+      border-color: var(--gt-blue);
+      color: var(--ink);
+    }
+
+    /* Right Pane: Herdr Hypergraph / Sync Inspector */
+    .inspector-pane {
+      background: var(--herdr-sidebar-bg);
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      overflow-y: auto;
+      min-height: 0;
+      height: 100%;
+      box-sizing: border-box;
+    }
+
+    .inspector-header {
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: var(--gt-purple);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.6rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .inspector-filters {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 0.8rem;
+    }
+
+    .inspector-filter-btn {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--herdr-border);
+      border-radius: 3px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      padding: 2px 6px;
+      cursor: pointer;
+    }
+
+    .inspector-filter-btn.active {
+      background: var(--gt-selection);
+      border-color: var(--gt-blue);
+      color: var(--ink);
+    }
+
+    .inspector-card {
+      background: var(--gt-bg);
+      border: 1px solid var(--herdr-border);
+      border-radius: 5px;
+      padding: 10px 12px;
+      margin-bottom: 0.8rem;
+      transition: all 0.25s ease;
+      cursor: pointer;
+    }
+
+    .inspector-card:hover {
+      border-color: var(--line-strong);
+      background: var(--bg-elevated);
+    }
+
+    .inspector-card.card-highlight {
+      border-color: var(--gt-green);
+      background: rgba(166, 209, 137, 0.12);
+      box-shadow: 0 0 12px rgba(166, 209, 137, 0.25);
+    }
+
+    .inspector-card .card-title {
+      color: var(--ink);
+      font-weight: 600;
+      font-size: 0.76rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+
+    .inspector-card .card-desc {
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .token-meter {
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--herdr-border);
+      border-radius: 4px;
+      padding: 8px 10px;
+      margin-top: auto;
+    }
+
+    .token-meter-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      margin-bottom: 6px;
+    }
+
+    .token-bar {
+      height: 6px;
+      background: var(--herdr-tab-bg);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .token-bar-fill {
+      height: 100%;
+      background: var(--gt-green);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       RATATUI TUI EMULATOR SCREEN (TOTALLY FUNCTIONAL)
+       ───────────────────────────────────────────────────────────── */
+    .tui-screen {
+      display: none;
+      flex-direction: column;
+      height: 100%;
+      min-height: 0;
+      background: var(--gt-bg);
+      color: var(--gt-fg);
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      user-select: none;
+      overflow: hidden;
+    }
+
+    .tui-header {
+      flex-shrink: 0;
+      border: 1px solid var(--herdr-border);
+      padding: 4px 8px;
+      background: var(--tui-header-bg);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .tui-tabs {
+      display: flex;
+      gap: 0.8rem;
+    }
+
+    .tui-tab {
+      padding: 2px 6px;
+      cursor: pointer;
+      color: var(--muted);
+    }
+
+    .tui-tab.tui-tab-active {
+      color: var(--ink);
+      font-weight: 700;
+      background: var(--gt-selection);
+      border-radius: 2px;
+    }
+
+    .tui-main-split {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      grid-template-rows: 100%;
+      border-left: 1px solid var(--herdr-border);
+      border-right: 1px solid var(--herdr-border);
+      overflow: hidden;
+    }
+
+    .tui-list {
+      border-right: 1px solid var(--herdr-border);
+      overflow-y: auto;
+      background: var(--tui-list-bg);
+    }
+
+    .tui-list-item {
+      padding: 4px 8px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      border-left: 2px solid transparent;
+      color: var(--muted);
+    }
+
+    .tui-list-item:hover {
+      background: var(--tui-hover-bg);
+      color: var(--ink);
+    }
+
+    .tui-list-item.selected {
+      background: var(--gt-selection);
+      color: var(--ink);
+      border-left: 2px solid var(--gt-blue);
+    }
+
+    .tui-detail {
+      padding: 12px;
+      background: var(--gt-bg);
+      overflow-y: auto;
+      line-height: 1.45;
+    }
+
+    .tui-footer {
+      flex-shrink: 0;
+      border: 1px solid var(--herdr-border);
+      padding: 4px 8px;
+      background: var(--tui-header-bg);
+      font-size: 0.72rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       TECHNICAL FEATURE ROWS
+       ───────────────────────────────────────────────────────────── */
+    .features-section {
+      padding: 4rem 0 2rem 0;
+    }
+
+    .features-title {
+      font-family: var(--head);
+      font-size: 2.2rem;
+      font-weight: 800;
+      color: var(--ink);
+      letter-spacing: -0.03em;
+      margin-bottom: 2rem;
+    }
+
+    .caps {
+      display: flex;
+      flex-direction: column;
+      border-top: 1px solid var(--line);
+    }
+
+    .cap-row {
+      display: grid;
+      grid-template-columns: 80px 1fr 340px;
+      padding: 2.5rem 0;
+      border-bottom: 1px solid var(--line);
+      align-items: start;
+      gap: 2rem;
+    }
+
+    .cap-num {
+      font-family: var(--mono);
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--muted);
+    }
+
+    .cap-content h3 {
+      font-family: var(--head);
+      font-size: 1.45rem;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 0.6rem;
+      letter-spacing: -0.01em;
+    }
+
+    .cap-content p {
+      color: var(--muted);
+      font-size: 0.98rem;
+      line-height: 1.55;
+      max-width: 600px;
+    }
+
+    .cap-code-box {
+      background: var(--gt-bg);
+      border: 1px solid var(--herdr-border);
+      border-radius: 6px;
+      padding: 1rem;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--gt-fg);
+      line-height: 1.45;
+    }
+
+    .cap-code-box .c-dim { color: var(--muted); }
+    .cap-code-box .c-green { color: var(--gt-green); }
+    .cap-code-box .c-blue { color: var(--gt-blue); }
+    .cap-code-box .c-yellow { color: var(--gt-yellow); }
+    .cap-code-box .c-purple { color: var(--gt-purple); }
+
+    /* ─────────────────────────────────────────────────────────────
+       COMPARISON MATRIX
+       ───────────────────────────────────────────────────────────── */
+    .compare-section {
+      padding: 3rem 0;
+    }
+
+    .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      margin-top: 1.5rem;
+    }
+
+    .compare-table th,
+    .compare-table td {
+      padding: 0.85rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .compare-table th {
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .compare-table tr:hover td {
+      background: rgba(255, 255, 255, 0.015);
+    }
+
+    .compare-table td.brand-col {
+      color: var(--ink);
+      font-weight: 700;
+      background: rgba(137, 180, 250, 0.04);
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       INSTALLATION CALLOUT & FOOTER
+       ───────────────────────────────────────────────────────────── */
+    .install-callout {
+      margin: 4rem 0;
+      padding: 3rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--bg-elevated);
+      text-align: left;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .install-callout h2 {
+      font-family: var(--head);
+      font-size: 2rem;
+      font-weight: 800;
+      color: var(--ink);
+    }
+
+    .footer {
+      border-top: 1px solid var(--line);
+      padding: 2.5rem 0;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .footer a:hover {
+      color: var(--ink);
+    }
+
+    /* Responsive */
+    @media (max-width: 860px) {
+      .strip {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .stat:nth-child(2) {
+        border-right: none;
+      }
+      .ghostty-window {
+        height: 560px;
+      }
+      .herdr-body {
+        grid-template-columns: 1fr;
+        height: calc(100% - 38px);
+      }
+      .herdr-sidebar {
+        display: none;
+      }
+      .herdr-panes {
+        grid-template-columns: 1fr;
+      }
+      .inspector-pane {
+        display: none;
+      }
+      .how-it-works-bar {
+        grid-template-columns: 1fr;
+        gap: 1.2rem;
+        padding: 1.2rem;
+      }
+      .hiw-separator {
+        display: none;
+      }
+      .cap-row {
+        grid-template-columns: 1fr;
+        gap: 1rem;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="frame">
+    <!-- Top Nav -->
+    <nav class="nav">
+      <div class="nav-brand">
+        <span class="prompt-glyph">❯</span>
+        <span>agent-mem</span>
+        <span class="nav-badge">v1.2.0 · Rust</span>
+      </div>
+
+      <div class="nav-links">
+        <a href="#playground">Agent Demo</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#benchmarks">Benchmarks</a>
+        <button type="button" class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle theme (dark / light)" aria-label="Toggle theme">
+          <svg class="theme-sun" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+          <svg class="theme-moon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+          <span class="theme-mode-text" id="theme-mode-text">dark</span>
+        </button>
+        <a href="https://github.com/marcosotomac/agent-mem" target="_blank" rel="noopener noreferrer" class="nav-btn">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.64 7.64 0 0 1 8 3.87c.68 0 1.36.09 2 .26 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          <span>Star on GitHub</span>
+        </a>
+      </div>
+    </nav>
+
+    <!-- Editorial Hero: Typography & Problem Truth -->
+    <header class="hero-editorial">
+      <h1 class="hero-title">
+        Memory that outlives the context window.
+      </h1>
+      <p class="hero-lede">
+        Autonomous coding agents lose context between sessions, burn thousands of tokens re-reading files, and reintroduce resolved bugs upon git checkout.
+        <strong>agent-mem</strong> gives Claude Code, Cursor, and Codex a local SQLite episodic memory over <strong>stdio MCP</strong> and deterministic Git sync.
+      </p>
+      <div class="hero-install-row">
+        <div class="hero-install-box" onclick="copyInstall('cargo install agent-mem', this)">
+          <span class="prompt-sym">$</span>
+          <code>cargo install agent-mem</code>
+          <span class="copy-pill">copy</span>
+        </div>
+        <span class="hero-divider">·</span>
+        <div class="hero-install-alt" onclick="copyInstall('curl -fsSL https://agent-mem.dev/install.sh | sh', this)">
+          <span class="prompt-sym">$</span>
+          <code>curl -fsSL https://agent-mem.dev/install.sh | sh</code>
+          <span class="copy-pill">copy</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- 3-STEP MENTAL MODEL: HOW IT WORKS IN 5 SECONDS -->
+    <div class="how-it-works-bar">
+      <div class="hiw-card">
+        <div class="hiw-step">01 · AUTO-CONFIG</div>
+        <div class="hiw-title">1-Click MCP Auto-Wiring</div>
+        <div class="hiw-desc">Run <code>agent-mem mcp install all</code>. Instant plug-and-play for Cursor, Claude Code, Windsurf, Zed, and Codex without manual JSON editing.</div>
+      </div>
+      <div class="hiw-separator">→</div>
+      <div class="hiw-card">
+        <div class="hiw-step">02 · ZERO TOKEN WASTE</div>
+        <div class="hiw-title">Anchor-Aware Recall (0.04ms)</div>
+        <div class="hiw-desc">When an agent touches a file, it only receives gotchas linked to that path. Cuts prompt token overhead by up to 96% with embedded SQLite WAL.</div>
+      </div>
+      <div class="hiw-separator">→</div>
+      <div class="hiw-card">
+        <div class="hiw-step">03 · VERSION CONTROL</div>
+        <div class="hiw-title">Conflict-Free Git Team Sync</div>
+        <div class="hiw-desc">Decisions export automatically to human-readable <code>.agent-rules</code> with an automated union merge driver. Zero binary merge collisions.</div>
+      </div>
+    </div>
+
+    <!-- THE CENTERPIECE: Live Simulation of AI Agents using agent-mem -->
+    <section id="playground">
+      <div class="mock-caption-bar">
+        <div class="caption-left">
+          <span class="caption-title">LIVE SIMULATION · AGENT MEMORY IN ACTION</span>
+          <span class="caption-sub">Claude Code &amp; Cursor query local SQLite episodic memory via stdio MCP</span>
+        </div>
+        <div class="caption-right">
+          <div class="mode-switch-bar" role="group" aria-label="Playback mode">
+            <button type="button" class="mode-toggle-btn active" id="btn-mode-auto" onclick="startAutoDemo(true)" title="Run guided auto demonstration">
+              <span class="pulse-dot"></span>
+              <span>Auto Demo</span>
+            </button>
+            <button type="button" class="mode-toggle-btn" id="btn-mode-manual" onclick="setManualMode(true)" title="Take control and interact manually">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+              <span>Interactive</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ghostty-window" id="ghostty-window-el">
+        <!-- Smooth Virtual Mouse Pointer for Auto Demo -->
+        <div class="virtual-cursor" id="virtual-cursor" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+            <path d="M5.5 3.2L18.5 13.8L11.5 14.8L8.2 21.2L5.5 3.2Z" fill="#ffffff" stroke="#12141c" stroke-width="1.6" stroke-linejoin="round"/>
+          </svg>
+          <div class="cursor-ping"></div>
+        </div>
+        <!-- Ghostty Window Bar with macOS traffic lights -->
+        <div class="ghostty-titlebar">
+          <div class="mac-dots">
+            <span class="mac-dot red"></span>
+            <span class="mac-dot yellow"></span>
+            <span class="mac-dot green"></span>
+          </div>
+          <div class="window-title">
+            <span id="window-title-space">agent-mem</span> — <span id="window-title-mode">mcp memory server ↔ claude code runtime</span>
+          </div>
+        </div>
+
+        <!-- Herdr Multiplexer Body -->
+        <div class="herdr-body">
+
+          <!-- Herdr Sidebar: Spaces & Agents -->
+          <aside class="herdr-sidebar">
+            <div class="sidebar-section">workspaces</div>
+            <div class="sidebar-item active" id="sp-agent-mem" onclick="switchSpace('agent-mem', 'dev')">
+              <span class="dot dot-working"></span>
+              <div class="item-meta">
+                <span class="item-name">agent-mem</span>
+                <span class="item-sub">branch: dev</span>
+              </div>
+            </div>
+            <div class="sidebar-item" id="sp-web-dashboard" onclick="switchSpace('web-dashboard', 'feat/usage-charts')">
+              <span class="dot dot-blocked"></span>
+              <div class="item-meta">
+                <span class="item-name">web-dashboard</span>
+                <span class="item-sub">feat/usage-charts</span>
+              </div>
+            </div>
+            <div class="sidebar-item" id="sp-data-pipeline" onclick="switchSpace('data-pipeline', 'main')">
+              <span class="dot dot-idle"></span>
+              <div class="item-meta">
+                <span class="item-name">data-pipeline</span>
+                <span class="item-sub">main</span>
+              </div>
+            </div>
+
+            <div class="sidebar-section" style="margin-top: 0.6rem;">active clients</div>
+            <div class="sidebar-item active" id="sb-agent-claude" onclick="switchMainTab('claude')">
+              <span class="dot dot-working"></span>
+              <div class="item-meta">
+                <span class="item-name">Claude Code</span>
+                <span class="item-sub">mcp agent client</span>
+              </div>
+            </div>
+            <div class="sidebar-item" id="sb-agent-shell" onclick="switchMainTab('shell')">
+              <span class="dot dot-idle"></span>
+              <div class="item-meta">
+                <span class="item-name">CLI Terminal</span>
+                <span class="item-sub">direct agent-mem commands</span>
+              </div>
+            </div>
+            <div class="sidebar-item" id="sb-agent-tui" onclick="switchMainTab('tui')">
+              <span class="dot dot-idle"></span>
+              <div class="item-meta">
+                <span class="item-name">TUI Cockpit</span>
+                <span class="item-sub">ratatui explorer</span>
+              </div>
+            </div>
+
+            <div class="sidebar-footer">
+              <div class="status-row"><span>Engine:</span> <span class="val">SQLite WAL</span></div>
+              <div class="status-row"><span>Active Rules:</span> <span class="val" id="sb-rules-count">31 rules</span></div>
+              <div class="status-row"><span>MCP RTT:</span> <span class="val">0.038ms</span></div>
+            </div>
+          </aside>
+
+          <!-- Herdr Main Workspace -->
+          <div class="herdr-main">
+
+            <!-- Multiplexer Tabs -->
+            <div class="herdr-tabs">
+              <div class="herdr-tab active" id="tab-claude" onclick="switchMainTab('claude')">
+                <span>Claude Code</span>
+                <span class="tab-badge badge-agent">live agent</span>
+              </div>
+              <div class="herdr-tab" id="tab-shell" onclick="switchMainTab('shell')">
+                <span>CLI Terminal</span>
+                <span class="tab-badge">shell</span>
+              </div>
+              <div class="herdr-tab" id="tab-tui" onclick="switchMainTab('tui')">
+                <span>TUI Cockpit</span>
+                <span class="tab-badge">cockpit</span>
+              </div>
+              <div class="herdr-tab" id="tab-diff" onclick="switchMainTab('diff')">
+                <span>.agent-rules</span>
+                <span class="tab-badge">git sync</span>
+              </div>
+            </div>
+
+            <!-- Split Panes -->
+            <div class="herdr-panes">
+
+              <!-- Left Main Area: Swappable Views (Claude Code / Shell / TUI / Diff) -->
+              <div class="terminal-pane" id="main-terminal-area">
+
+                <!-- VIEW 1: AUTHENTIC CLAUDE CODE RUNTIME INTERACTING WITH AGENT-MEM -->
+                <div id="view-claude" class="agent-view" onclick="focusClaudeInput()">
+                  <div class="cc-header">
+                    <pre class="cc-logo-art"> ▐▛███▜▌
+▝▜█████▛▘
+  ▘▘ ▝▝</pre>
+                    <div class="cc-header-text">
+                      <div><b>Claude Code</b> <span class="cc-dim">v2.1.198</span></div>
+                      <div class="cc-dim"><span style="color: var(--gt-green); font-weight: 600;">● MCP Active:</span> agent-mem (4 tools · SQLite WAL)</div>
+                      <div class="cc-dim"><span id="cc-space-dir">~/Desktop/agent-mem</span> · <span id="cc-space-branch">dev</span></div>
+                    </div>
+                  </div>
+
+                  <!-- Transcript scroll area -->
+                  <div class="agent-transcript" id="claude-transcript">
+                    <!-- Steps dynamically injected here -->
+                  </div>
+
+                  <!-- Claude Code Native TUI Bottom Area (Identical to real CLI) -->
+                  <div class="cc-tui-bottom">
+                    <!-- Quick Prompt Chips -->
+                    <div class="cc-chips-tray">
+                      <span style="color: var(--muted); font-size: 0.68rem;">Try prompts:</span>
+                      <button type="button" class="cc-chip" onclick="triggerAgentPrompt('Refactor batch writes in src/store/mod.rs to prevent locking')">batch writes</button>
+                      <button type="button" class="cc-chip" onclick="triggerAgentPrompt('Add auto-prune clean hook in src/store/gc.rs for deleted files')">gc prune</button>
+                      <button type="button" class="cc-chip" onclick="triggerAgentPrompt('Inspect MCP schema in src/mcp.rs and verify tool size budget')">mcp budget</button>
+                      <button type="button" class="cc-chip" onclick="triggerAgentPrompt('Add gotcha/wal-locking for concurrent SQLite writes')">add gotcha</button>
+                    </div>
+
+                    <div class="cc-rule"></div>
+
+                    <!-- Native Claude Code Command Line -->
+                    <form onsubmit="handleAgentPromptSubmit(event)" class="cc-prompt-row">
+                      <span class="cc-prompt-glyph">❯</span>
+                      <input
+                        type="text"
+                        id="agent-custom-input"
+                        class="cc-terminal-input"
+                        placeholder="Type instruction for Claude Code and press Enter..."
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                      <span class="ghostty-cursor" style="background-color: var(--cc-coral);"></span>
+                    </form>
+
+                    <div class="cc-rule"></div>
+
+                    <!-- Authentic Claude Code Status Row -->
+                    <div class="cc-status">
+                      &nbsp;&nbsp;<span class="cc-cyan" id="cc-footer-space">~/Desktop/agent-mem</span><span style="color: var(--muted)"> &gt; </span><span class="cc-yellow" id="cc-footer-branch">dev *</span><span class="cc-green"> ↑1</span><span style="color: var(--muted)"> &gt; ctx ──────── </span><span class="cc-green" id="cc-footer-ctx">3%</span><span style="color: var(--muted)"> 34k/1M</span>
+                    </div>
+                    <div class="cc-status" style="display: flex; justify-content: space-between; align-items: center; margin-top: 2px;">
+                      <div>&nbsp;&nbsp;<span class="cc-coral">⏵⏵ bypass permissions on</span> <span style="color: var(--muted)">(shift+tab to cycle)</span></div>
+                      <div style="font-size: 0.68rem; color: var(--muted);">
+                        <span id="braille-spinner" style="color: var(--cc-coral); font-size: 0.82rem;">⠋</span> esc to interrupt
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- VIEW 2: INTERACTIVE ZSH SHELL (Full command emulator) -->
+                <div id="view-shell" style="display: none; flex-direction: column; height: 100%; min-height: 0; overflow: hidden;">
+                  <div class="terminal-scroll" id="term-output">
+                    <!-- Output injected by JS -->
+                  </div>
+
+                  <!-- Terminal Interactive Prompt -->
+                  <form class="terminal-cli-form" onsubmit="handleTerminalSubmit(event)">
+                    <div class="starship-line">
+                      <span class="starship-dir" id="term-dir">agent-mem</span>
+                      <span class="starship-branch" id="term-branch"> dev</span>
+                      <span class="starship-status">[!]</span>
+                    </div>
+                    <div class="input-line">
+                      <span class="starship-char">❯</span>
+                      <input
+                        type="text"
+                        id="cli-input"
+                        class="terminal-input"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="type 'agent-mem doctor', 'help', or Tab to autocomplete..."
+                      />
+                      <span class="ghostty-cursor"></span>
+                    </div>
+                  </form>
+
+                  <!-- Quick Command Buttons -->
+                  <div class="quick-chips">
+                    <span>Run sample:</span>
+                    <button type="button" class="chip-btn" onclick="runChip('agent-mem doctor')">doctor</button>
+                    <button type="button" class="chip-btn" onclick="runChip('agent-mem context --anchor src/store/mod.rs')">context</button>
+                    <button type="button" class="chip-btn" onclick="runChip('agent-mem set gotcha/wal &quot;Enable WAL before concurrent writes&quot; --anchor src/store/mod.rs:112 --kind gotcha')">set gotcha</button>
+                    <button type="button" class="chip-btn" onclick="runChip('agent-mem relate gotcha/wal mitigates arch/db')">relate</button>
+                    <button type="button" class="chip-btn" onclick="runChip('agent-mem find wal')">find</button>
+                    <button type="button" class="chip-btn" onclick="runChip('agent-mem tui')">tui cockpit</button>
+                    <button type="button" class="chip-btn" onclick="runChip('clear')">clear</button>
+                  </div>
+                </div>
+
+                <!-- VIEW 3: RATATUI TUI EMULATOR SCREEN -->
+                <div id="view-tui" class="tui-screen">
+                  <div class="tui-header">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                      <span style="font-weight: 700; color: var(--ink);">agent-mem</span>
+                      <span style="color: var(--gt-green); font-size: 0.78rem;">v1.2</span>
+                      <span style="color: var(--line-strong);">│</span>
+                    </div>
+                    <div class="tui-tabs" id="tui-tabs-bar">
+                      <span class="tui-tab tui-tab-active" id="tui-tab-1" onclick="tuiSwitchTab(1)"> 1 Rules (17) </span>
+                      <span style="color: var(--line-strong);">·</span>
+                      <span class="tui-tab" id="tui-tab-2" onclick="tuiSwitchTab(2)"> 2 Sessions (5) </span>
+                      <span style="color: var(--line-strong);">·</span>
+                      <span class="tui-tab" id="tui-tab-3" onclick="tuiSwitchTab(3)"> 3 Projects (3) </span>
+                      <span style="color: var(--line-strong);">·</span>
+                      <span class="tui-tab" id="tui-tab-4" onclick="tuiSwitchTab(4)"> 4 Doctor </span>
+                      <span style="color: var(--line-strong);">·</span>
+                      <span class="tui-tab" id="tui-tab-5" onclick="tuiSwitchTab(5)"> ? Help </span>
+                    </div>
+                    <div style="font-size: 0.76rem; display: flex; align-items: center; gap: 4px;">
+                      <span style="color: var(--gt-green);">●</span>
+                      <span style="font-weight: 700; color: var(--ink);" id="tui-header-space">agent-mem</span>
+                      <span style="color: var(--line-strong);">·</span>
+                      <span style="color: var(--muted);">SQLite WAL</span>
+                    </div>
+                  </div>
+
+                  <div class="tui-main-split">
+                    <div class="tui-list" id="tui-list-box"></div>
+                    <div class="tui-detail" id="tui-detail-box"></div>
+                  </div>
+
+                  <div class="tui-footer" id="tui-footer-bar">
+                    <span id="tui-footer-keys"> ⇥ Tab │ ↑↓ Select  n New  e Edit  a Archive  d Delete  / Filter  S Sync  q Quit</span>
+                    <span style="color: var(--muted);" id="tui-counter">1 of 17</span>
+                  </div>
+                </div>
+
+                <!-- VIEW 4: .AGENT-RULES (GIT SYNC PLAIN TEXT) -->
+                <div id="view-diff" style="display: none; flex-direction: column; height: 100%; min-height: 0; overflow: hidden;">
+                  <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.74rem; color: var(--muted); margin-bottom: 8px; border-bottom: 1px solid var(--herdr-border); padding-bottom: 6px; flex-shrink: 0;">
+                    <div>.agent-rules · plain-text team sync with union merge driver (0 binary conflicts)</div>
+                    <div style="display: flex; gap: 8px;">
+                      <button type="button" class="cc-chip" onclick="simulateGitUnionMerge()">⚡ Simulate Git Merge (No Conflict)</button>
+                      <button type="button" class="cc-chip" onclick="copyAgentRulesText(this)">Copy File</button>
+                    </div>
+                  </div>
+                  <pre id="agent-rules-content" style="font-family: var(--mono); font-size: 0.76rem; color: var(--gt-fg); line-height: 1.5; white-space: pre-wrap; flex: 1; min-height: 0; overflow-y: auto;"></pre>
+                </div>
+
+              </div>
+
+              <!-- Right Pane: Live Hypergraph & Token Telemetry -->
+              <div class="inspector-pane">
+                <div class="inspector-header">
+                  <span>KNOWLEDGE HYPERGRAPH</span>
+                  <span style="color: var(--gt-green)">● LIVE</span>
+                </div>
+
+                <div class="inspector-filters">
+                  <button type="button" class="inspector-filter-btn active" id="flt-all" onclick="filterInspector('all')">All</button>
+                  <button type="button" class="inspector-filter-btn" id="flt-rule" onclick="filterInspector('rule')">Rules</button>
+                  <button type="button" class="inspector-filter-btn" id="flt-gotcha" onclick="filterInspector('gotcha')">Gotchas</button>
+                  <button type="button" class="inspector-filter-btn" id="flt-decision" onclick="filterInspector('decision')">Decisions</button>
+                </div>
+
+                <div id="inspector-cards-container">
+                  <!-- Rendered dynamically from live state -->
+                </div>
+
+                <!-- Live Context Token Ratchet Meter -->
+                <div class="token-meter">
+                  <div class="token-meter-label">
+                    <span style="color: var(--ink)">Token Ratchet Savings</span>
+                    <span style="color: var(--gt-green); font-weight: 700;" id="token-pct-label">-96.5%</span>
+                  </div>
+                  <div class="token-bar">
+                    <div class="token-fill" id="token-fill-bar"></div>
+                  </div>
+                  <div style="font-size: 0.66rem; color: var(--muted); margin-top: 6px;" id="token-desc">
+                    Injected: <span style="color: var(--gt-cyan);">342 chars (~85 tokens)</span> vs 10,000 unindexed baseline.
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TECHNICAL DEEP DIVES (Herdr .caps Layout) -->
+    <section class="features-section" id="architecture">
+      <h2 class="features-title">Engineered for surgical precision.</h2>
+
+      <div class="caps">
+        <!-- Feature 01 -->
+        <div class="cap-row">
+          <div class="cap-num">01</div>
+          <div class="cap-content">
+            <h3>Anchor-Aware Context Routing</h3>
+            <p>
+              Injecting every rule into every prompt wastes your context window and confuses the model.
+              agent-mem hashes target paths and directory basenames, serving only the exact gotchas and conventions linked to the files the agent is actually modifying.
+            </p>
+          </div>
+          <div class="cap-code-box">
+            <div class="c-dim"># Query relevant memory for a single file</div>
+            <div><span class="c-blue">agent-mem</span> context <span class="c-yellow">--anchor</span> src/store/mod.rs</div>
+            <br />
+            <div class="c-dim"># Retrieved in 0.04ms:</div>
+            <div><span class="c-green">✓</span> <span class="c-purple">arch/db</span> (src/store/mod.rs:45)</div>
+            <div><span class="c-green">✓</span> <span class="c-red">gotcha/wal</span> (src/store/mod.rs:112)</div>
+            <div class="c-dim" style="margin-top: 4px;">Saved: 9,915 tokens from prompt</div>
+          </div>
+        </div>
+
+        <!-- Feature 02 -->
+        <div class="cap-row">
+          <div class="cap-num">02</div>
+          <div class="cap-content">
+            <h3>Zero Daemons, SQLite WAL in Rust</h3>
+            <p>
+              No Node.js background services, no Docker containers, no external vector services.
+              agent-mem runs as a single static binary in native Rust with embedded SQLite in WAL mode and FTS5 BM25 full-text indexing. Sub-millisecond reads from cold start.
+            </p>
+          </div>
+          <div class="cap-code-box">
+            <div class="c-dim"># Benchmarked on macOS M-series:</div>
+            <div>Point key lookup:  <span class="c-green">0.038 ms</span></div>
+            <div>BM25 search (FTS5): <span class="c-green">0.120 ms</span></div>
+            <div>Batch write (20 rules): <span class="c-green">1.840 ms</span></div>
+            <div>Cold start overhead:   <span class="c-green">&lt; 1.200 ms</span></div>
+          </div>
+        </div>
+
+        <!-- Feature 03 -->
+        <div class="cap-row">
+          <div class="cap-num">03</div>
+          <div class="cap-content">
+            <h3>Conflict-Free Git Team Sync</h3>
+            <p>
+              Committing binary SQLite databases to git branches causes corrupted merge conflicts.
+              agent-mem mirrors its database into human-readable, reviewable plain text in <code>.agent-rules</code> with an automated <code>merge=union</code> git driver.
+            </p>
+          </div>
+          <div class="cap-code-box">
+            <div class="c-dim"># Reviewable plain text git diff:</div>
+            <div class="c-green">+ [rule] arch/concurrency</div>
+            <div class="c-green">+ Always use atomic transactions</div>
+            <div class="c-green">+ anchor: src/store/mod.rs</div>
+            <div class="c-blue">merge=union · 0 binary collisions</div>
+          </div>
+        </div>
+
+        <!-- Feature 04 -->
+        <div class="cap-row">
+          <div class="cap-num">04</div>
+          <div class="cap-content">
+            <h3>17+ AI Clients Auto-Detected</h3>
+            <p>
+              No manually editing <code>mcp.json</code> or copying configs between editors.
+              Run <code>agent-mem mcp install all</code> and it immediately configures Cursor, Claude Code, Windsurf, Zed, Antigravity, and Codex with our consolidated 4-tool MCP schema.
+            </p>
+          </div>
+          <div class="cap-code-box">
+            <div><span class="c-blue">agent-mem</span> mcp install all</div>
+            <div class="c-green">✓ Cursor (~/.cursor/mcp.json)</div>
+            <div class="c-green">✓ Claude Code (~/.claude.json)</div>
+            <div class="c-green">✓ Windsurf (~/.codeium/windsurf)</div>
+            <div class="c-green">✓ Zed (~/.config/zed/settings.json)</div>
+            <div class="c-dim">17 client configs updated in 3ms</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ARCHITECTURE COMPARISON TABLE -->
+    <section class="compare-section" id="benchmarks">
+      <h2 class="features-title">How agent-mem compares</h2>
+
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>Cloud / Vector DBs (Pinecone/Chroma)</th>
+            <th>Naive AGENTS.md / CursorRules</th>
+            <th class="brand-col">agent-mem</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Execution Model</td>
+            <td>Background daemon / Cloud HTTP API</td>
+            <td>Static file dumped in prompt</td>
+            <td class="brand-col">Embedded SQLite WAL in Rust</td>
+          </tr>
+          <tr>
+            <td>Prompt Token Cost</td>
+            <td>High (5,000 - 15,000 tokens)</td>
+            <td>Grows unbounded as file grows</td>
+            <td class="brand-col">Anchored (70-96% reduction)</td>
+          </tr>
+          <tr>
+            <td>Point Lookup Latency</td>
+            <td>50 - 250 ms</td>
+            <td>0 ms (in prompt)</td>
+            <td class="brand-col">&lt; 0.05 ms point lookup</td>
+          </tr>
+          <tr>
+            <td>Team Git Sync</td>
+            <td>Out-of-band / Not in version control</td>
+            <td>Manual merge conflicts</td>
+            <td class="brand-col">.agent-rules with union merge</td>
+          </tr>
+          <tr>
+            <td>Knowledge Model</td>
+            <td>Unstructured embeddings only</td>
+            <td>Flat bullet lists</td>
+            <td class="brand-col">Clustered Knowledge Hypergraph</td>
+          </tr>
+          <tr>
+            <td>MCP Client Auto-Wiring</td>
+            <td>Manual JSON configuration</td>
+            <td>None</td>
+            <td class="brand-col">1-click across 17 AI clients</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- INSTALL CALLOUT -->
+    <section class="install-callout">
+      <h2>Ready to give your agents durable memory?</h2>
+      <p style="color: #9aa2b0; max-width: 650px;">
+        Zero background daemons to keep alive. Runs anywhere on macOS, Linux, and Windows.
+      </p>
+
+      <div class="cmd-bar">
+        <div class="hd-cmd">
+          <b>$</b><code>cargo install agent-mem</code>
+          <button type="button" onclick="copyInstall('cargo install agent-mem', this)">copy</button>
+        </div>
+        <div class="hd-cmd">
+          <b>$</b><code>curl -fsSL https://agent-mem.dev/install.sh | sh</code>
+          <button type="button" onclick="copyInstall('curl -fsSL https://agent-mem.dev/install.sh | sh', this)">copy</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer class="footer">
+      <div>
+        Built with Rust &amp; SQLite by <a href="https://github.com/marcosotomac" style="color: var(--ink); font-weight: 600;">Marco Soto Maceda</a>.
+      </div>
+      <div style="display: flex; gap: 1.5rem;">
+        <a href="https://github.com/marcosotomac/agent-mem">GitHub</a>
+        <a href="https://github.com/marcosotomac/agent-mem/blob/main/LICENSE">MIT License</a>
+        <a href="#playground">Playground</a>
+      </div>
+    </footer>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────────────────
+       TOTALLY FUNCTIONAL AGENT-MEM RUNTIME & SIMULATOR ENGINE
+       ───────────────────────────────────────────────────────────── -->
+  <script>
+    // Complete in-memory reactive database
+    const DB = {
+      currentSpace: 'agent-mem',
+      currentBranch: 'dev',
+      activeTab: 'claude',
+      inspectorFilter: 'all',
+      spaces: {
+        'agent-mem': {
+          path: '/Users/marcosotomaceda/Desktop/agent-mem',
+          branch: 'dev',
+          rules: [
+            { key: 'arch/db', kind: 'rule', value: 'Use embedded SQLite in WAL mode for persistent storage with WITHOUT ROWID index clustering', anchor: 'src/store/mod.rs:45' },
+            { key: 'gotcha/wal-locking', kind: 'gotcha', value: 'Always execute WAL pragma before concurrent writes to avoid sqlite db lock contention', anchor: 'src/store/mod.rs:112' },
+            { key: 'decision/mcp-schema', kind: 'decision', value: 'Consolidate 4 MCP tools in 1,376 bytes (~344 tokens) for instant LLM tool binding', anchor: 'src/mcp/mod.rs:20' },
+            { key: 'pattern/sync-rules', kind: 'pattern', value: 'Sync via plain-text .agent-rules with union merge driver without binary git collisions', anchor: '.agent-rules:1' },
+            { key: 'architecture/anchor-garbage-collection', kind: 'rule', value: 'Auto-prune zombie rules when target files are removed in git branches', anchor: 'src/store/gc.rs:12' },
+            { key: 'architecture/batch-writes-and-sync-noop-detection', kind: 'decision', value: 'Batch writes via Store::set_batch use single immediate transaction with atomic rollback cutting WAL flushes', anchor: 'src/store/mod.rs:45' },
+            { key: 'architecture/canonical-project-registry', kind: 'rule', value: 'Canonical project registry in ~/.config/agent-mem/projects.json resolves symlinks and anchors by git remote URL', anchor: 'src/registry.rs:1' },
+            { key: 'architecture/clustered-knowledge-hypergraph', kind: 'decision', value: 'Schema v4 supports rule, decision, gotcha, and pattern entities with typed relations plus hashed route indexes', anchor: 'src/store/graph.rs:1' },
+            { key: 'architecture/indexed-retrieval-v4', kind: 'decision', value: 'Schema v4 maintains compact 64-bit route hashes for exact paths, bounded directory ancestors, and basenames', anchor: 'src/store/schema.rs:1' },
+            { key: 'architecture/local-semantic-retrieval-cascade', kind: 'decision', value: 'Optional fastembed ONNX (multilingual-e5-small) and usearch F32 HNSW zero-cost fallback when lexical BM25 is weak', anchor: 'src/store/semantic.rs:1' },
+            { key: 'architecture/lossless-team-sync', kind: 'decision', value: 'Shared rules remain plain text when unambiguous; JSON-v1 records preserve ambiguous fields during export', anchor: 'src/store/sync.rs:1' },
+            { key: 'architecture/mcp-atomic-performance', kind: 'rule', value: 'MCP writes validate relations before I/O and commit memory, FTS, and edge in one BEGIN IMMEDIATE', anchor: 'src/store.rs:293' },
+            { key: 'architecture/mcp-manage-lifecycle', kind: 'decision', value: 'mem_manage tool provides full lifecycle control (archive, unarchive, delete, relate, unrelate) in single schema', anchor: 'src/mcp.rs:135' },
+            { key: 'architecture/modular-store-complete', kind: 'decision', value: 'Modular store refactored into models, schema, graph, session, sync, and mod.rs with 100% test pass', anchor: 'src/store/mod.rs:1' },
+            { key: 'architecture/task-utility-evaluation', kind: 'rule', value: 'Benchmark suite validates 100% critical gotcha recall, >99.8% prompt token reduction, and <0.05ms overhead', anchor: 'benches/bench_suite.rs:350' },
+            { key: 'architecture/tui-stateful-viewport-scrolling', kind: 'rule', value: 'TUI lists use Ratatui ListState and render_stateful_widget for native viewport scrolling without scrollbar widgets', anchor: 'src/tui.rs:24' },
+            { key: 'architecture/zero-friction-init', kind: 'rule', value: 'Single-command init with auto-configured AI editor MCP clients and robust git worktree hook resolution', anchor: 'src/init.rs:60' }
+          ],
+          relations: [
+            { source: 'gotcha/wal-locking', type: 'mitigates', target: 'arch/db' },
+            { source: 'decision/mcp-schema', type: 'relates_to', target: 'arch/db' },
+            { source: 'architecture/zero-friction-init', type: 'relates_to', target: 'architecture/canonical-project-registry' }
+          ],
+          sessions: [
+            '#78  test(evals): replace synthetic claims with end-to-end matrix',
+            '#77  feat(security): bound untrusted memory inputs',
+            '#76  chore: apply rustfmt',
+            '#75  ci: validate features Windows and scheduled scale gates',
+            '#74  ci(release): publish verified npm and Homebrew artifacts'
+          ]
+        },
+        'web-dashboard': {
+          path: '/Users/marcosotomaceda/Projects/web-dashboard',
+          branch: 'feat/usage-charts',
+          rules: [
+            { key: 'ui/chart-virtualization', kind: 'rule', value: 'Use Canvas-backed sparklines for time-series charts exceeding 5,000 data points', anchor: 'src/components/UsageChart.tsx:24' },
+            { key: 'gotcha/vite-ssr-window', kind: 'gotcha', value: 'Guard all window.localStorage reads with typeof window !== undefined', anchor: 'src/lib/storage.ts:8' },
+            { key: 'arch/api-caching', kind: 'decision', value: 'Use TanStack Query with staleTime: 60_000 for telemetry metrics endpoint', anchor: 'src/api/client.ts:42' }
+          ],
+          relations: [
+            { source: 'gotcha/vite-ssr-window', type: 'mitigates', target: 'ui/chart-virtualization' }
+          ],
+          sessions: [
+            '#12  feat(charts): add stacked memory allocation timeline',
+            '#11  fix(hydration): resolve localstorage theme mismatch'
+          ]
+        },
+        'data-pipeline': {
+          path: '/Users/marcosotomaceda/data-pipeline',
+          branch: 'main',
+          rules: [
+            { key: 'pipeline/checkpointing', kind: 'rule', value: 'Commit offset every 5,000 records or 60s to enable idempotent resume', anchor: 'jobs/backfill.py:55' },
+            { key: 'gotcha/rate-limit-backoff', kind: 'gotcha', value: 'Implement exponential jitter on 429 Too Many Requests upstream errors', anchor: 'jobs/http.py:110' }
+          ],
+          relations: [
+            { source: 'gotcha/rate-limit-backoff', type: 'mitigates', target: 'pipeline/checkpointing' }
+          ],
+          sessions: [
+            '#42  perf: backfill 20M event rows using checkpoint batching',
+            '#41  chore: bump python dependencies'
+          ]
+        }
+      }
+    };
+
+    // Terminal History & UI state
+    const cmdHistory = [];
+    let historyIdx = -1;
+
+    const termOutput = document.getElementById('term-output');
+    const cliInput = document.getElementById('cli-input');
+    const claudeTranscript = document.getElementById('claude-transcript');
+    const ccInput = document.getElementById('agent-custom-input');
+
+    // Startup
+    window.addEventListener('DOMContentLoaded', () => {
+      initThemeUI();
+      renderInspector();
+      updateAgentRulesText();
+      startBrailleSpinner();
+
+      // Human takeover detection: clicking or typing smoothly transitions to manual interactive mode
+      const ghosttyWin = document.getElementById('ghostty-window-el');
+      if (ghosttyWin) {
+        ghosttyWin.addEventListener('mousedown', (e) => {
+          if (e.isTrusted && autoDemoActive) {
+            setManualMode(true);
+          }
+        }, true);
+        ghosttyWin.addEventListener('keydown', (e) => {
+          if (e.isTrusted && autoDemoActive) {
+            setManualMode(true);
+          }
+        }, true);
+      }
+
+      // Initialize shell output with authentic doctor check ready for when the user opens 'shell'
+      executeDoctor();
+
+      // Launch Auto Demo after a gentle 1.8s introductory pause
+      setTimeout(() => {
+        if (!userInteracted && !autoDemoActive) {
+          startAutoDemo();
+        }
+      }, 1800);
+    });
+
+    function getActiveSpace() {
+      return DB.spaces[DB.currentSpace];
+    }
+
+    function focusClaudeInput() {
+      if (ccInput) ccInput.focus();
+    }
+
+    // Braille spinner animation for Claude Code
+    function startBrailleSpinner() {
+      const frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+      let idx = 0;
+      setInterval(() => {
+        const el = document.getElementById('braille-spinner');
+        if (el) {
+          el.textContent = frames[idx];
+          idx = (idx + 1) % frames.length;
+        }
+      }, 90);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // CLAUDE CODE INTERACTIVE AGENT ENGINE (STREAMING & NATURAL)
+    // ─────────────────────────────────────────────────────────────
+    function handleAgentPromptSubmit(e) {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      const prompt = ccInput ? ccInput.value.trim() : '';
+      if (!prompt) return;
+      triggerAgentPrompt(prompt);
+      if (ccInput) ccInput.value = '';
+    }
+
+    function submitCustomPrompt() {
+      handleAgentPromptSubmit();
+    }
+
+    function triggerAgentPrompt(prompt) {
+      if (DB.activeTab !== 'claude') {
+        switchMainTab('claude');
+      }
+      runAgentSimulation(prompt);
+    }
+
+    function runAgentSimulation(promptText) {
+      const space = getActiveSpace();
+      claudeTranscript.innerHTML = '';
+
+      // 1. User Prompt Line (Exact Claude Code style)
+      appendAgentElement(`
+        <div style="margin-bottom: 0.4rem;">
+          <div class="agent-prompt-user">
+            <span class="glyph">❯</span>
+            <span>${escapeHtml(promptText)}</span>
+          </div>
+        </div>
+      `);
+
+      // Determine target file anchor based on prompt keywords
+      let targetAnchor = 'src/store/mod.rs';
+      let matchingGotcha = space.rules.find(r => r.kind === 'gotcha') || space.rules[1];
+      let matchingRule = space.rules.find(r => r.kind === 'rule') || space.rules[0];
+
+      if (promptText.toLowerCase().includes('gc') || promptText.toLowerCase().includes('prune')) {
+        targetAnchor = 'src/store/gc.rs';
+        matchingGotcha = space.rules.find(r => r.key.includes('anchor')) || space.rules[4];
+      } else if (promptText.toLowerCase().includes('mcp') || promptText.toLowerCase().includes('budget')) {
+        targetAnchor = 'src/mcp.rs';
+        matchingRule = space.rules.find(r => r.key.includes('mcp')) || space.rules[2];
+      }
+
+      // Step 1: Call mem_context
+      setTimeout(() => {
+        appendAgentElement(`
+          <div class="agent-step step-mcp" id="agent-sim-context">
+            <div class="agent-step-title">
+              <span class="agent-bullet purple">●</span>
+              <span>MCP: agent-mem/mem_context</span>
+              <span style="color: var(--muted); font-size: 0.72rem;">({ anchor: "${targetAnchor}", diff: true })</span>
+            </div>
+            <div class="agent-step-body">
+              <div>↳ <span style="color: var(--gt-green);">0.038ms point lookup</span> · Filtered ${space.rules.length} rules to 2 anchored rules (<strong style="color: var(--gt-green);">-96.5% tokens saved</strong>):</div>
+              <div style="padding-left: 12px; margin-top: 3px; font-family: var(--mono); font-size: 0.74rem;">
+                <div>✓ <span style="color: var(--gt-cyan);">[${matchingRule.kind}] ${matchingRule.key}</span>: ${escapeHtml(matchingRule.value)}</div>
+                <div>✓ <span style="color: var(--gt-red);">[${matchingGotcha.kind}] ${matchingGotcha.key}</span>: ${escapeHtml(matchingGotcha.value)} <span style="color: var(--muted);">(${matchingGotcha.anchor || targetAnchor})</span></div>
+              </div>
+            </div>
+          </div>
+        `);
+        highlightInspectorCards([matchingRule.key, matchingGotcha.key]);
+      }, 650);
+
+      // Step 2: Agent reasoning with retrieved gotcha
+      setTimeout(() => {
+        appendAgentElement(`
+          <div class="agent-step">
+            <div class="agent-step-title">
+              <span class="agent-bullet">●</span>
+              <span>Agent Architectural Guardrail</span>
+            </div>
+            <div class="agent-step-body">
+              Memory check passed. Notice that <code style="color: var(--gt-red);">${escapeHtml(matchingGotcha.key)}</code> forbids uncoordinated mutations.
+              Refactoring code in <span class="cc-file">${targetAnchor}</span> to strictly comply with the retrieved rule.
+            </div>
+          </div>
+        `);
+      }, 1550);
+
+      // Step 3: Bash test execution
+      setTimeout(() => {
+        appendAgentElement(`
+          <div class="agent-step">
+            <div class="agent-step-title">
+              <span class="agent-bullet blue">●</span>
+              <span>Bash: cargo test --lib store</span>
+            </div>
+            <div class="agent-step-body">
+              <div class="agent-step-code">
+                <span style="color: var(--gt-green);">test store::test_concurrency_guardrails ... ok</span><br />
+                <span style="color: var(--gt-green);">test store::test_atomic_wal_commit ... ok</span><br />
+                <span style="color: var(--muted);">14 passed · 0 failed · 0.08s (green verification gate)</span>
+              </div>
+            </div>
+          </div>
+        `);
+      }, 2450);
+
+      // Step 4: Persist new ADR in agent-mem
+      setTimeout(() => {
+        const newKey = `decision/${promptText.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 32)}`;
+        const newDesc = `Durable solution for: ${promptText}. Adheres to ${matchingGotcha.key}.`;
+
+        // Actually store in memory database!
+        space.rules.unshift({
+          key: newKey,
+          kind: 'decision',
+          value: newDesc,
+          anchor: `${targetAnchor}:1`
+        });
+        space.relations.push({
+          source: newKey,
+          type: 'relates_to',
+          target: matchingRule.key
+        });
+
+        notifyStoreUpdate(newKey);
+
+        appendAgentElement(`
+          <div class="agent-step step-highlight" id="agent-sim-set">
+            <div class="agent-step-title">
+              <span class="agent-bullet green">●</span>
+              <span>MCP: agent-mem/mem_set</span>
+            </div>
+            <div class="agent-step-body">
+              <div style="font-family: var(--mono); font-size: 0.74rem;">
+                <div>Tool call: <span style="color: var(--gt-cyan);">mem_set</span>({</div>
+                <div style="padding-left: 14px;">key: <span style="color: var(--ink); font-weight: 700;">"${newKey}"</span>,</div>
+                <div style="padding-left: 14px;">kind: <span style="color: var(--gt-cyan);">"decision"</span>,</div>
+                <div style="padding-left: 14px;">val: "${escapeHtml(newDesc)}",</div>
+                <div style="padding-left: 14px;">anchor: <span style="color: var(--gt-blue);">"${targetAnchor}:1"</span>,</div>
+                <div style="padding-left: 14px;">rel: <span style="color: var(--gt-purple);">"relates_to:${matchingRule.key}"</span></div>
+                <div>})</div>
+                <div style="color: var(--gt-green); margin-top: 4px;">✓ Saved in SQLite WAL &amp; synchronized to <span style="color: var(--gt-yellow);">.agent-rules</span> (union merge, 0 binary conflicts).</div>
+              </div>
+            </div>
+          </div>
+        `);
+      }, 3400);
+
+      // Step 5: Completion
+      setTimeout(() => {
+        appendAgentElement(`
+          <div class="agent-step">
+            <div class="agent-step-title">
+              <span class="agent-bullet">●</span>
+              <span>Task Complete</span>
+            </div>
+            <div class="agent-step-body">
+              Successfully completed request. The memory hypergraph was updated and <code>.agent-rules</code> was staged for reviewable git commit.
+            </div>
+          </div>
+        `);
+      }, 4300);
+    }
+
+    function appendAgentElement(html) {
+      const div = document.createElement('div');
+      div.innerHTML = html;
+      claudeTranscript.appendChild(div);
+      claudeTranscript.scrollTop = claudeTranscript.scrollHeight;
+    }
+
+    // Switch between Main Tabs: 'claude', 'shell', 'tui', 'diff'
+    function switchMainTab(tab) {
+      DB.activeTab = tab;
+
+      // Update tab buttons
+      ['claude', 'shell', 'tui', 'diff'].forEach(t => {
+        const el = document.getElementById(`tab-${t}`);
+        if (el) el.classList.toggle('active', t === tab);
+      });
+
+      // Update window title mode
+      const titleMode = document.getElementById('window-title-mode');
+      if (titleMode) {
+        if (tab === 'claude') titleMode.innerText = 'mcp memory server ↔ claude code runtime';
+        else if (tab === 'shell') titleMode.innerText = 'zsh — agent-mem cli runtime';
+        else if (tab === 'tui') titleMode.innerText = 'agent-mem cockpit (ratatui)';
+        else if (tab === 'diff') titleMode.innerText = '.agent-rules — git team sync';
+      }
+
+      // Update sidebar agent selection
+      const sbClaude = document.getElementById('sb-agent-claude');
+      const sbShell = document.getElementById('sb-agent-shell');
+      const sbTui = document.getElementById('sb-agent-tui');
+      if (sbClaude) sbClaude.classList.toggle('active', tab === 'claude');
+      if (sbShell) sbShell.classList.toggle('active', tab === 'shell');
+      if (sbTui) sbTui.classList.toggle('active', tab === 'tui');
+
+      // Update Views visibility
+      document.getElementById('view-claude').style.display = tab === 'claude' ? 'flex' : 'none';
+      document.getElementById('view-shell').style.display = tab === 'shell' ? 'flex' : 'none';
+      document.getElementById('view-tui').style.display = tab === 'tui' ? 'flex' : 'none';
+      document.getElementById('view-diff').style.display = tab === 'diff' ? 'flex' : 'none';
+
+      if (tab === 'claude') {
+        focusClaudeInput();
+        highlightInspectorCards(['arch/db', 'gotcha/wal-locking']);
+      } else if (tab === 'shell') {
+        cliInput.focus();
+      } else if (tab === 'tui') {
+        tuiSwitchTab(1);
+      } else if (tab === 'diff') {
+        updateAgentRulesText();
+      }
+    }
+
+    function highlightInspectorCards(keys) {
+      const cards = document.querySelectorAll('.inspector-card');
+      cards.forEach(c => {
+        const titleEl = c.querySelector('.card-title span');
+        if (titleEl && keys.includes(titleEl.innerText.trim())) {
+          c.classList.add('card-highlight');
+          setTimeout(() => c.classList.remove('card-highlight'), 2400);
+        }
+      });
+    }
+
+    function notifyStoreUpdate(highlightKey = null) {
+      updateSidebarCounts();
+      renderInspector(highlightKey);
+      updateAgentRulesText();
+      if (DB.activeTab === 'tui') {
+        renderTuiContent();
+      }
+    }
+
+    function updateAgentRulesText() {
+      const space = getActiveSpace();
+      const el = document.getElementById('agent-rules-content');
+      if (!el) return;
+
+      let text = `# .agent-rules - agent-mem shared team memory\n# Track this file in git to share rules across your team without SQLite binary conflicts.\n\n`;
+      space.rules.forEach(r => {
+        if (r.archived) {
+          text += `[archived] `;
+        }
+        if (r.kind !== 'rule') {
+          text += `[${r.kind}] `;
+        }
+        text += `${r.key} = ${r.value}`;
+        if (r.anchor) {
+          text += ` (@ ${r.anchor})`;
+        }
+        text += `\n`;
+      });
+      if (space.relations && space.relations.length > 0) {
+        text += `\n# Relations\n`;
+        space.relations.forEach(rel => {
+          text += `${rel.source} -> ${rel.type} -> ${rel.target}\n`;
+        });
+      }
+      el.textContent = text;
+    }
+
+    function simulateGitUnionMerge() {
+      const space = getActiveSpace();
+      const key = `feature/branch-sync-${Math.floor(Math.random() * 899 + 100)}`;
+      space.rules.push({
+        key: key,
+        kind: 'pattern',
+        value: 'Merge driver union cleanly reconciled non-conflicting rule definitions from dev and main',
+        anchor: 'src/store/mod.rs:50'
+      });
+      notifyStoreUpdate(key);
+      alert(`[Git Union Merge Success]\nReconciled branch 'dev' with 'origin/main'.\nAdded rule '${key}' with 0 merge conflicts!`);
+    }
+
+    function copyAgentRulesText(btn) {
+      const el = document.getElementById('agent-rules-content');
+      copyInstall(el.textContent, btn);
+    }
+
+    function printTerminal(html) {
+      const line = document.createElement('div');
+      line.style.padding = '2px 0';
+      line.style.lineHeight = '1.45';
+      line.innerHTML = html;
+      termOutput.appendChild(line);
+      termOutput.scrollTop = termOutput.scrollHeight;
+      requestAnimationFrame(() => {
+        termOutput.scrollTop = termOutput.scrollHeight;
+      });
+    }
+
+    function printPrompt(cmd) {
+      const space = getActiveSpace();
+      printTerminal(`
+        <div class="starship-line" style="margin-top: 6px;">
+          <span class="starship-dir">${escapeHtml(DB.currentSpace)}</span>
+          <span class="starship-branch"> ${escapeHtml(space.branch)}</span>
+          <span class="starship-status">[!]</span>
+        </div>
+        <div>
+          <span class="starship-char">❯</span>
+          <span style="color: var(--gt-fg); font-weight: 500;">${escapeHtml(cmd)}</span>
+        </div>
+      `);
+    }
+
+    function runChip(cmd) {
+      if (DB.activeTab !== 'shell') {
+        switchMainTab('shell');
+      }
+      printPrompt(cmd);
+      executeCommand(cmd);
+      cliInput.value = '';
+      requestAnimationFrame(() => {
+        termOutput.scrollTop = termOutput.scrollHeight;
+      });
+    }
+
+    // Input keyboard events: History navigation + Tab autocomplete
+    cliInput.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (cmdHistory.length > 0) {
+          if (historyIdx === -1) historyIdx = cmdHistory.length - 1;
+          else if (historyIdx > 0) historyIdx--;
+          cliInput.value = cmdHistory[historyIdx] || '';
+        }
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (historyIdx !== -1) {
+          if (historyIdx < cmdHistory.length - 1) {
+            historyIdx++;
+            cliInput.value = cmdHistory[historyIdx];
+          } else {
+            historyIdx = -1;
+            cliInput.value = '';
+          }
+        }
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        autocompleteInput();
+      } else if (e.ctrlKey && e.key === 'l') {
+        e.preventDefault();
+        termOutput.innerHTML = '';
+      } else if (e.ctrlKey && e.key === 'c') {
+        e.preventDefault();
+        printPrompt(cliInput.value + '^C');
+        cliInput.value = '';
+      }
+    });
+
+    function autocompleteInput() {
+      const val = cliInput.value;
+      const subcommands = ['doctor', 'context', 'set', 'get', 'relate', 'unrelate', 'del', 'archive', 'unarchive', 'find', 'dump', 'session', 'projects', 'clean', 'sync', 'mcp', 'tui', 'help'];
+
+      if (val.startsWith('agent-mem ')) {
+        const query = val.slice(10);
+        const match = subcommands.find(s => s.startsWith(query));
+        if (match) {
+          cliInput.value = 'agent-mem ' + match + ' ';
+        }
+      } else if ('agent-mem'.startsWith(val)) {
+        cliInput.value = 'agent-mem ';
+      }
+    }
+
+    function handleTerminalSubmit(e) {
+      e.preventDefault();
+      const cmd = cliInput.value.trim();
+      if (!cmd) return;
+      cmdHistory.push(cmd);
+      historyIdx = -1;
+      printPrompt(cmd);
+      executeCommand(cmd);
+      cliInput.value = '';
+      requestAnimationFrame(() => {
+        termOutput.scrollTop = termOutput.scrollHeight;
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // SHELL COMMAND DISPATCHER & PARSER
+    // ─────────────────────────────────────────────────────────────
+    function executeCommand(raw) {
+      const space = getActiveSpace();
+      const parts = raw.split(/\s+/);
+      const main = parts[0];
+      const sub = parts[1];
+
+      if (raw === 'clear' || raw === 'cls') {
+        termOutput.innerHTML = '';
+        return;
+      }
+
+      if (raw === 'pwd') {
+        printTerminal(`<div style="color: var(--gt-fg);">${escapeHtml(space.path)}</div>`);
+        return;
+      }
+
+      if (raw.startsWith('cd ')) {
+        const target = parts[1].replace(/~/g, '').replace(/\//g, '').replace(/Projects/g, '');
+        if (DB.spaces[target]) {
+          switchSpace(target, DB.spaces[target].branch);
+        } else {
+          printTerminal(`<span style="color: var(--gt-red);">cd: no such file or directory: ${escapeHtml(parts[1])}</span>`);
+        }
+        return;
+      }
+
+      if (raw === 'ls') {
+        printTerminal(`
+          <div style="display: flex; gap: 1rem; color: var(--gt-fg);">
+            <span style="color: var(--gt-blue);">.agent-mem/</span>
+            <span style="color: var(--gt-cyan);">.agent-rules</span>
+            <span style="color: var(--gt-blue);">src/</span>
+            <span style="color: var(--gt-blue);">tests/</span>
+            <span>Cargo.toml</span>
+            <span>README.md</span>
+          </div>
+        `);
+        return;
+      }
+
+      if (raw === 'git status') {
+        printTerminal(`
+          <div style="color: var(--gt-fg);">
+            On branch ${escapeHtml(space.branch)}<br />
+            Your branch is up to date with 'origin/${escapeHtml(space.branch)}'.<br />
+            <span style="color: var(--muted);">nothing to commit, working tree clean</span>
+          </div>
+        `);
+        return;
+      }
+
+      if (raw === 'git diff') {
+        printTerminal(`
+          <div style="color: var(--gt-fg); font-family: var(--mono); font-size: 0.82rem; line-height: 1.5;">
+            <span style="color: var(--muted);">diff --git a/.agent-rules b/.agent-rules</span><br />
+            <span style="color: var(--gt-cyan);">@@ -12,4 +12,5 @@</span><br />
+            <span style="color: var(--gt-green);">+ [gotcha] gotcha/wal-locking = Always enable WAL mode before concurrent writes (@ src/store/mod.rs:112)</span><br />
+            <span style="color: var(--muted);">0 binary conflicts (merge=union driver configured)</span>
+          </div>
+        `);
+        return;
+      }
+
+      if (raw === 'cat .agent-rules') {
+        executeCatAgentRules();
+        return;
+      }
+
+      if (raw === 'help' || raw === 'agent-mem --help' || raw === 'agent-mem -h' || (main === 'agent-mem' && (!sub || sub === 'help'))) {
+        executeHelp();
+        return;
+      }
+
+      if (raw === 'agent-mem -V' || raw === 'agent-mem --version' || (main === 'agent-mem' && sub === 'version')) {
+        printTerminal(`<div style="font-family: var(--mono); font-size: 0.82rem; color: var(--ink);">agent-mem 1.2.0</div>`);
+        return;
+      }
+
+      if (main === 'agent-mem') {
+        switch (sub) {
+          case 'doctor':
+            executeDoctor();
+            break;
+          case 'context':
+            executeContext(raw);
+            break;
+          case 'set':
+            executeSet(raw);
+            break;
+          case 'get':
+            executeGet(parts[2]);
+            break;
+          case 'relate':
+            executeRelate(parts);
+            break;
+          case 'unrelate':
+            executeUnrelate(parts);
+            break;
+          case 'del':
+            executeDel(parts[2]);
+            break;
+          case 'archive':
+            executeArchive(parts[2]);
+            break;
+          case 'unarchive':
+            executeUnarchive(parts[2]);
+            break;
+          case 'find':
+            executeFind(parts.slice(2).join(' '));
+            break;
+          case 'dump':
+            executeDump();
+            break;
+          case 'session':
+            executeSession(parts);
+            break;
+          case 'projects':
+            executeProjects();
+            break;
+          case 'clean':
+            executeClean(raw);
+            break;
+          case 'sync':
+            executeSync();
+            break;
+          case 'mcp':
+            executeMcp(parts);
+            break;
+          case 'tui':
+            switchMainTab('tui');
+            break;
+          default:
+            printTerminal(`<span style="color: var(--gt-red);">error:</span> unrecognized subcommand '${escapeHtml(sub || '')}'. Try 'agent-mem --help'.`);
+        }
+      } else {
+        printTerminal(`<span style="color: var(--gt-red);">zsh: command not found: ${escapeHtml(main)}</span>. Try 'agent-mem doctor' or 'help'.`);
+      }
+    }
+
+    function executeHelp() {
+      printTerminal(`
+        <div style="color: var(--gt-fg); font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; margin: 4px 0;">
+          <div style="font-weight: 700; color: var(--ink);">agent-mem 1.2.0</div>
+          <div style="color: var(--muted); margin-bottom: 8px;">Local-first, sub-millisecond knowledge hypergraph for AI coding agents.</div>
+
+          <div style="color: var(--muted); font-weight: 600;">Usage</div>
+          <div style="color: var(--ink); margin-bottom: 8px;">  $ agent-mem &lt;command&gt; [arguments]</div>
+
+          <div style="color: var(--muted); font-weight: 600; margin-bottom: 4px;">Commands</div>
+          <div style="display: grid; grid-template-columns: 160px 1fr; gap: 4px; color: var(--gt-fg);">
+            <div><span style="color: var(--ink); font-weight: 700;">init</span></div><div style="color: var(--muted);">Initialize isolated memory in repository</div>
+            <div><span style="color: var(--ink); font-weight: 700;">get</span> <span style="color: var(--muted);">&lt;key&gt;</span></div><div style="color: var(--muted);">Retrieve raw value for key</div>
+            <div><span style="color: var(--ink); font-weight: 700;">set</span> <span style="color: var(--muted);">&lt;key&gt; &lt;val&gt;</span></div><div style="color: var(--muted);">Record memory [--anchor &lt;f:l&gt;] [--kind &lt;k&gt;]</div>
+            <div><span style="color: var(--ink); font-weight: 700;">relate</span> <span style="color: var(--muted);">&lt;s&gt; &lt;r&gt; &lt;t&gt;</span></div><div style="color: var(--muted);">Link memories in hypergraph</div>
+            <div><span style="color: var(--ink); font-weight: 700;">unrelate</span> <span style="color: var(--muted);">&lt;s&gt; &lt;r&gt; &lt;t&gt;</span></div><div style="color: var(--muted);">Remove hypergraph relation</div>
+            <div><span style="color: var(--ink); font-weight: 700;">del</span> <span style="color: var(--muted);">&lt;key&gt;</span></div><div style="color: var(--muted);">Delete a memory rule</div>
+            <div><span style="color: var(--ink); font-weight: 700;">archive</span> <span style="color: var(--muted);">&lt;key&gt;</span></div><div style="color: var(--muted);">Deprecate an obsolete rule</div>
+            <div><span style="color: var(--ink); font-weight: 700;">unarchive</span> <span style="color: var(--muted);">&lt;key&gt;</span></div><div style="color: var(--muted);">Reactivate an archived rule</div>
+            <div><span style="color: var(--ink); font-weight: 700;">find</span> <span style="color: var(--muted);">&lt;query&gt;</span></div><div style="color: var(--muted);">Search rules via BM25 index</div>
+            <div><span style="color: var(--ink); font-weight: 700;">dump</span></div><div style="color: var(--muted);">List all active rules</div>
+            <div><span style="color: var(--ink); font-weight: 700;">sync</span></div><div style="color: var(--muted);">Synchronize team rules (.agent-rules)</div>
+            <div><span style="color: var(--ink); font-weight: 700;">context</span></div><div style="color: var(--muted);">Export dense context [--anchor &lt;a&gt;]</div>
+            <div><span style="color: var(--ink); font-weight: 700;">session</span> <span style="color: var(--muted);">add|list</span></div><div style="color: var(--muted);">Record or inspect checkpoints</div>
+            <div><span style="color: var(--ink); font-weight: 700;">clean</span></div><div style="color: var(--muted);">Prune zombie rules with deleted anchors</div>
+            <div><span style="color: var(--ink); font-weight: 700;">projects</span></div><div style="color: var(--muted);">List canonical project registry</div>
+            <div><span style="color: var(--ink); font-weight: 700;">mcp</span> <span style="color: var(--muted);">install|uninstall</span></div><div style="color: var(--muted);">Configure AI editors (Windsurf, Cursor, etc.)</div>
+            <div><span style="color: var(--ink); font-weight: 700;">doctor</span></div><div style="color: var(--muted);">Verify system health, SQLite WAL, git hooks, and MCP</div>
+            <div><span style="color: var(--ink); font-weight: 700;">tui</span></div><div style="color: var(--muted);">Launch interactive terminal explorer</div>
+          </div>
+        </div>
+      `);
+    }
+
+    function executeDoctor() {
+      const space = getActiveSpace();
+      printTerminal(`
+        <div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.6; margin: 4px 0;">
+          <div style="color: var(--ink); font-weight: 700;">  agent-mem doctor  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted); font-weight: 400;">system health check</span></div>
+          <br />
+          <div style="color: var(--muted); font-weight: 600;">  Storage</div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">database</span>  <span style="color: var(--ink); font-weight: 600;">${escapeHtml(space.path)}/.agent-mem/mem.db</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">wal mode  ·  ${space.rules.length} rules, ${space.sessions.length} sessions</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">full-text</span> <span style="color: var(--ink); font-weight: 600;">FTS5 BM25</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">porter unicode61 tokenizer active</span></div>
+          <br />
+          <div style="color: var(--muted); font-weight: 600;">  Git &amp; Team Sync</div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">repo</span>      <span style="color: var(--ink); font-weight: 600;">${escapeHtml(space.path)}</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">ignore</span>    <span style="color: var(--ink); font-weight: 600;">.agent-mem/</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">ignored in .gitignore</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">sync</span>      <span style="color: var(--ink); font-weight: 600;">.agent-rules</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">merge=union configured</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">hooks</span>     <span style="color: var(--ink); font-weight: 600;">partial</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">post-commit active</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">rules</span>     <span style="color: var(--ink); font-weight: 600;">.agent-rules</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">${space.rules.length} rules active</span></div>
+          <br />
+          <div style="color: var(--muted); font-weight: 600;">  MCP Clients (12 configured)</div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 180px;">Google Antigravity</span>  <span style="color: var(--muted);">configured</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">~/.gemini/config/mcp_config.json</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 180px;">Cursor</span>              <span style="color: var(--muted);">configured</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">~/.cursor/mcp.json</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 180px;">Claude Desktop</span>      <span style="color: var(--muted);">configured</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">~/Library/Application Support/Claude/claude_desktop_config.json</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 180px;">Claude Code</span>         <span style="color: var(--muted);">configured</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">~/.claude.json</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 180px;">OpenAI Codex</span>        <span style="color: var(--muted);">configured</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">~/.codex/config.toml</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 180px;">Windsurf</span>            <span style="color: var(--muted);">configured</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">~/.codeium/windsurf/mcp_config.json</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 180px;">Zed</span>                 <span style="color: var(--muted);">configured</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">~/.config/zed/settings.json</span></div>
+          <div>    <span style="color: var(--gt-green);">✓</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 180px;">VS Code</span>             <span style="color: var(--muted);">configured</span>  <span style="color: var(--line-strong);">·</span>  <span style="color: var(--muted);">~/Library/Application Support/Code/User/mcp.json</span></div>
+        </div>
+      `);
+      notifyStoreUpdate();
+    }
+
+    function executeContext(raw) {
+      const space = getActiveSpace();
+      const hasAnchor = raw.includes('--anchor');
+      let targetFile = '';
+      if (hasAnchor) {
+        const m = raw.match(/--anchor\s+([^\s]+)/);
+        if (m) targetFile = m[1];
+      }
+
+      let filtered = space.rules.filter(r => !r.archived);
+      if (targetFile) {
+        filtered = filtered.filter(r => r.anchor && r.anchor.includes(targetFile.split(':')[0]));
+      }
+
+      let out = '<div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; margin: 4px 0;">';
+      if (filtered.length > 0) {
+        out += '<div style="color: var(--ink); font-weight: 700;">== RULES ==</div>';
+        filtered.forEach(r => {
+          const kindBadge = r.kind !== 'rule' ? `<span style="color: var(--gt-cyan);">[${r.kind}]</span> ` : '';
+          const anchor = r.anchor ? ` <span style="color: var(--muted);">(${escapeHtml(r.anchor)})</span>` : '';
+          out += `<div>${kindBadge}<span style="color: var(--ink); font-weight: 600;">${escapeHtml(r.key)}:</span> <span style="color: var(--ink-soft);">${escapeHtml(r.value)}</span>${anchor}</div>`;
+        });
+      }
+
+      if (space.relations.length > 0) {
+        out += '<div style="color: var(--ink); font-weight: 700; margin-top: 8px;">== RELATIONS ==</div>';
+        space.relations.forEach(rel => {
+          out += `<div><span style="color: var(--ink); font-weight: 600;">${escapeHtml(rel.source)}</span> <span style="color: var(--muted);">-&gt; ${escapeHtml(rel.type)} -&gt;</span> <span style="color: var(--ink); font-weight: 600;">${escapeHtml(rel.target)}</span></div>`;
+        });
+      }
+
+      if (space.sessions.length > 0) {
+        out += '<div style="color: var(--ink); font-weight: 700; margin-top: 8px;">== SESSIONS ==</div>';
+        space.sessions.slice(0, 3).forEach(s => {
+          const match = s.match(/#(\d+)\s+(.*)/);
+          if (match) {
+            out += `<div><span style="color: var(--line-strong);">[#${match[1]}]</span> <span style="color: var(--ink-soft);">${escapeHtml(match[2])}</span></div>`;
+          } else {
+            out += `<div><span style="color: var(--ink-soft);">${escapeHtml(s)}</span></div>`;
+          }
+        });
+      }
+      out += '</div>';
+      printTerminal(out);
+
+      // Telemetry update in background
+      const charsInjected = out.length;
+      const tokensInjected = Math.round(charsInjected / 4);
+      const baselineTokens = 10000;
+      const pctSaved = Math.max(10, Math.min(99, ((1 - (tokensInjected / baselineTokens)) * 100))).toFixed(1);
+
+      const pctLabel = document.getElementById('token-pct-label');
+      const fillBar = document.getElementById('token-fill-bar');
+      const descEl = document.getElementById('token-desc');
+      if (pctLabel) pctLabel.innerText = `-${pctSaved}%`;
+      if (fillBar) fillBar.style.width = `${Math.max(3, 100 - pctSaved)}%`;
+      if (descEl) descEl.innerHTML = `Injected: <span style="color: var(--gt-cyan);">${charsInjected} chars (~${tokensInjected} tokens)</span> vs ${baselineTokens.toLocaleString()} unindexed.`;
+    }
+
+    function executeSet(raw) {
+      const space = getActiveSpace();
+      const tokens = [];
+      const regex = /[^\s"']+|"([^"]*)"|'([^']*)'/g;
+      let m;
+      while ((m = regex.exec(raw)) !== null) {
+        tokens.push(m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : m[0]));
+      }
+
+      if (tokens.length < 4) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem set &lt;key&gt; &lt;value&gt; [--anchor &lt;path:line&gt;] [--kind &lt;kind&gt;]</span>`);
+        return;
+      }
+
+      const key = tokens[2];
+      let valParts = [];
+      let anchor = null;
+      let kind = null;
+      let i = 3;
+      while (i < tokens.length) {
+        if ((tokens[i] === '--anchor' || tokens[i] === '-a') && i + 1 < tokens.length) {
+          anchor = tokens[i + 1];
+          i += 2;
+        } else if ((tokens[i] === '--kind' || tokens[i] === '-k') && i + 1 < tokens.length) {
+          kind = tokens[i + 1];
+          i += 2;
+        } else {
+          valParts.push(tokens[i]);
+          i++;
+        }
+      }
+
+      const value = valParts.join(' ');
+      if (!value) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem set &lt;key&gt; &lt;value&gt; [--anchor &lt;path:line&gt;] [--kind &lt;kind&gt;]</span>`);
+        return;
+      }
+
+      if (!kind) {
+        kind = key.startsWith('gotcha/') ? 'gotcha' : key.startsWith('decision/') ? 'decision' : key.startsWith('pattern/') ? 'pattern' : 'rule';
+      }
+      if (!anchor) {
+        anchor = 'src/store/mod.rs:18';
+      }
+
+      const existing = space.rules.find(r => r.key === key);
+      if (existing) {
+        existing.value = value;
+        existing.anchor = anchor;
+        existing.kind = kind;
+        existing.archived = false;
+      } else {
+        space.rules.unshift({ key, value, anchor, kind });
+      }
+
+      const kindBadge = kind !== 'rule' ? `[${kind}] ` : '';
+      printTerminal(`
+        <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+          &nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>&nbsp;&nbsp;<span style="color: var(--muted);">saved</span>&nbsp;&nbsp;<span style="color: var(--muted);">${kindBadge}</span><span style="color: var(--ink); font-weight: 700;">${escapeHtml(key)}</span>&nbsp;&nbsp;<span style="color: var(--line-strong);">·</span>&nbsp;&nbsp;<span style="color: var(--muted);">${escapeHtml(anchor)}</span>
+        </div>
+      `);
+
+      notifyStoreUpdate(key);
+    }
+
+    function executeGet(key) {
+      if (!key) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem get &lt;key&gt;</span>`);
+        return;
+      }
+      const space = getActiveSpace();
+      const rule = space.rules.find(r => r.key === key);
+      if (rule) {
+        printTerminal(`<div style="font-family: var(--mono); font-size: 0.82rem; color: var(--ink);">${escapeHtml(rule.value)}</div>`);
+      } else {
+        printTerminal(`<div style="font-family: var(--mono); font-size: 0.82rem; color: var(--gt-red);">not found ${escapeHtml(key)}</div>`);
+      }
+    }
+
+    function executeRelate(parts) {
+      if (parts.length < 5) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem relate &lt;src&gt; &lt;rel&gt; &lt;tgt&gt;</span>`);
+        return;
+      }
+      const src = parts[2];
+      const rel = parts[3];
+      const tgt = parts[4];
+      const space = getActiveSpace();
+
+      space.relations.push({ source: src, type: rel, target: tgt });
+      printTerminal(`
+        <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+          &nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>&nbsp;&nbsp;<span style="color: var(--muted);">linked</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">${escapeHtml(src)}</span> <span style="color: var(--muted);">-&gt; ${escapeHtml(rel)} -&gt;</span> <span style="color: var(--ink); font-weight: 700;">${escapeHtml(tgt)}</span>
+        </div>
+      `);
+      notifyStoreUpdate(src);
+    }
+
+    function executeUnrelate(parts) {
+      if (parts.length < 5) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem unrelate &lt;src&gt; &lt;rel&gt; &lt;tgt&gt;</span>`);
+        return;
+      }
+      const src = parts[2];
+      const rel = parts[3];
+      const tgt = parts[4];
+      const space = getActiveSpace();
+
+      const prevLen = space.relations.length;
+      space.relations = space.relations.filter(r => !(r.source === src && r.type === rel && r.target === tgt));
+      if (space.relations.length < prevLen) {
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--gt-yellow);">-</span>&nbsp;&nbsp;<span style="color: var(--muted);">unlinked</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">${escapeHtml(src)}</span> <span style="color: var(--muted);">-&gt; ${escapeHtml(rel)} -&gt;</span> <span style="color: var(--ink); font-weight: 700;">${escapeHtml(tgt)}</span>
+          </div>
+        `);
+      } else {
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--muted);">·</span>&nbsp;&nbsp;<span style="color: var(--muted);">not found</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">${escapeHtml(src)}</span> <span style="color: var(--muted);">-&gt; ${escapeHtml(rel)} -&gt;</span> <span style="color: var(--ink); font-weight: 700;">${escapeHtml(tgt)}</span>
+          </div>
+        `);
+      }
+      notifyStoreUpdate();
+    }
+
+    function executeDel(key) {
+      if (!key) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem del &lt;key&gt;</span>`);
+        return;
+      }
+      const space = getActiveSpace();
+      const prevLen = space.rules.length;
+      space.rules = space.rules.filter(r => r.key !== key);
+      if (space.rules.length < prevLen) {
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--gt-yellow);">-</span>&nbsp;&nbsp;<span style="color: var(--muted);">deleted</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">${escapeHtml(key)}</span>
+          </div>
+        `);
+        notifyStoreUpdate();
+      } else {
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--muted);">·</span>&nbsp;&nbsp;<span style="color: var(--muted);">not found</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">${escapeHtml(key)}</span>
+          </div>
+        `);
+      }
+    }
+
+    function executeArchive(key) {
+      if (!key) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem archive &lt;key&gt;</span>`);
+        return;
+      }
+      const space = getActiveSpace();
+      const rule = space.rules.find(r => r.key === key);
+      if (rule) {
+        rule.archived = true;
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--gt-yellow);">⊘</span>&nbsp;&nbsp;<span style="color: var(--muted);">archived</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">${escapeHtml(key)}</span>
+          </div>
+        `);
+        notifyStoreUpdate(key);
+      } else {
+        printTerminal(`<div style="font-family: var(--mono); font-size: 0.82rem; color: var(--gt-red);">not found ${escapeHtml(key)}</div>`);
+      }
+    }
+
+    function executeUnarchive(key) {
+      if (!key) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem unarchive &lt;key&gt;</span>`);
+        return;
+      }
+      const space = getActiveSpace();
+      const rule = space.rules.find(r => r.key === key);
+      if (rule) {
+        rule.archived = false;
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>&nbsp;&nbsp;<span style="color: var(--muted);">reactivated</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">${escapeHtml(key)}</span>
+          </div>
+        `);
+        notifyStoreUpdate(key);
+      } else {
+        printTerminal(`<div style="font-family: var(--mono); font-size: 0.82rem; color: var(--gt-red);">not found ${escapeHtml(key)}</div>`);
+      }
+    }
+
+    function executeFind(q) {
+      if (!q) {
+        printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem find &lt;query&gt;</span>`);
+        return;
+      }
+      const space = getActiveSpace();
+      const qLower = q.toLowerCase();
+      const matches = space.rules.filter(r =>
+        r.key.toLowerCase().includes(qLower) ||
+        r.value.toLowerCase().includes(qLower) ||
+        (r.anchor && r.anchor.toLowerCase().includes(qLower))
+      );
+
+      if (matches.length === 0) {
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--muted);">◇</span>&nbsp;&nbsp;<span style="color: var(--muted);">no memories found matching</span> '${escapeHtml(q)}'
+          </div>
+        `);
+        return;
+      }
+
+      let out = '<div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; margin: 4px 0;">';
+      matches.forEach(m => {
+        const kindBadge = m.kind !== 'rule' ? `[${m.kind}] ` : '';
+        const anchor = m.anchor ? `&nbsp;&nbsp;<span style="color: var(--muted);">${escapeHtml(m.anchor)}</span>` : '';
+        out += `<div>&nbsp;&nbsp;<span style="color: var(--muted);">${kindBadge}</span><span style="color: var(--ink); font-weight: 700;">${escapeHtml(m.key)}</span>&nbsp;&nbsp;<span style="color: var(--line-strong);">·</span>&nbsp;&nbsp;<span style="color: var(--ink-soft);">${escapeHtml(m.value)}</span>${anchor}</div>`;
+      });
+      out += '</div>';
+      printTerminal(out);
+    }
+
+    function executeDump() {
+      const space = getActiveSpace();
+      if (space.rules.length === 0) {
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--muted);">◇</span>&nbsp;&nbsp;<span style="color: var(--muted);">no memories recorded yet. Run 'agent-mem set &lt;key&gt; &lt;val&gt;' to add one.</span>
+          </div>
+        `);
+        return;
+      }
+      let out = '<div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; margin: 4px 0;">';
+      space.rules.forEach(r => {
+        const kindBadge = r.kind !== 'rule' ? `[${r.kind}] ` : '';
+        const anchor = r.anchor ? `&nbsp;&nbsp;<span style="color: var(--muted);">${escapeHtml(r.anchor)}</span>` : '';
+        out += `<div>&nbsp;&nbsp;<span style="color: var(--muted);">${kindBadge}</span><span style="color: var(--ink); font-weight: 700;">${escapeHtml(r.key)}</span>&nbsp;&nbsp;<span style="color: var(--line-strong);">·</span>&nbsp;&nbsp;<span style="color: var(--ink-soft);">${escapeHtml(r.value)}</span>${anchor}</div>`;
+      });
+      out += '</div>';
+      printTerminal(out);
+    }
+
+    function executeSession(parts) {
+      const space = getActiveSpace();
+      const sub = parts[2];
+      if (sub === 'list' || !sub) {
+        let out = '<div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; margin: 4px 0;">';
+        space.sessions.forEach(s => {
+          const match = s.match(/#(\d+)\s+(.*)/);
+          if (match) {
+            out += `<div>&nbsp;&nbsp;<span style="color: var(--line-strong);">#${match[1]}</span>&nbsp;&nbsp;<span style="color: var(--ink);">${escapeHtml(match[2])}</span></div>`;
+          } else {
+            out += `<div>&nbsp;&nbsp;<span style="color: var(--ink);">${escapeHtml(s)}</span></div>`;
+          }
+        });
+        out += '</div>';
+        printTerminal(out);
+      } else if (sub === 'add') {
+        const msg = parts.slice(3).join(' ').replace(/^["']|["']$/g, '');
+        if (!msg) {
+          printTerminal(`<span style="color: var(--gt-yellow);">Usage: agent-mem session add &lt;message&gt;</span>`);
+          return;
+        }
+        const nextId = space.sessions.length + 79;
+        const entry = `#${nextId}  ${msg}`;
+        space.sessions.unshift(entry);
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+            &nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>&nbsp;&nbsp;<span style="color: var(--muted);">checkpoint</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">#${nextId}</span>
+          </div>
+        `);
+        notifyStoreUpdate();
+      }
+    }
+
+    function executeProjects() {
+      printTerminal(`
+        <div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.6; margin: 4px 0;">
+          <div style="color: var(--ink); font-weight: 700;">  agent-mem projects · canonical registry (3 registered)</div>
+          <br />
+          <div>    <span style="color: var(--gt-green);">▶</span>  <strong style="color: var(--ink);">agent-mem</strong>             ${DB.spaces['agent-mem'].rules.length} active  ·  ${DB.spaces['agent-mem'].sessions.length} sessions  ·  just now</div>
+          <div style="color: var(--muted);">       path: /Users/marcosotomaceda/Desktop/agent-mem (https://github.com/marcosotomac/agent-mem.git)</div>
+          <br />
+          <div>    <span style="color: var(--gt-green);">▶</span>  <strong style="color: var(--ink);">web-dashboard</strong>          ${DB.spaces['web-dashboard'].rules.length} active  ·  ${DB.spaces['web-dashboard'].sessions.length} sessions  ·  10m ago</div>
+          <div style="color: var(--muted);">       path: /Users/marcosotomaceda/Projects/web-dashboard</div>
+          <br />
+          <div>    <span style="color: var(--gt-green);">▶</span>  <strong style="color: var(--ink);">data-pipeline</strong>          ${DB.spaces['data-pipeline'].rules.length} active  ·  ${DB.spaces['data-pipeline'].sessions.length} sessions  ·  1d ago</div>
+          <div style="color: var(--muted);">       path: /Users/marcosotomaceda/data-pipeline</div>
+        </div>
+      `);
+    }
+
+    function executeClean(raw) {
+      printTerminal(`
+        <div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; margin: 4px 0;">
+          &nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>&nbsp;&nbsp;<span style="color: var(--muted);">clean: 0 zombie rules found (all anchor files exist)</span>
+        </div>
+      `);
+    }
+
+    function executeSync() {
+      const space = getActiveSpace();
+      printTerminal(`
+        <div style="font-family: var(--mono); font-size: 0.82rem; margin: 2px 0;">
+          &nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>&nbsp;&nbsp;<span style="color: var(--muted);">synchronized</span>&nbsp;&nbsp;<span style="color: var(--ink); font-weight: 700;">.agent-rules</span>&nbsp;&nbsp;<span style="color: var(--line-strong);">·</span>&nbsp;&nbsp;<span style="color: var(--muted);">${space.rules.length} rules active</span>
+        </div>
+      `);
+    }
+
+    function executeMcp(parts) {
+      if (parts[2] === 'install') {
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; margin: 4px 0;">
+            <div style="color: var(--ink); font-weight: 700;">  agent-mem mcp install · AI client provisioning</div>
+            <br />
+            <div>&nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">mcp</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 170px;">Google Antigravity</span>  <span style="color: var(--muted);">(configured ~/.gemini/config/mcp_config.json)</span></div>
+            <div>&nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">mcp</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 170px;">Cursor</span>              <span style="color: var(--muted);">(configured ~/.cursor/mcp.json)</span></div>
+            <div>&nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">mcp</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 170px;">Claude Desktop</span>      <span style="color: var(--muted);">(configured ~/Library/.../claude_desktop_config.json)</span></div>
+            <div>&nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">mcp</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 170px;">Claude Code</span>         <span style="color: var(--muted);">(configured ~/.claude.json)</span></div>
+            <div>&nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">mcp</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 170px;">OpenAI Codex</span>        <span style="color: var(--muted);">(configured ~/.codex/config.toml)</span></div>
+            <div>&nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">mcp</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 170px;">Windsurf</span>            <span style="color: var(--muted);">(configured ~/.codeium/windsurf/mcp_config.json)</span></div>
+            <div>&nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">mcp</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 170px;">Zed</span>                 <span style="color: var(--muted);">(configured ~/.config/zed/settings.json)</span></div>
+            <div>&nbsp;&nbsp;<span style="color: var(--gt-green);">✓</span>  <span style="color: var(--muted);">mcp</span>  <span style="color: var(--ink); font-weight: 600; display: inline-block; width: 170px;">VS Code</span>             <span style="color: var(--muted);">(configured ~/Library/.../Code/User/mcp.json)</span></div>
+            <br />
+            <div style="color: var(--gt-green);">&nbsp;&nbsp;✓ Configured AI editor MCP clients in 3ms. Server ready on stdio.</div>
+          </div>
+        `);
+      } else {
+        printTerminal(`
+          <div style="font-family: var(--mono); font-size: 0.82rem; margin: 4px 0;">
+            <span style="color: var(--gt-green);">✓</span> MCP stdio server ready (4 tools: mem_set, mem_find, mem_context, mem_manage).
+          </div>
+        `);
+      }
+    }
+
+    function executeCatAgentRules() {
+      const space = getActiveSpace();
+      let out = `<div style="font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; margin: 4px 0;">
+        <div style="color: var(--muted);"># .agent-rules - agent-mem shared team memory</div>
+        <div style="color: var(--muted); margin-bottom: 8px;"># Track this file in git to share rules across your team without SQLite binary conflicts.</div>`;
+      space.rules.slice(0, 7).forEach(r => {
+        const archBadge = r.archived ? `<span style="color: var(--gt-yellow);">[archived]</span> ` : '';
+        const kindBadge = r.kind !== 'rule' ? `<span style="color: var(--gt-cyan);">[${r.kind}]</span> ` : '';
+        const anchor = r.anchor ? ` <span style="color: var(--muted);">(@ ${escapeHtml(r.anchor)})</span>` : '';
+        out += `<div>${archBadge}${kindBadge}<span style="color: var(--ink); font-weight: 600;">${escapeHtml(r.key)}</span> = <span style="color: var(--ink-soft);">${escapeHtml(r.value)}</span>${anchor}</div>`;
+      });
+      if (space.rules.length > 7) {
+        out += `<div style="color: var(--muted); margin: 4px 0;"># ... ${space.rules.length - 7} more rules</div>`;
+      }
+      if (space.relations && space.relations.length > 0) {
+        out += `<div style="color: var(--muted); margin-top: 8px;"># Relations</div>`;
+        space.relations.slice(0, 3).forEach(rel => {
+          out += `<div><span style="color: var(--ink); font-weight: 600;">${escapeHtml(rel.source)}</span> <span style="color: var(--muted);">-&gt; ${escapeHtml(rel.type)} -&gt;</span> <span style="color: var(--ink); font-weight: 600;">${escapeHtml(rel.target)}</span></div>`;
+        });
+      }
+      out += '</div>';
+      printTerminal(out);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // RATATUI TUI EMULATOR LOGIC (INTERACTIVE & KEYBOARD DRIVEN)
+    // ─────────────────────────────────────────────────────────────
+    let tuiActiveTab = 1;
+    let tuiSelectedRuleIdx = 0;
+
+    function tuiSwitchTab(tabNum) {
+      tuiActiveTab = tabNum;
+      for (let i = 1; i <= 5; i++) {
+        const tabEl = document.getElementById(`tui-tab-${i}`);
+        if (tabEl) {
+          if (i === tabNum) tabEl.classList.add('tui-tab-active');
+          else tabEl.classList.remove('tui-tab-active');
+        }
+      }
+      renderTuiContent();
+    }
+
+    function renderTuiContent() {
+      const listBox = document.getElementById('tui-list-box');
+      const detailBox = document.getElementById('tui-detail-box');
+      const counterBox = document.getElementById('tui-counter');
+      const space = getActiveSpace();
+
+      const tab1El = document.getElementById('tui-tab-1');
+      const tab2El = document.getElementById('tui-tab-2');
+      const tab3El = document.getElementById('tui-tab-3');
+      const tabHeaderSpace = document.getElementById('tui-header-space');
+      const footerKeys = document.getElementById('tui-footer-keys');
+      if (tab1El) tab1El.innerText = ` 1 Rules (${space.rules.length}) `;
+      if (tab2El) tab2El.innerText = ` 2 Sessions (${space.sessions.length}) `;
+      if (tab3El) tab3El.innerText = ` 3 Projects (3) `;
+      if (tabHeaderSpace) tabHeaderSpace.innerText = DB.currentSpace;
+
+      if (footerKeys) {
+        if (tuiActiveTab === 1) {
+          footerKeys.innerText = ' ⇥ Tab │ ↑↓ Select  n New  e Edit  a Archive  d Delete  / Filter  S Sync  q Quit';
+        } else if (tuiActiveTab === 2) {
+          footerKeys.innerText = ' ⇥ Tab │ ↑↓ Select  c New Checkpoint  r Reload  q Quit';
+        } else if (tuiActiveTab === 3) {
+          footerKeys.innerText = ' ⇥ Tab │ ↑↓ Select  Enter Switch Project  x Deregister  r Reload  q Quit';
+        } else if (tuiActiveTab === 4) {
+          footerKeys.innerText = ' ⇥ Tab │ ↑↓ Select  i Install Selected  I Install All  r Reload  q Quit';
+        } else if (tuiActiveTab === 5) {
+          footerKeys.innerText = ' ⇥ Tab │ ↑↓ Select  q Quit';
+        }
+      }
+
+      if (tuiActiveTab === 1) { // Rules
+        counterBox.innerText = `${tuiSelectedRuleIdx + 1} of ${space.rules.length}`;
+        let listHtml = '';
+        space.rules.forEach((r, idx) => {
+          const isSel = idx === tuiSelectedRuleIdx ? 'selected' : '';
+          const badge = r.kind !== 'rule' ? `[${r.kind}]` : '';
+          listHtml += `
+            <div class="tui-list-item ${isSel}" onclick="tuiSelectRule(${idx})">
+              <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(r.key)}</span>
+              <span style="color: var(--gt-cyan); font-size: 0.72rem;">${badge}</span>
+            </div>
+          `;
+        });
+        listBox.innerHTML = listHtml;
+
+        const sel = space.rules[tuiSelectedRuleIdx] || space.rules[0];
+        if (sel) {
+          const matchingRels = space.relations.filter(rel => rel.source === sel.key || rel.target === sel.key);
+          let relsHtml = matchingRels.length ? '' : '<div style="color: var(--muted); font-size: 0.76rem;">&nbsp;&nbsp;No attached hypergraph relations</div>';
+          matchingRels.forEach(rel => {
+            if (rel.source === sel.key) {
+              relsHtml += `<div style="font-size: 0.76rem; margin-bottom: 2px;">&nbsp;&nbsp;┌─ <span style="color: var(--gt-cyan); font-weight: 600;">${escapeHtml(rel.type)}</span> ──► <span style="color: var(--ink); font-weight: 600;">${escapeHtml(rel.target)}</span></div>`;
+            } else {
+              relsHtml += `<div style="font-size: 0.76rem; margin-bottom: 2px;">&nbsp;&nbsp;└─ <span style="color: var(--gt-cyan); font-weight: 600;">${escapeHtml(rel.type)}</span> ◄── <span style="color: var(--ink); font-weight: 600;">${escapeHtml(rel.source)}</span></div>`;
+            }
+          });
+
+          const scopeStr = sel.key.includes('/') ? sel.key.split('/')[0] : 'global';
+
+          detailBox.innerHTML = `
+            <div style="font-family: var(--mono); font-size: 0.8rem; line-height: 1.5; padding: 4px;">
+              <div style="font-weight: 700; color: var(--ink); font-size: 0.94rem; margin-bottom: 4px;">&nbsp;&nbsp;${escapeHtml(sel.key)}</div>
+              <div style="color: var(--muted); margin-bottom: 6px; font-size: 0.76rem;">
+                &nbsp;&nbsp;Status: <span style="color: ${sel.archived ? 'var(--gt-yellow)' : 'var(--gt-green)'}; font-weight: 700;">${sel.archived ? '[ARCHIVED]' : '[ACTIVE]'}</span>&nbsp;&nbsp;
+                Type: <span style="color: var(--gt-cyan); font-weight: 700;">[${sel.kind.toUpperCase()}]</span>&nbsp;&nbsp;
+                Scope: <span style="color: var(--ink);">${escapeHtml(scopeStr)}</span>
+              </div>
+              <div style="color: var(--line-strong); margin-bottom: 10px; font-size: 0.72rem;">&nbsp;&nbsp;────────────────────────────────────────────────────────────────────────</div>
+              <div style="color: var(--muted); font-weight: 700; margin-bottom: 4px; font-size: 0.75rem;">&nbsp;&nbsp;KNOWLEDGE DIRECTIVE:</div>
+              <div style="color: var(--ink); padding-left: 12px; border-left: 2px solid var(--gt-green); margin: 0 0 12px 8px; line-height: 1.55;">
+                ${escapeHtml(sel.value)}
+              </div>
+              <div style="color: var(--muted); font-weight: 700; margin-bottom: 4px; font-size: 0.75rem;">&nbsp;&nbsp;SOURCE ANCHOR:</div>
+              <div style="color: var(--gt-green); font-weight: 700; margin: 0 0 2px 8px;">&nbsp;&nbsp;@ ${escapeHtml(sel.anchor || 'universal')}</div>
+              <div style="color: var(--muted); font-size: 0.72rem; margin: 0 0 12px 8px;">&nbsp;&nbsp;Injected automatically when editing files matching this path.</div>
+              <div style="color: var(--muted); font-weight: 700; margin-bottom: 6px; font-size: 0.75rem;">&nbsp;&nbsp;HYPERGRAPH RELATIONS:</div>
+              <div style="margin-left: 8px;">${relsHtml}</div>
+            </div>
+          `;
+        }
+      } else if (tuiActiveTab === 2) { // Sessions
+        counterBox.innerText = `${space.sessions.length} sessions`;
+        let listHtml = '';
+        space.sessions.forEach((s, idx) => {
+          const isSel = idx === 0 ? 'selected' : '';
+          listHtml += `<div class="tui-list-item ${isSel}"><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(s)}</span></div>`;
+        });
+        listBox.innerHTML = listHtml;
+        detailBox.innerHTML = `
+          <div style="font-family: var(--mono); font-size: 0.8rem; line-height: 1.5; padding: 4px;">
+            <div style="font-weight: 700; color: var(--ink); font-size: 0.94rem; margin-bottom: 4px;">&nbsp;&nbsp;Git Lifecycle Auto-Capture</div>
+            <div style="color: var(--muted); margin-bottom: 10px; line-height: 1.55; padding-left: 8px;">
+              Sessions automatically capture short commit hashes and commit messages via the post-commit git hook without prompt token overhead.
+            </div>
+            <div style="color: var(--line-strong); margin-bottom: 10px; font-size: 0.72rem;">&nbsp;&nbsp;────────────────────────────────────────────────────────────────────────</div>
+            <div style="color: var(--muted); padding-left: 8px;"><span style="font-weight: 700; color: var(--ink);">Actions:</span> [c] New Checkpoint &nbsp;&nbsp; [r] Reload &nbsp;&nbsp; [S] Git Sync</div>
+          </div>
+        `;
+      } else if (tuiActiveTab === 3) { // Projects
+        counterBox.innerText = `3 projects`;
+        listBox.innerHTML = `
+          <div class="tui-list-item selected">agent-mem (dev)</div>
+          <div class="tui-list-item">web-dashboard (feat/usage)</div>
+          <div class="tui-list-item">data-pipeline (main)</div>
+        `;
+        detailBox.innerHTML = `
+          <div style="font-family: var(--mono); font-size: 0.8rem; line-height: 1.5; padding: 4px;">
+            <div style="font-weight: 700; color: var(--ink); font-size: 0.94rem; margin-bottom: 4px;">&nbsp;&nbsp;Canonical Project Registry</div>
+            <div style="color: var(--gt-green); margin: 0 0 8px 8px; font-weight: 600;">~/.config/agent-mem/projects.json</div>
+            <div style="color: var(--muted); margin-bottom: 10px; line-height: 1.55; padding-left: 8px;">
+              Resolves symlinks, case-folding, and anchors by git remote URL, eliminating memory duplication while keeping zero overhead on reads.
+            </div>
+            <div style="color: var(--line-strong); margin-bottom: 10px; font-size: 0.72rem;">&nbsp;&nbsp;────────────────────────────────────────────────────────────────────────</div>
+            <div style="color: var(--muted); padding-left: 8px;"><span style="font-weight: 700; color: var(--ink);">Actions:</span> [Enter] Switch Project &nbsp;&nbsp; [x] Deregister &nbsp;&nbsp; [r] Reload</div>
+          </div>
+        `;
+      } else if (tuiActiveTab === 4) { // Doctor
+        counterBox.innerText = `All checks green`;
+        listBox.innerHTML = `
+          <div class="tui-list-item selected">Storage: SQLite WAL</div>
+          <div class="tui-list-item">Git Sync: merge=union</div>
+          <div class="tui-list-item">MCP Clients (12 configured)</div>
+        `;
+        detailBox.innerHTML = `
+          <div style="font-family: var(--mono); font-size: 0.8rem; line-height: 1.5; padding: 4px;">
+            <div style="font-weight: 700; color: var(--gt-green); font-size: 0.94rem; margin-bottom: 6px;">&nbsp;&nbsp;✓ System Health Optimal</div>
+            <div style="color: var(--muted); margin-bottom: 4px;">&nbsp;&nbsp;Storage: <span style="color: var(--ink); font-weight: 600;">${escapeHtml(space.path)}/.agent-mem/mem.db</span> (wal mode · ${space.rules.length} rules)</div>
+            <div style="color: var(--muted); margin-bottom: 4px;">&nbsp;&nbsp;Full-Text: <span style="color: var(--gt-cyan);">FTS5 BM25</span> (porter unicode61 active)</div>
+            <div style="color: var(--muted); margin-bottom: 4px;">&nbsp;&nbsp;Git &amp; Team Sync: <span style="color: var(--gt-green);">.agent-rules</span> (merge=union configured · 0 binary collisions)</div>
+            <div style="color: var(--muted); margin-bottom: 8px;">&nbsp;&nbsp;MCP Clients: <span style="color: var(--ink); font-weight: 600;">12 AI clients configured</span></div>
+            <div style="color: var(--line-strong); margin-bottom: 8px;">&nbsp;&nbsp;────────────────────────────────────────────────────────────────────────</div>
+            <div style="color: var(--muted); font-size: 0.74rem;">&nbsp;&nbsp;Actions: [i] Install Selected &nbsp;&nbsp; [I] Install All &nbsp;&nbsp; [r] Reload Diagnostics</div>
+          </div>
+        `;
+      } else if (tuiActiveTab === 5) { // Help
+        counterBox.innerText = `Keybindings`;
+        listBox.innerHTML = `
+          <div class="tui-list-item selected">Navigation</div>
+          <div class="tui-list-item">Actions</div>
+        `;
+        detailBox.innerHTML = `
+          <div style="font-family: var(--mono); font-size: 0.8rem; line-height: 1.5; padding: 4px;">
+            <div style="font-weight: 700; color: var(--ink); font-size: 0.94rem; margin-bottom: 8px;">&nbsp;&nbsp;Cockpit Keybindings</div>
+            <div style="padding-left: 8px; line-height: 1.7;">
+              <div><span style="font-weight: 700; color: var(--ink);">[1-5]</span> or <span style="font-weight: 700; color: var(--ink);">[Tab]</span> : Switch active tabs</div>
+              <div><span style="font-weight: 700; color: var(--ink);">[↑ / ↓]</span> or <span style="font-weight: 700; color: var(--ink);">[j / k]</span> : Navigate items</div>
+              <div><span style="font-weight: 700; color: var(--ink);">[n]</span> : Record new rule prompt</div>
+              <div><span style="font-weight: 700; color: var(--ink);">[e]</span> : Edit selected rule</div>
+              <div><span style="font-weight: 700; color: var(--ink);">[a]</span> : Toggle archive on selected rule</div>
+              <div><span style="font-weight: 700; color: var(--ink);">[d]</span> : Delete selected rule</div>
+              <div><span style="font-weight: 700; color: var(--ink);">[/]</span> : Filter rules by key or value</div>
+              <div><span style="font-weight: 700; color: var(--ink);">[S]</span> : Trigger plain-text .agent-rules git sync</div>
+              <div><span style="font-weight: 700; color: var(--ink);">[q]</span> or <span style="font-weight: 700; color: var(--ink);">[Esc]</span> : Return to shell prompt</div>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    function tuiSelectRule(idx) {
+      tuiSelectedRuleIdx = idx;
+      renderTuiContent();
+    }
+
+    function tuiMoveCursor(delta) {
+      const space = getActiveSpace();
+      if (tuiActiveTab === 1) {
+        tuiSelectedRuleIdx = Math.max(0, Math.min(space.rules.length - 1, tuiSelectedRuleIdx + delta));
+        renderTuiContent();
+      }
+    }
+
+    function handleCommand(cmd) {
+      printPrompt(cmd);
+      executeCommand(cmd);
+    }
+
+    // TUI Keyboard navigation
+    window.addEventListener('keydown', (e) => {
+      if (DB.activeTab === 'tui') {
+        const space = getActiveSpace();
+        if (e.key === 'q' || e.key === 'Escape') {
+          e.preventDefault();
+          switchMainTab('shell');
+        } else if (e.key === 'Tab') {
+          e.preventDefault();
+          tuiSwitchTab((tuiActiveTab % 5) + 1);
+        } else if (['1', '2', '3', '4', '5'].includes(e.key)) {
+          tuiSwitchTab(parseInt(e.key));
+        } else if (e.key === 'ArrowDown' || e.key === 'j') {
+          if (tuiActiveTab === 1 && tuiSelectedRuleIdx < space.rules.length - 1) {
+            tuiSelectedRuleIdx++;
+            renderTuiContent();
+          }
+        } else if (e.key === 'ArrowUp' || e.key === 'k') {
+          if (tuiActiveTab === 1 && tuiSelectedRuleIdx > 0) {
+            tuiSelectedRuleIdx--;
+            renderTuiContent();
+          }
+        } else if (e.key === 'a' && tuiActiveTab === 1) {
+          const sel = space.rules[tuiSelectedRuleIdx];
+          if (sel) {
+            if (sel.archived) {
+              executeUnarchive(sel.key);
+            } else {
+              executeArchive(sel.key);
+            }
+            renderTuiContent();
+          }
+        } else if (e.key === 'n' && tuiActiveTab === 1) {
+          const key = prompt("Rule key (e.g. gotcha/sqlite-timeout or decision/batch-wal):");
+          if (key) {
+            const val = prompt("Rule value:");
+            if (val) {
+              const anchor = prompt("Anchor file:line (optional, e.g. src/store/mod.rs:45):") || '';
+              executeSet(`agent-mem set ${key} "${val}" ${anchor ? `--anchor ${anchor}` : ''}`);
+              tuiSelectedRuleIdx = 0;
+              renderTuiContent();
+            }
+          }
+        } else if (e.key === 'e' && tuiActiveTab === 1) {
+          const sel = space.rules[tuiSelectedRuleIdx];
+          if (sel) {
+            const val = prompt(`Edit value for '${sel.key}':`, sel.value);
+            if (val && val !== sel.value) {
+              sel.value = val;
+              notifyStoreUpdate(sel.key);
+              renderTuiContent();
+            }
+          }
+        } else if (e.key === 'd' && tuiActiveTab === 1) {
+          const sel = space.rules[tuiSelectedRuleIdx];
+          if (sel && confirm(`Delete rule '${sel.key}'?`)) {
+            executeDel(sel.key);
+            tuiSelectedRuleIdx = Math.max(0, Math.min(space.rules.length - 1, tuiSelectedRuleIdx));
+            renderTuiContent();
+          }
+        } else if (e.key === 'c' && tuiActiveTab === 2) {
+          const summary = prompt("New checkpoint session summary:");
+          if (summary) {
+            executeSession(['session', 'add', summary]);
+            renderTuiContent();
+          }
+        } else if (e.key === 'S') {
+          executeSync();
+        }
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────
+    // HERDR SIDEBAR & WORKSPACE SWITCHING
+    // ─────────────────────────────────────────────────────────────
+    function switchSpace(spaceKey, branch) {
+      DB.currentSpace = spaceKey;
+      DB.currentBranch = branch;
+
+      document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+      const activeItem = document.getElementById(`sp-${spaceKey}`);
+      if (activeItem) activeItem.classList.add('active');
+
+      document.getElementById('window-title-space').innerText = spaceKey;
+      document.getElementById('term-dir').innerText = spaceKey;
+      document.getElementById('term-branch').innerText = ` ${branch}`;
+
+      const ccDir = document.getElementById('cc-space-dir');
+      const ccBranch = document.getElementById('cc-space-branch');
+      const ccFootDir = document.getElementById('cc-footer-space');
+      const ccFootBranch = document.getElementById('cc-footer-branch');
+      if (ccDir) ccDir.innerText = DB.spaces[spaceKey].path;
+      if (ccBranch) ccBranch.innerText = branch;
+      if (ccFootDir) ccFootDir.innerText = DB.spaces[spaceKey].path;
+      if (ccFootBranch) ccFootBranch.innerText = `${branch} *`;
+
+      notifyStoreUpdate();
+
+      if (DB.activeTab === 'tui') {
+        tuiSelectedRuleIdx = 0;
+        renderTuiContent();
+      } else if (DB.activeTab === 'shell') {
+        printPrompt(`cd ~/Projects/${spaceKey}`);
+        printTerminal(`<span style="color: var(--muted);">Switched workspace to <strong style="color: #fff;">${spaceKey}</strong> (branch: ${branch}). Loaded SQLite memory hypergraph.</span>`);
+        setTimeout(() => {
+          executeDoctor();
+        }, 120);
+      } else if (DB.activeTab === 'claude') {
+        triggerAgentPrompt(`Inspect memory rules for workspace ${spaceKey}`);
+      }
+    }
+
+    function updateSidebarCounts() {
+      const space = getActiveSpace();
+      document.getElementById('sb-rules-count').innerText = `${space.rules.length} rules`;
+    }
+
+    function filterInspector(kind) {
+      DB.inspectorFilter = kind;
+      ['all', 'rule', 'gotcha', 'decision'].forEach(k => {
+        const btn = document.getElementById(`flt-${k}`);
+        if (btn) btn.classList.toggle('active', k === kind);
+      });
+      renderInspector();
+    }
+
+    function renderInspector(highlightKey = null) {
+      const space = getActiveSpace();
+      const container = document.getElementById('inspector-cards-container');
+      container.innerHTML = '';
+
+      let list = space.rules;
+      if (DB.inspectorFilter !== 'all') {
+        list = space.rules.filter(r => r.kind === DB.inspectorFilter);
+      }
+
+      const topRules = list.slice(0, 4);
+      topRules.forEach(r => {
+        const isHl = highlightKey && r.key === highlightKey ? 'card-highlight' : '';
+        const kindColor = r.kind === 'rule' ? 'var(--gt-cyan)' : r.kind === 'gotcha' ? 'var(--gt-red)' : 'var(--gt-purple)';
+        const card = document.createElement('div');
+        card.className = `inspector-card ${isHl}`;
+        card.onclick = () => {
+          if (DB.activeTab === 'claude') {
+            triggerAgentPrompt(`Query details for rule ${r.key}`);
+          } else {
+            runChip(`agent-mem get ${r.key}`);
+          }
+        };
+        card.innerHTML = `
+          <div class="card-title">
+            <span>${escapeHtml(r.key)}</span>
+            <span style="color: ${kindColor}">[${r.kind}]</span>
+          </div>
+          <div class="card-desc">${escapeHtml(r.value)}</div>
+          <div style="font-size: 0.68rem; color: var(--gt-blue); margin-top: 4px;">anchor: ${escapeHtml(r.anchor || 'universal')}</div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function copyInstall(text, el) {
+      navigator.clipboard.writeText(text).then(() => {
+        const pill = el.querySelector('.copy-pill') || el.querySelector('button') || el;
+        const old = pill.innerText;
+        pill.innerText = 'copied!';
+        pill.style.color = 'var(--gt-green)';
+        setTimeout(() => {
+          pill.innerText = old;
+          pill.style.color = '';
+        }, 1600);
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // AUTO DEMO & MANUAL INTERACTION ENGINE
+    // ─────────────────────────────────────────────────────────────
+    let autoDemoActive = false;
+    let autoDemoRunId = 0;
+    let userInteracted = false;
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function moveCursorTo(targetEl, offsetX = 14, offsetY = 14) {
+      if (!autoDemoActive) return false;
+      const cursor = document.getElementById('virtual-cursor');
+      const winEl = document.getElementById('ghostty-window-el');
+      if (!cursor || !winEl || !targetEl) return false;
+
+      const targetRect = targetEl.getBoundingClientRect();
+      const winRect = winEl.getBoundingClientRect();
+      if (targetRect.width === 0 && targetRect.height === 0) return false;
+
+      const x = Math.round(targetRect.left - winRect.left + offsetX);
+      const y = Math.round(targetRect.top - winRect.top + offsetY);
+
+      cursor.style.opacity = '1';
+      cursor.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+      await sleep(920);
+      return autoDemoActive;
+    }
+
+    async function cursorClick(targetEl) {
+      if (!autoDemoActive) return false;
+      const cursor = document.getElementById('virtual-cursor');
+      if (cursor) {
+        cursor.classList.add('clicking');
+        await sleep(180);
+        cursor.classList.remove('clicking');
+        await sleep(120);
+      }
+      if (targetEl && typeof targetEl.click === 'function') {
+        targetEl.click();
+      }
+      return autoDemoActive;
+    }
+
+    async function typeSmoothly(inputEl, text) {
+      if (!autoDemoActive || !inputEl) return false;
+      inputEl.value = '';
+      inputEl.focus();
+      for (let i = 0; i < text.length; i++) {
+        if (!autoDemoActive) return false;
+        inputEl.value += text[i];
+        inputEl.scrollLeft = inputEl.scrollWidth;
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        let jitter = Math.floor(Math.random() * 30) + 42;
+        if (text[i] === ' ' || text[i] === '/' || text[i] === '.') jitter += 75;
+        await sleep(jitter);
+      }
+      return autoDemoActive;
+    }
+
+    function setManualMode(userTriggered = false) {
+      autoDemoActive = false;
+      autoDemoRunId++;
+      userInteracted = true;
+
+      const cursor = document.getElementById('virtual-cursor');
+      if (cursor) {
+        cursor.style.opacity = '0';
+      }
+      const btnAuto = document.getElementById('btn-mode-auto');
+      const btnManual = document.getElementById('btn-mode-manual');
+      if (btnAuto) btnAuto.classList.remove('active');
+      if (btnManual) btnManual.classList.add('active');
+    }
+
+    async function startAutoDemo(userTriggered = false) {
+      autoDemoActive = true;
+      const thisRun = ++autoDemoRunId;
+
+      const btnAuto = document.getElementById('btn-mode-auto');
+      const btnManual = document.getElementById('btn-mode-manual');
+      if (btnAuto) btnAuto.classList.add('active');
+      if (btnManual) btnManual.classList.remove('active');
+
+      const cursor = document.getElementById('virtual-cursor');
+      if (cursor) cursor.style.opacity = '1';
+
+      while (autoDemoActive && thisRun === autoDemoRunId) {
+        // SCENE 1: Switch to Claude Code & Type prompt
+        switchMainTab('claude');
+        await sleep(750);
+        if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+        const ccInput = document.getElementById('agent-custom-input');
+        if (ccInput) {
+          await moveCursorTo(ccInput, 40, 16);
+          await cursorClick(ccInput);
+          if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+          const promptStr = "Refactor batch writes in src/store/mod.rs to prevent locking";
+          await typeSmoothly(ccInput, promptStr);
+          await sleep(700);
+          if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+          submitCustomPrompt();
+        }
+
+        // SCENE 2: Claude calls MCP mem_context & mem_set -> hover over Inspector
+        await sleep(4800);
+        if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+        const firstCard = document.querySelector('.inspector-card');
+        if (firstCard) {
+          await moveCursorTo(firstCard, 110, 28);
+          await sleep(1800);
+        }
+        if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+        // SCENE 3: Switch to Ratatui TUI cockpit
+        const tabTui = document.getElementById('tab-tui');
+        if (tabTui) {
+          await moveCursorTo(tabTui, 42, 14);
+          await cursorClick(tabTui);
+          await sleep(1200);
+          if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+          // Browse rules table
+          tuiMoveCursor(1);
+          await sleep(900);
+          tuiMoveCursor(1);
+          await sleep(1100);
+
+          // Switch to Sessions tab in Cockpit
+          const tab2 = document.getElementById('tui-tab-2');
+          if (tab2) {
+            await moveCursorTo(tab2, 35, 10);
+            await cursorClick(tab2);
+            await sleep(1400);
+          }
+          if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+          // Switch back to Rules tab in Cockpit
+          const tab1 = document.getElementById('tui-tab-1');
+          if (tab1) {
+            await moveCursorTo(tab1, 35, 10);
+            await cursorClick(tab1);
+            await sleep(1100);
+          }
+        }
+        if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+        // SCENE 4: Switch to Shell & execute agent-mem doctor
+        const tabShell = document.getElementById('tab-shell');
+        if (tabShell) {
+          await moveCursorTo(tabShell, 36, 14);
+          await cursorClick(tabShell);
+          await sleep(1000);
+          if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+          const cliIn = document.getElementById('cli-input');
+          if (cliIn) {
+            await moveCursorTo(cliIn, 55, 12);
+            await cursorClick(cliIn);
+            await typeSmoothly(cliIn, 'agent-mem doctor');
+            await sleep(500);
+            if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+            executeCommand('agent-mem doctor');
+            cliIn.value = '';
+            await sleep(3400);
+          }
+        }
+        if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+        // SCENE 5: Switch to .agent-rules Git Sync tab
+        const tabDiff = document.getElementById('tab-diff');
+        if (tabDiff) {
+          await moveCursorTo(tabDiff, 40, 14);
+          await cursorClick(tabDiff);
+          await sleep(2800);
+        }
+        if (!autoDemoActive || thisRun !== autoDemoRunId) break;
+
+        // SCENE 6: Return to Claude Code and loop after pause
+        const tabClaude = document.getElementById('tab-claude');
+        if (tabClaude) {
+          await moveCursorTo(tabClaude, 45, 14);
+          await cursorClick(tabClaude);
+          await sleep(4500);
+        }
+      }
+    }
+
+    function initThemeUI() {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      const label = document.getElementById('theme-mode-text');
+      if (label) label.textContent = current;
+    }
+
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      try {
+        localStorage.setItem('agent-mem-theme', next);
+      } catch (e) {}
+      const label = document.getElementById('theme-mode-text');
+      if (label) label.textContent = next;
+    }
+
+    function escapeHtml(s) {
+      if (!s) return '';
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+  </script>
+</body>
+</html>
