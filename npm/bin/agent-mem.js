@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn, execSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const https = require('https');
 const crypto = require('crypto');
 
@@ -28,25 +28,15 @@ function getTargetAsset() {
   throw new Error(`Unsupported platform: ${platform} ${arch}`);
 }
 
-function findSystemBinary() {
-  const isWin = os.platform() === 'win32';
-
-  // 1. Check local build in development
-  const localDevBin = path.join(__dirname, '..', '..', 'target', 'release', isWin ? 'agent-mem.exe' : 'agent-mem');
-  if (fs.existsSync(localDevBin)) {
-    return localDevBin;
+function verifyBinaryVersion(binPath) {
+  const result = spawnSync(binPath, ['--version'], { encoding: 'utf8' });
+  if (result.error || result.status !== 0) {
+    throw new Error(`Unable to execute native binary at ${binPath}`);
   }
-
-  // 2. Check system PATH
-  const cmd = isWin ? 'where agent-mem.exe' : 'which agent-mem';
-  try {
-    const out = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-    if (out && fs.existsSync(out)) {
-      return out;
-    }
-  } catch (_) {}
-
-  return null;
+  const expected = `agent-mem ${VERSION}`;
+  if (result.stdout.trim() !== expected) {
+    throw new Error(`Native binary version mismatch: expected ${expected}`);
+  }
 }
 
 function download(url, dest, redirects = 0) {
@@ -111,8 +101,14 @@ async function verifyArchive(archivePath, asset, releaseBaseUrl) {
 }
 
 async function ensureBinary() {
-  const sysBin = findSystemBinary();
-  if (sysBin) return sysBin;
+  // Deliberately never fall back to PATH: `npx agent-mem@X` must execute X,
+  // not an unrelated global install. This override exists for package smoke
+  // tests and controlled development only, and is version checked.
+  if (process.env.AGENT_MEM_BINARY) {
+    const override = path.resolve(process.env.AGENT_MEM_BINARY);
+    verifyBinaryVersion(override);
+    return override;
+  }
 
   const asset = getTargetAsset();
   const isWin = os.platform() === 'win32';
@@ -121,6 +117,7 @@ async function ensureBinary() {
   const binPath = path.join(cacheDir, binName);
 
   if (fs.existsSync(binPath)) {
+    verifyBinaryVersion(binPath);
     return binPath;
   }
 
@@ -136,12 +133,16 @@ async function ensureBinary() {
   await verifyArchive(archivePath, asset, releaseBaseUrl);
 
   if (asset.endsWith('.tar.gz')) {
-    execSync(`tar -xzf "${archivePath}" -C "${cacheDir}"`, { stdio: 'ignore' });
+    const result = spawnSync('tar', ['-xzf', archivePath, '-C', cacheDir], { stdio: 'ignore' });
+    if (result.status !== 0) throw new Error('Failed to extract release archive');
   } else if (asset.endsWith('.zip')) {
     if (isWin) {
-      execSync(`powershell -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${cacheDir}' -Force"`, { stdio: 'ignore' });
+      const script = 'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force';
+      const result = spawnSync('powershell', ['-NoProfile', '-Command', script, archivePath, cacheDir], { stdio: 'ignore' });
+      if (result.status !== 0) throw new Error('Failed to extract release archive');
     } else {
-      execSync(`unzip -o "${archivePath}" -d "${cacheDir}"`, { stdio: 'ignore' });
+      const result = spawnSync('unzip', ['-o', archivePath, '-d', cacheDir], { stdio: 'ignore' });
+      if (result.status !== 0) throw new Error('Failed to extract release archive');
     }
   }
 
@@ -152,6 +153,8 @@ async function ensureBinary() {
   if (!isWin) {
     fs.chmodSync(binPath, 0o755);
   }
+
+  verifyBinaryVersion(binPath);
 
   return binPath;
 }

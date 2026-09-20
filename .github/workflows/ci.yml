@@ -25,7 +25,7 @@ jobs:
         run: cargo fmt --check
       - name: Validate end-to-end benchmark harness
         run: |
-          python3 -m py_compile evals/run_matrix.py evals/summarize.py
+          python3 -m py_compile evals/run_matrix.py evals/summarize.py evals/report.py evals/package_evidence.py
           sh -n evals/bootstrap-mcp.sh
           python3 evals/run_matrix.py --generate-only
       - name: Lint every feature and target
@@ -62,3 +62,67 @@ jobs:
         run: cargo test --locked --no-default-features
       - name: Test all features
         run: cargo test --locked --all-features
+
+  clean-install:
+    name: Clean install (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            windows: false
+          - name: macOS
+            os: macos-latest
+            windows: false
+          - name: Windows
+            os: windows-latest
+            windows: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --locked --release
+      - name: Pack and install in a clean Unix directory
+        if: ${{ matrix.windows == false }}
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/agent-mem.tar.gz"
+          install_dir="$(mktemp -d)"
+          tar -czf "$archive" -C target/release agent-mem
+          tar -xzf "$archive" -C "$install_dir"
+          binary="$install_dir/agent-mem"
+          expected="agent-mem $(node -p "require('./npm/package.json').version")"
+          test "$("$binary" --version)" = "$expected"
+          sandbox="$(mktemp -d)"
+          "$binary" init "$sandbox"
+          cd "$sandbox"
+          "$binary" set install/smoke verified
+          test "$("$binary" get install/smoke)" = verified
+          cd "$GITHUB_WORKSPACE"
+          AGENT_MEM_BINARY="$binary" node npm/bin/agent-mem.js --version
+      - name: Pack and install in a clean Windows directory
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "agent-mem.zip"
+          $installDir = Join-Path $env:RUNNER_TEMP "agent-mem-install"
+          Compress-Archive -LiteralPath target/release/agent-mem.exe -DestinationPath $archive -Force
+          Expand-Archive -LiteralPath $archive -DestinationPath $installDir -Force
+          $binary = Join-Path $installDir "agent-mem.exe"
+          $version = node -p "require('./npm/package.json').version"
+          $expected = "agent-mem $version"
+          if ((& $binary --version) -ne $expected) { throw "version mismatch" }
+          $sandbox = Join-Path $env:RUNNER_TEMP "agent-mem-project"
+          New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
+          & $binary init $sandbox
+          Push-Location $sandbox
+          & $binary set install/smoke verified
+          if ((& $binary get install/smoke) -ne "verified") { throw "round-trip failed" }
+          Pop-Location
+          $env:AGENT_MEM_BINARY = $binary
+          node npm/bin/agent-mem.js --version

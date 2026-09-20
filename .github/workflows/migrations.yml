@@ -1,0 +1,59 @@
+name: Release Migration Compatibility
+
+on:
+  schedule:
+    - cron: "15 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  released-databases:
+    name: v1.1.0 to v1.2.0 to current
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build current release
+        run: cargo build --locked --release
+      - name: Download and verify released binaries
+        shell: bash
+        run: |
+          mkdir -p target/migration-releases/v1.1.0 target/migration-releases/v1.2.0
+          for version in v1.1.0 v1.2.0; do
+            base="https://github.com/marcosotomac/agent-mem/releases/download/$version"
+            curl --fail --silent --show-error --location "$base/SHA256SUMS.txt" -o "target/migration-releases/$version/SHA256SUMS.txt"
+            curl --fail --silent --show-error --location "$base/agent-mem-linux-x86_64.tar.gz" -o "target/migration-releases/$version/agent-mem-linux-x86_64.tar.gz"
+            cd "target/migration-releases/$version"
+            grep ' agent-mem-linux-x86_64.tar.gz$' SHA256SUMS.txt | sha256sum --check --strict
+            tar -xzf agent-mem-linux-x86_64.tar.gz
+            cd "$GITHUB_WORKSPACE"
+          done
+      - name: Upgrade one store through every supported release
+        shell: bash
+        run: |
+          sandbox="$(mktemp -d)"
+          v11="$PWD/target/migration-releases/v1.1.0/agent-mem"
+          v12="$PWD/target/migration-releases/v1.2.0/agent-mem"
+          current="$PWD/target/release/agent-mem"
+
+          "$v11" init "$sandbox"
+          cd "$sandbox"
+          "$v11" set migration/from-v11 preserved-v11 --anchor src/v11.rs:11
+          test "$("$v12" get migration/from-v11)" = "preserved-v11"
+          "$v12" set migration/from-v12 preserved-v12 --anchor src/v12.rs:12
+          test "$("$current" get migration/from-v11)" = "preserved-v11"
+          test "$("$current" get migration/from-v12)" = "preserved-v12"
+          "$current" set migration/from-v13 preserved-v13 --anchor src/v13.rs:13
+          "$current" sync --export
+
+          replica="$(mktemp -d)"
+          cp .agent-rules "$replica/.agent-rules"
+          "$current" init "$replica"
+          cd "$replica"
+          test "$("$current" get migration/from-v11)" = "preserved-v11"
+          test "$("$current" get migration/from-v12)" = "preserved-v12"
+          test "$("$current" get migration/from-v13)" = "preserved-v13"
