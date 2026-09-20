@@ -1168,3 +1168,62 @@ fn test_mcp_mem_set_batch_writes_and_single_export() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_read_only_mcp_omits_and_rejects_write_tools() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_read_only_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let mut store = Store::open(&temp_dir.join(".agent-mem/mem.db"), true).unwrap();
+    store
+        .set("rule/existing", "Readable but immutable")
+        .unwrap();
+    drop(store);
+
+    let server = McpServer::with_paths_read_only(temp_dir.clone(), temp_dir.join("global.db"));
+    let list = server
+        .handle_request(&JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "tools/list".into(),
+            params: json!({}),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let names: Vec<_> = list["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(names, ["mem_find", "mem_context"]);
+
+    let write = server.handle_request(&JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {"key": "rule/new", "val": "must fail", "scope": "project"}
+        }),
+    });
+    let result = write.unwrap().result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("read-only")
+    );
+
+    let verify = Store::open(&temp_dir.join(".agent-mem/mem.db"), false).unwrap();
+    assert_eq!(verify.get("rule/new").unwrap(), None);
+    drop(verify);
+    fs::remove_dir_all(temp_dir).unwrap();
+}

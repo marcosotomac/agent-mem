@@ -6,8 +6,8 @@ Only the latest release of `agent-mem` receives security updates.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.2.x   | :white_check_mark: |
-| < 1.2.0 | :x:                |
+| 1.3.x   | :white_check_mark: |
+| < 1.3.0 | :x:                |
 
 The trust boundaries, prompt-injection risks, resource limits, and release
 verification controls are documented in [THREAT_MODEL.md](THREAT_MODEL.md).

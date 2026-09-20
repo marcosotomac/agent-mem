@@ -69,6 +69,7 @@ pub struct McpServer {
     global_path: PathBuf,
     project_stores: RefCell<HashMap<PathBuf, Store>>,
     global_store: RefCell<Option<Store>>,
+    read_only: bool,
 }
 
 impl Default for McpServer {
@@ -79,6 +80,14 @@ impl Default for McpServer {
 
 impl McpServer {
     pub fn new() -> Self {
+        Self::new_with_mode(false)
+    }
+
+    pub fn new_with_mode(read_only: bool) -> Self {
+        let read_only = read_only
+            || std::env::var("AGENT_MEM_READ_ONLY")
+                .ok()
+                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
         let root = find_project_root();
         let default_project_root = root
             .join(".agent-mem")
@@ -92,6 +101,7 @@ impl McpServer {
             global_path: global_db_path(),
             project_stores: RefCell::new(HashMap::new()),
             global_store: RefCell::new(None),
+            read_only,
         }
     }
 
@@ -103,7 +113,14 @@ impl McpServer {
             global_path,
             project_stores: RefCell::new(HashMap::new()),
             global_store: RefCell::new(None),
+            read_only: false,
         }
+    }
+
+    pub fn with_paths_read_only(project_root: PathBuf, global_path: PathBuf) -> Self {
+        let mut server = Self::with_paths(project_root, global_path);
+        server.read_only = true;
+        server
     }
 
     fn live_registered_projects(&self) -> impl Iterator<Item = &ProjectRecord> {
@@ -390,7 +407,7 @@ impl McpServer {
         Ok(ProtocolEra::Modern)
     }
 
-    fn tools_list_result(era: ProtocolEra) -> Value {
+    fn tools_list_result(&self, era: ProtocolEra) -> Value {
         let mut result = json!({
             "tools": [
                 {
@@ -461,6 +478,17 @@ impl McpServer {
             ]
         });
 
+        if self.read_only
+            && let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut)
+        {
+            tools.retain(|tool| {
+                matches!(
+                    tool.get("name").and_then(Value::as_str),
+                    Some("mem_find" | "mem_context")
+                )
+            });
+        }
+
         if era == ProtocolEra::Modern {
             let object = result.as_object_mut().expect("tools result is an object");
             object.insert("resultType".into(), json!("complete"));
@@ -516,7 +544,7 @@ impl McpServer {
                 },
             )),
 
-            "tools/list" => Some(Self::response(id, Self::tools_list_result(era))),
+            "tools/list" => Some(Self::response(id, self.tools_list_result(era))),
 
             "tools/call" => {
                 let name = req
@@ -574,6 +602,7 @@ impl McpServer {
         val: &str,
         anchor: Option<&str>,
         compact: bool,
+        trust_badge: &str,
     ) -> String {
         let kind_badge = if kind != "rule" {
             format!("[{}] ", kind)
@@ -594,12 +623,29 @@ impl McpServer {
             val.to_string()
         };
         match anchor {
-            Some(a) => format!("{}{}: {} ({})", kind_badge, key, effective_val, a),
-            None => format!("{}{}: {}", kind_badge, key, effective_val),
+            Some(a) => format!(
+                "{}{}{}: {} ({})",
+                trust_badge, kind_badge, key, effective_val, a
+            ),
+            None => format!("{}{}{}: {}", trust_badge, kind_badge, key, effective_val),
         }
     }
 
+    fn trust_badge(store: &Store, key: &str) -> Result<String> {
+        Ok(match store.metadata(key)? {
+            Some(metadata) if metadata.trust == crate::store::TRUST_UNTRUSTED => {
+                format!("[untrusted:{}] ", metadata.provenance)
+            }
+            _ => String::new(),
+        })
+    }
+
     fn dispatch_tool(&self, name: &str, args: &Value) -> Result<String> {
+        if self.read_only && matches!(name, "mem_set" | "mem_manage") {
+            return Err(crate::error::Error::Usage(
+                "MCP server is read-only; write tools are disabled".into(),
+            ));
+        }
         match name {
             "mem_set" => {
                 let scope = args
@@ -682,7 +728,12 @@ impl McpServer {
                         .collect();
 
                     let mut store = self.open_store(scope, project_root.as_deref(), true)?;
-                    let count = store.set_batch(&batch_rules)?;
+                    let provenance = format!("mcp:{scope}");
+                    let count = store.set_batch_with_metadata(
+                        &batch_rules,
+                        &provenance,
+                        crate::store::TRUST_LOCAL,
+                    )?;
                     if scope == "project" {
                         let rules_file = project_root
                             .as_ref()
@@ -707,7 +758,18 @@ impl McpServer {
 
                 let relation = rel.map(Self::parse_relation).transpose()?;
                 let mut store = self.open_store(scope, project_root.as_deref(), true)?;
-                store.set_entry_with_relation(key, val, anchor, kind, relation)?;
+                let provenance = format!("mcp:{scope}");
+                store.set_batch_with_metadata(
+                    &[crate::store::BatchRule {
+                        key,
+                        val,
+                        anchor,
+                        kind,
+                        relation,
+                    }],
+                    &provenance,
+                    crate::store::TRUST_LOCAL,
+                )?;
                 if scope == "project" {
                     let rules_file = project_root
                         .as_ref()
@@ -749,6 +811,7 @@ impl McpServer {
                 {
                     let results = store.find(query)?;
                     for r in results {
+                        let trust_tag = Self::trust_badge(&store, &r.key)?;
                         let kind_tag = if r.kind != "rule" {
                             format!("[{}] ", r.kind)
                         } else {
@@ -764,12 +827,12 @@ impl McpServer {
                         };
                         match r.anchor {
                             Some(anchor) => lines.push(format!(
-                                "[project] {}{}: {}{} ({})",
-                                kind_tag, r.key, r.val, status_tag, anchor
+                                "[project] {}{}{}: {}{} ({})",
+                                trust_tag, kind_tag, r.key, r.val, status_tag, anchor
                             )),
                             None => lines.push(format!(
-                                "[project] {}{}: {}{}",
-                                kind_tag, r.key, r.val, status_tag
+                                "[project] {}{}{}: {}{}",
+                                trust_tag, kind_tag, r.key, r.val, status_tag
                             )),
                         }
                     }
@@ -780,6 +843,7 @@ impl McpServer {
                 {
                     let results = store.find(query)?;
                     for r in results {
+                        let trust_tag = Self::trust_badge(&store, &r.key)?;
                         let kind_tag = if r.kind != "rule" {
                             format!("[{}] ", r.kind)
                         } else {
@@ -795,12 +859,12 @@ impl McpServer {
                         };
                         match r.anchor {
                             Some(anchor) => lines.push(format!(
-                                "[global] {}{}: {}{} ({})",
-                                kind_tag, r.key, r.val, status_tag, anchor
+                                "[global] {}{}{}: {}{} ({})",
+                                trust_tag, kind_tag, r.key, r.val, status_tag, anchor
                             )),
                             None => lines.push(format!(
-                                "[global] {}{}: {}{}",
-                                kind_tag, r.key, r.val, status_tag
+                                "[global] {}{}{}: {}{}",
+                                trust_tag, kind_tag, r.key, r.val, status_tag
                             )),
                         }
                     }
@@ -903,12 +967,14 @@ impl McpServer {
 
                     let mut project_rule_lines = Vec::new();
                     for r in rules {
+                        let trust_badge = Self::trust_badge(&store, &r.key)?;
                         let line = Self::format_context_rule(
                             &r.kind,
                             &r.key,
                             &r.val,
                             r.anchor.as_deref(),
                             compact,
+                            &trust_badge,
                         );
                         let cost = line.len() + 1;
                         if current_bytes + cost <= project_byte_budget {
@@ -983,7 +1049,15 @@ impl McpServer {
                     let rules = store.dump_limited(global_rule_limit)?;
                     let mut global_lines = Vec::new();
                     for (k, v, a) in rules {
-                        let line = Self::format_context_rule("rule", &k, &v, a.as_deref(), compact);
+                        let trust_badge = Self::trust_badge(&store, &k)?;
+                        let line = Self::format_context_rule(
+                            "rule",
+                            &k,
+                            &v,
+                            a.as_deref(),
+                            compact,
+                            &trust_badge,
+                        );
                         let cost = line.len() + 1;
                         if current_bytes + cost <= total_byte_budget {
                             current_bytes += cost;

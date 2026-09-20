@@ -1,5 +1,9 @@
-use super::{Store, insert_memory_routes, now_epoch};
+use super::{
+    BatchRule, MAX_KEY_BYTES, MAX_RELATION_TYPE_BYTES, MAX_VALUE_BYTES, Store, TRUST_LOCAL,
+    insert_memory_routes, mark_semantic_dirty, now_epoch, reject_oversized, validate_batch_rule,
+};
 use crate::error::Result;
+use crate::security::reject_secret;
 use crate::store::models::{SessionEntry, infer_kind};
 use rusqlite::{TransactionBehavior, params};
 
@@ -12,6 +16,8 @@ impl Store {
                 "Session summary cannot be empty".into(),
             ));
         }
+        reject_oversized("session summary", trimmed, MAX_VALUE_BYTES)?;
+        reject_secret(trimmed)?;
 
         let now = now_epoch();
         let tx = self
@@ -38,17 +44,14 @@ impl Store {
         relations: &[(&str, &str, &str)],
         session_summary: &str,
     ) -> Result<Option<i64>> {
-        if let Some((key, val, _, _)) = entity {
-            if key.trim().is_empty() {
-                return Err(crate::error::Error::Usage(
-                    "Memory key cannot be empty".into(),
-                ));
-            }
-            if val.trim().is_empty() {
-                return Err(crate::error::Error::Usage(
-                    "Memory value cannot be empty".into(),
-                ));
-            }
+        if let Some((key, val, anchor, kind)) = entity {
+            validate_batch_rule(&BatchRule {
+                key,
+                val,
+                anchor,
+                kind,
+                relation: None,
+            })?;
         }
         for (source, rel_type, target) in relations {
             if source.trim().is_empty() || rel_type.trim().is_empty() || target.trim().is_empty() {
@@ -56,6 +59,17 @@ impl Store {
                     "Relation source, type, and target cannot be empty".into(),
                 ));
             }
+            reject_oversized("relation source", source, MAX_KEY_BYTES)?;
+            reject_oversized("relation type", rel_type, MAX_RELATION_TYPE_BYTES)?;
+            reject_oversized("relation target", target, MAX_KEY_BYTES)?;
+            reject_secret(source)?;
+            reject_secret(rel_type)?;
+            reject_secret(target)?;
+        }
+        let trimmed_session = session_summary.trim();
+        if !trimmed_session.is_empty() {
+            reject_oversized("session summary", trimmed_session, MAX_VALUE_BYTES)?;
+            reject_secret(trimmed_session)?;
         }
 
         let now = now_epoch();
@@ -99,6 +113,16 @@ impl Store {
                 params![trimmed_key],
             )?;
             insert_memory_routes(&tx, trimmed_key, trimmed_anchor)?;
+            tx.execute(
+                "INSERT INTO memory_metadata (memory_key, provenance, trust, created_at, reviewed_at)
+                 VALUES (?1, 'git-hook:commit', ?2, ?3, NULL)
+                 ON CONFLICT(memory_key) DO UPDATE SET
+                    provenance = 'git-hook:commit',
+                    trust = CASE WHEN memory_metadata.trust = 'reviewed' THEN 'reviewed' ELSE ?2 END,
+                    reviewed_at = CASE WHEN memory_metadata.trust = 'reviewed' THEN memory_metadata.reviewed_at ELSE NULL END;",
+                params![trimmed_key, TRUST_LOCAL, now],
+            )?;
+            mark_semantic_dirty(&tx)?;
         }
 
         for (source, rel_type, target) in relations {
@@ -113,7 +137,6 @@ impl Store {
         }
 
         let mut session_id = None;
-        let trimmed_session = session_summary.trim();
         if !trimmed_session.is_empty() {
             tx.execute(
                 "INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);",

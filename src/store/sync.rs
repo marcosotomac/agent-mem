@@ -547,6 +547,12 @@ impl Store {
         }
 
         let conflicts_resolved = conflicts.len();
+        let provenance = format!(
+            "rules-file:{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(".agent-rules")
+        );
 
         // 1. Begin immediate transaction for atomic reconciliation and snapshot consistency
         let tx = self
@@ -592,6 +598,11 @@ impl Store {
                 "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
             )?;
+            let mut insert_metadata = tx.prepare_cached(
+                "INSERT INTO memory_metadata
+                    (memory_key, provenance, trust, created_at, reviewed_at)
+                 VALUES (?1, ?2, 'untrusted', ?3, NULL);",
+            )?;
 
             for (key, entry) in &unique_rules {
                 let arc_at = entry.archived_at.map(|_| now);
@@ -612,6 +623,7 @@ impl Store {
                     entry.kind,
                 ])?;
                 insert_memory_routes(&tx, key, entry.anchor)?;
+                insert_metadata.execute(params![key, provenance, now])?;
             }
 
             for (source, rel_type, target) in &parsed.relations {
@@ -666,6 +678,17 @@ impl Store {
             )?;
             let mut delete_routes =
                 tx.prepare_cached("DELETE FROM memory_routes WHERE memory_key = ?1;")?;
+            let mut mark_untrusted = tx.prepare_cached(
+                "INSERT INTO memory_metadata
+                    (memory_key, provenance, trust, created_at, reviewed_at)
+                 VALUES (?1, ?2, 'untrusted', ?3, NULL)
+                 ON CONFLICT(memory_key) DO UPDATE SET
+                    provenance = excluded.provenance,
+                    trust = 'untrusted',
+                    reviewed_at = NULL;",
+            )?;
+            let mut delete_metadata =
+                tx.prepare_cached("DELETE FROM memory_metadata WHERE memory_key = ?1;")?;
 
             for (key, entry) in &unique_rules {
                 match existing_map.get(*key) {
@@ -703,6 +726,7 @@ impl Store {
                             ])?;
                             delete_routes.execute(params![key])?;
                             insert_memory_routes(&tx, key, entry.anchor)?;
+                            mark_untrusted.execute(params![key, provenance, now])?;
                         }
                     }
                     None => {
@@ -724,6 +748,7 @@ impl Store {
                             entry.kind,
                         ])?;
                         insert_memory_routes(&tx, key, entry.anchor)?;
+                        mark_untrusted.execute(params![key, provenance, now])?;
                     }
                 }
             }
@@ -734,6 +759,7 @@ impl Store {
                     delete_mem.execute(params![key])?;
                     delete_fts.execute(params![key])?;
                     delete_routes.execute(params![key])?;
+                    delete_metadata.execute(params![key])?;
                 }
             }
 

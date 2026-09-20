@@ -29,6 +29,15 @@ pub struct RuleRecord {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryMetadata {
+    pub key: String,
+    pub provenance: String,
+    pub trust: String,
+    pub created_at: i64,
+    pub reviewed_at: Option<i64>,
+}
+
 impl RuleRecord {
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()

@@ -143,6 +143,44 @@ pub fn print_unarchive(key: &str) {
     }
 }
 
+pub fn print_trust(key: &str, trust: &str) {
+    if io::stdout().is_terminal() {
+        println!(
+            "  {EMERALD}✓{RESET}  {MUTED}trust{RESET}  {ACCENT}{key}{RESET}  {SUBTLE}·{RESET}  {MUTED}{trust}{RESET}"
+        );
+    } else {
+        println!("trust {key}: {trust}");
+    }
+}
+
+pub fn print_metadata(metadata: &crate::store::MemoryMetadata) {
+    if io::stdout().is_terminal() {
+        println!(
+            "  {ACCENT}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}trust={} provenance={} created={} reviewed={}{RESET}",
+            metadata.key,
+            metadata.trust,
+            metadata.provenance,
+            metadata.created_at,
+            metadata
+                .reviewed_at
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "never".into())
+        );
+    } else {
+        println!(
+            "{}\ttrust={}\tprovenance={}\tcreated_at={}\treviewed_at={}",
+            metadata.key,
+            metadata.trust,
+            metadata.provenance,
+            metadata.created_at,
+            metadata
+                .reviewed_at
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".into())
+        );
+    }
+}
+
 pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let is_tty = io::stdout().is_terminal();
     if entries.is_empty() {
@@ -564,6 +602,15 @@ pub fn print_help() {
             "    {ACCENT}unarchive{RESET} {MUTED}<key>{RESET}       Reactivate an archived rule"
         );
         println!(
+            "    {ACCENT}trust{RESET}   {MUTED}<key>{RESET}           Mark imported memory as human-reviewed"
+        );
+        println!(
+            "    {ACCENT}untrust{RESET} {MUTED}<key>{RESET}           Quarantine memory from an untrusted source"
+        );
+        println!(
+            "    {ACCENT}metadata{RESET} {MUTED}<key>{RESET}          Inspect provenance and trust"
+        );
+        println!(
             "    {ACCENT}find{RESET}    {MUTED}<query>{RESET}         Search rules via BM25 index"
         );
         println!("    {ACCENT}dump{RESET}                    List all active rules");
@@ -583,7 +630,7 @@ pub fn print_help() {
             "    {ACCENT}session{RESET} {MUTED}list{RESET}            Display recent checkpoints"
         );
         println!(
-            "    {ACCENT}mcp{RESET}                     Start Model Context Protocol stdio server"
+            "    {ACCENT}mcp{RESET}     {MUTED}[--read-only]{RESET} Start Model Context Protocol stdio server"
         );
         println!(
             "    {ACCENT}mcp{RESET}     {MUTED}install [client]{RESET} Configure AI editors (Windsurf, Cursor, VS Code, Zed, etc.)"
@@ -607,7 +654,7 @@ pub fn print_help() {
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, clean, find, dump, context, session add, session list, hook post-commit, sync, semantic, mcp, mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, clean, find, dump, context, session add, session list, hook post-commit, sync, semantic, mcp [--read-only], mcp install, doctor, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }
