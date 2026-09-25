@@ -67,6 +67,14 @@ jobs:
       - name: Test all features
         run: cargo test --locked --all-features
 
+  docker-smoke:
+    name: Linux CLI in Docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run real project workflow
+        run: docker run --rm -v "$PWD":/workspace -w /workspace rust:1.89-slim-bookworm sh scripts/docker-tests.sh
+
   clean-install:
     name: Clean install (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
