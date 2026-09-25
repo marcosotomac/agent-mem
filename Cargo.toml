@@ -17,7 +17,7 @@ tui = ["dep:ratatui", "dep:crossterm"]
 semantic-local = ["dep:fastembed", "dep:usearch"]
 
 [dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ratatui = { version = "0.30", optional = true, default-features = false, features = ["crossterm", "std"] }
