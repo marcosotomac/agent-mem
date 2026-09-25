@@ -14,6 +14,46 @@ fn modern_meta(version: &str) -> serde_json::Value {
 }
 
 #[test]
+fn test_corrupt_registry_is_reported_by_mcp() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_corrupt_registry_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("projects.json"), "{broken").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-mem"))
+        .arg("mcp")
+        .current_dir(&dir)
+        .env("AGENT_MEM_GLOBAL_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.as_mut().unwrap(),
+        "{}",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mem_find","arguments":{"query":"auth","scope":"project"}}})
+    )
+    .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["isError"], true);
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Project registry")
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn test_mcp_routes_explicit_projects_from_global_client_cwd() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_mcp_routing_{}",

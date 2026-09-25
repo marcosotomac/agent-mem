@@ -66,6 +66,7 @@ pub struct McpServer {
     default_project_root: Option<PathBuf>,
     allow_project_create: bool,
     projects: Vec<ProjectRecord>,
+    registry_error: Option<String>,
     global_path: PathBuf,
     project_stores: RefCell<HashMap<PathBuf, Store>>,
     global_store: RefCell<Option<Store>>,
@@ -94,10 +95,15 @@ impl McpServer {
             .join("mem.db")
             .exists()
             .then(|| ProjectRegistry::canonicalize_path(&root));
+        let (projects, registry_error) = match ProjectRegistry::load() {
+            Ok(registry) => (registry.projects, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
         Self {
             default_project_root,
             allow_project_create: false,
-            projects: ProjectRegistry::load().unwrap_or_default().projects,
+            projects,
+            registry_error,
             global_path: global_db_path(),
             project_stores: RefCell::new(HashMap::new()),
             global_store: RefCell::new(None),
@@ -110,6 +116,7 @@ impl McpServer {
             default_project_root: Some(ProjectRegistry::canonicalize_path(&project_root)),
             allow_project_create: true,
             projects: Vec::new(),
+            registry_error: None,
             global_path,
             project_stores: RefCell::new(HashMap::new()),
             global_store: RefCell::new(None),
@@ -133,6 +140,9 @@ impl McpServer {
     }
 
     fn resolve_project_root(&self, selector: Option<&str>) -> Result<PathBuf> {
+        if let Some(error) = &self.registry_error {
+            return Err(crate::error::Error::Usage(error.clone()));
+        }
         if let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) {
             if let Some(default) = &self.default_project_root
                 && (selector == default.to_string_lossy()
