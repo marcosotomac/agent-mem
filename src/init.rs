@@ -176,6 +176,15 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
         let hook_line = format!("{}\n", cmd.trim());
         if hook_path.exists() {
             let content = fs::read_to_string(&hook_path).unwrap_or_default();
+            if cmd == "agent-mem sync || true"
+                && content.contains("agent-mem sync 2>/dev/null || true")
+            {
+                fs::write(
+                    &hook_path,
+                    content.replace("agent-mem sync 2>/dev/null || true", cmd),
+                )?;
+                return Ok(true);
+            }
             if !content.contains(cmd.trim()) {
                 let mut new_content = content;
                 if !new_content.ends_with('\n') && !new_content.is_empty() {
@@ -200,7 +209,7 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
     // 3. Configure git hooks idempotently (post-commit, post-merge, post-checkout, post-rewrite)
     if let Some(git_hooks_dir) = resolve_git_hooks_dir(root) {
         let session_cmd = "agent-mem hook post-commit 2>/dev/null || true";
-        let sync_cmd = "agent-mem sync 2>/dev/null || true";
+        let sync_cmd = "agent-mem sync || true";
 
         report.hook_configured = install_git_hook(&git_hooks_dir, "post-commit", session_cmd)?;
         report.post_merge_configured = install_git_hook(&git_hooks_dir, "post-merge", sync_cmd)?;

@@ -401,11 +401,7 @@ impl Store {
 
     pub(crate) fn get_db_fingerprint(&self) -> Result<String> {
         let fp: String = self.conn.query_row(
-            "SELECT printf('%d:%d:%d',
-                (SELECT COUNT(*) FROM memories),
-                (SELECT COALESCE(MAX(updated_at), 0) FROM memories),
-                (SELECT COUNT(*) FROM relations)
-            );",
+            "SELECT CAST(generation AS TEXT) FROM store_generation WHERE singleton = 1;",
             [],
             |r| r.get(0),
         )?;
@@ -413,8 +409,22 @@ impl Store {
     }
 
     pub(crate) fn record_sync_state(&self, path: &Path, content: &str) -> Result<()> {
+        self.record_sync_state_mode(path, content, false)
+    }
+
+    fn record_sync_state_mode(
+        &self,
+        path: &Path,
+        content: &str,
+        accepted_conflicts: bool,
+    ) -> Result<()> {
         let content_hash = Self::compute_content_hash(content) as i64;
-        let db_state = self.get_db_fingerprint()?;
+        let generation = self.get_db_fingerprint()?;
+        let db_state = if accepted_conflicts {
+            format!("accepted:{generation}")
+        } else {
+            generation
+        };
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS _sync_state (path TEXT PRIMARY KEY, content_hash INTEGER NOT NULL, db_state TEXT NOT NULL);",
             [],
@@ -429,6 +439,15 @@ impl Store {
 
     /// Reconcile SQLite database with a plain-text rules file (.agent-rules).
     pub fn sync_with_file(&mut self, path: &Path) -> Result<SyncReport> {
+        self.sync_with_file_mode(path, false)
+    }
+
+    /// Explicitly accept the last definition of a duplicate key in a team file.
+    pub fn sync_with_file_accept_conflicts(&mut self, path: &Path) -> Result<SyncReport> {
+        self.sync_with_file_mode(path, true)
+    }
+
+    fn sync_with_file_mode(&mut self, path: &Path, accept_conflicts: bool) -> Result<SyncReport> {
         if !path.exists() {
             self.export_to_file(path)?;
             let total = self
@@ -454,7 +473,12 @@ impl Store {
         }
         let content = fs::read_to_string(path)?;
         let content_hash = Self::compute_content_hash(&content) as i64;
-        let db_state = self.get_db_fingerprint()?;
+        let generation = self.get_db_fingerprint()?;
+        let db_state = if accept_conflicts {
+            format!("accepted:{generation}")
+        } else {
+            generation
+        };
 
         // Fast path: if the file content and database state have not changed since last sync/export,
         // bypass parsing, memory allocation, transaction locking, and diffing entirely.
@@ -513,6 +537,7 @@ impl Store {
             })?;
         }
 
+        #[derive(Clone, Copy)]
         struct ParsedEntry<'a> {
             val: &'a str,
             anchor: Option<&'a str>,
@@ -521,18 +546,29 @@ impl Store {
             kind: &'a str,
         }
 
-        // Deduplicate in memory: if multiple conflict markers or duplicate lines exist,
-        // resolve deterministically and detect contradictions for explicit provenance.
+        struct Conflict<'a> {
+            key: &'a str,
+            previous: ParsedEntry<'a>,
+            next_val: &'a str,
+        }
+
+        // Deduplicate in memory and detect contradictory definitions before writing.
         let mut unique_rules: BTreeMap<&str, ParsedEntry> = BTreeMap::new();
-        let mut conflicts: Vec<(&str, &str, &str)> = Vec::new();
+        let mut conflicts = Vec::new();
 
         for r in &parsed.rules {
             if let Some(prev) = unique_rules.get(r.key.as_str())
                 && (prev.val != r.val.as_str()
                     || prev.kind != r.kind.as_str()
-                    || prev.anchor != r.anchor.as_deref())
+                    || prev.anchor != r.anchor.as_deref()
+                    || prev.archived_at.is_some() != r.archived_at.is_some()
+                    || prev.archive_reason != r.archive_reason.as_deref())
             {
-                conflicts.push((r.key.as_str(), prev.val, r.val.as_str()));
+                conflicts.push(Conflict {
+                    key: r.key.as_str(),
+                    previous: *prev,
+                    next_val: r.val.as_str(),
+                });
             }
             unique_rules.insert(
                 r.key.as_str(),
@@ -544,6 +580,23 @@ impl Store {
                     kind: r.kind.as_str(),
                 },
             );
+        }
+
+        if !accept_conflicts && !conflicts.is_empty() {
+            let mut keys: Vec<&str> = conflicts.iter().map(|conflict| conflict.key).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            let preview = keys.iter().take(8).copied().collect::<Vec<_>>().join(", ");
+            let remaining = keys.len().saturating_sub(8);
+            let suffix = if remaining > 0 {
+                format!(" (and {remaining} more)")
+            } else {
+                String::new()
+            };
+            return Err(Error::Usage(format!(
+                "Conflicting definitions in '{}': {preview}{suffix}. Edit the team file to choose a value, or explicitly run 'agent-mem sync --accept-conflicts' to keep the last definition",
+                path.display(),
+            )));
         }
 
         let conflicts_resolved = conflicts.len();
@@ -565,10 +618,32 @@ impl Store {
         if !conflicts.is_empty() {
             let mut insert_sess =
                 tx.prepare_cached("INSERT INTO sessions (summary, created_at) VALUES (?1, ?2);")?;
-            for (ckey, old_val, new_val) in &conflicts {
+            for conflict in &conflicts {
+                tx.execute(
+                    "INSERT INTO memory_revisions
+                     (memory_key, val, anchor, kind, archived_at, archive_reason,
+                      updated_at, superseded_at, provenance, trust, change_type)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, 'untrusted', 'conflict');",
+                    params![
+                        conflict.key,
+                        conflict.previous.val,
+                        conflict.previous.anchor,
+                        conflict.previous.kind,
+                        conflict.previous.archived_at,
+                        conflict.previous.archive_reason,
+                        now,
+                        provenance
+                    ],
+                )?;
+                tx.execute(
+                    "DELETE FROM memory_revisions WHERE memory_key = ?1 AND id NOT IN
+                     (SELECT id FROM memory_revisions WHERE memory_key = ?1
+                      ORDER BY id DESC LIMIT 20);",
+                    params![conflict.key],
+                )?;
                 let summary = format!(
                     "[conflict-resolved] '{}': superseded '{}' with '{}'",
-                    ckey, old_val, new_val
+                    conflict.key, conflict.previous.val, conflict.next_val
                 );
                 insert_sess.execute(params![summary, now])?;
             }
@@ -813,7 +888,7 @@ impl Store {
         mark_semantic_dirty(&tx)?;
 
         tx.commit()?;
-        let _ = self.record_sync_state(path, &content);
+        let _ = self.record_sync_state_mode(path, &content, !conflicts.is_empty());
 
         let total: usize = self
             .conn

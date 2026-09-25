@@ -295,6 +295,24 @@ fn test_parse_args() {
         }
     );
     assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "sync".into(),
+            "--accept-conflicts".into()
+        ])
+        .unwrap(),
+        Command::SyncAcceptConflicts { file: None }
+    );
+    assert!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "sync".into(),
+            "--accept-conflicts".into(),
+            "--export".into()
+        ])
+        .is_err()
+    );
+    assert_eq!(
         parse_args(vec!["agent-mem".into(), "sync".into(), "team.rules".into()]).unwrap(),
         Command::Sync {
             file: Some("team.rules".into()),
@@ -489,7 +507,16 @@ fn test_init_creates_rules_file_and_git_hooks() {
     let post_merge = temp_dir.join(".git").join("hooks").join("post-merge");
     assert!(post_merge.exists());
     let hook_content = fs::read_to_string(&post_merge).unwrap();
-    assert!(hook_content.contains("agent-mem sync"));
+    assert!(hook_content.contains("agent-mem sync || true"));
+    fs::write(
+        &post_merge,
+        "#!/bin/sh\nagent-mem sync 2>/dev/null || true\n",
+    )
+    .unwrap();
+    agent_mem::init::init_project(&temp_dir).unwrap();
+    let upgraded = fs::read_to_string(&post_merge).unwrap();
+    assert!(upgraded.contains("agent-mem sync || true"));
+    assert!(!upgraded.contains("2>/dev/null"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

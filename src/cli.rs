@@ -46,6 +46,9 @@ pub enum Command {
     Metadata {
         key: String,
     },
+    History {
+        key: String,
+    },
     Find {
         query: String,
     },
@@ -64,6 +67,9 @@ pub enum Command {
     Sync {
         file: Option<String>,
         export: bool,
+    },
+    SyncAcceptConflicts {
+        file: Option<String>,
     },
     SemanticBuild,
     SemanticStatus,
@@ -106,6 +112,7 @@ impl Command {
                 | Command::Clean { dry_run: false }
                 | Command::SessionAdd { .. }
                 | Command::Sync { export: false, .. }
+                | Command::SyncAcceptConflicts { .. }
                 | Command::SemanticBuild
                 | Command::SemanticClear
                 | Command::HookPostCommit { dry_run: false }
@@ -244,6 +251,14 @@ where
                 key: args[2].clone(),
             })
         }
+        "history" => {
+            if args.len() != 3 {
+                return Err(Error::Usage("Usage: agent-mem history <key>".to_string()));
+            }
+            Ok(Command::History {
+                key: args[2].clone(),
+            })
+        }
         "dump" | "list" | "ls" => Ok(Command::Dump),
         "clean" => {
             let dry_run = args.iter().skip(2).any(|a| a == "--dry-run" || a == "-n");
@@ -338,14 +353,26 @@ where
         "sync" => {
             let mut file = None;
             let mut export = false;
+            let mut accept_conflicts = false;
             for arg in &args[2..] {
                 if arg == "--export" || arg == "-e" {
                     export = true;
+                } else if arg == "--accept-conflicts" {
+                    accept_conflicts = true;
                 } else if !arg.starts_with('-') && file.is_none() {
                     file = Some(arg.clone());
                 }
             }
-            Ok(Command::Sync { file, export })
+            if accept_conflicts && export {
+                return Err(Error::Usage(
+                    "--accept-conflicts cannot be combined with --export".into(),
+                ));
+            }
+            if accept_conflicts {
+                Ok(Command::SyncAcceptConflicts { file })
+            } else {
+                Ok(Command::Sync { file, export })
+            }
         }
         "semantic" => match args.get(2).map(String::as_str) {
             Some("build" | "rebuild" | "enable") => Ok(Command::SemanticBuild),
@@ -479,8 +506,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             #[cfg(feature = "tui")]
             {
                 if root.join(".agent-mem").join("mem.db").exists() {
-                    let _ =
-                        crate::registry::ProjectRegistry::load().and_then(|mut r| r.register(root));
+                    crate::registry::ProjectRegistry::load()?.register(root)?;
                 }
                 crate::tui::run(root)
             }
@@ -508,7 +534,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
         Command::Projects { prune } => {
             let mut reg = crate::registry::ProjectRegistry::load()?;
             if root.join(".agent-mem").join("mem.db").exists() {
-                let _ = reg.register(root);
+                reg.register(root)?;
             }
             if prune {
                 let pruned = reg.prune()?;
@@ -620,6 +646,13 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                         .ok_or_else(|| crate::error::Error::NotFound(key.clone()))?;
                     print_metadata(&metadata);
                 }
+                Command::History { key } => {
+                    let history = store.history(&key)?;
+                    if history.is_empty() {
+                        return Err(crate::error::Error::NotFound(key));
+                    }
+                    print_history(&key, &history);
+                }
                 Command::Dump => {
                     let entries = store.dump()?;
                     print_dump(&entries);
@@ -681,6 +714,16 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     } else {
                         store.sync_with_file(&file_path)?
                     };
+                    print_sync(&report);
+                }
+                Command::SyncAcceptConflicts { file } => {
+                    let target_file = file.as_deref().unwrap_or(".agent-rules");
+                    let file_path = if Path::new(target_file).is_absolute() {
+                        Path::new(target_file).to_path_buf()
+                    } else {
+                        root.join(target_file)
+                    };
+                    let report = store.sync_with_file_accept_conflicts(&file_path)?;
                     print_sync(&report);
                 }
                 Command::SemanticBuild => {

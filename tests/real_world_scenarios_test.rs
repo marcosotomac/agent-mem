@@ -196,7 +196,10 @@ fn cloned_teammates_merge_conflicting_and_lossless_rules_without_data_loss() {
     );
 
     let mut merged = Store::open(&origin_db, true).unwrap();
-    let report = merged.sync_with_file(&origin_rules).unwrap();
+    assert!(merged.sync_with_file(&origin_rules).is_err());
+    let report = merged
+        .sync_with_file_accept_conflicts(&origin_rules)
+        .unwrap();
     assert_eq!(report.conflicts_resolved, 1);
     assert_eq!(report.total, 4);
     assert!(
@@ -268,7 +271,8 @@ fn corruption_and_conflict_storm_are_atomic_bounded_and_auditable() {
     storm.push_str("[rel] gotcha/auth -> mitigates -> stable/rule\n");
     fs::write(&rules, &storm).unwrap();
 
-    let report = store.sync_with_file(&rules).unwrap();
+    assert!(store.sync_with_file(&rules).is_err());
+    let report = store.sync_with_file_accept_conflicts(&rules).unwrap();
     assert_eq!(report.conflicts_resolved, 39);
     assert_eq!(report.total, 2);
     assert_eq!(
@@ -300,7 +304,7 @@ fn corruption_and_conflict_storm_are_atomic_bounded_and_auditable() {
     );
 
     let session_count = sessions.len();
-    let noop = store.sync_with_file(&rules).unwrap();
+    let noop = store.sync_with_file_accept_conflicts(&rules).unwrap();
     assert_eq!(noop.conflicts_resolved, 0);
     assert_eq!(store.session_list(100).unwrap().len(), session_count);
 }

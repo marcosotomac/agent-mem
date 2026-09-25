@@ -5,7 +5,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::fs;
 use std::path::Path;
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 impl Store {
     /// Open SQLite database with performance-optimized PRAGMAs.
@@ -135,17 +135,25 @@ impl Store {
                     reviewed_at INTEGER
                 ) WITHOUT ROWID;",
             )?;
+            create_history_schema(&tx)?;
+            tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
+            tx.commit()?;
+        } else if user_version == 6 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            create_history_schema(&tx)?;
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 5 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             create_metadata_schema(&tx)?;
+            create_history_schema(&tx)?;
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 4 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             create_semantic_schema(&tx)?;
             create_metadata_schema(&tx)?;
+            create_history_schema(&tx)?;
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 3 {
@@ -154,6 +162,7 @@ impl Store {
             backfill_routes(&tx)?;
             create_semantic_schema(&tx)?;
             create_metadata_schema(&tx)?;
+            create_history_schema(&tx)?;
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else {
@@ -238,6 +247,7 @@ impl Store {
             backfill_routes(&tx)?;
             create_semantic_schema(&tx)?;
             create_metadata_schema(&tx)?;
+            create_history_schema(&tx)?;
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         }
@@ -327,6 +337,78 @@ fn create_metadata_schema(tx: &Transaction<'_>) -> Result<()> {
         INSERT OR IGNORE INTO memory_metadata
             (memory_key, provenance, trust, created_at, reviewed_at)
         SELECT key, 'migration:legacy', 'local', updated_at, NULL FROM memories;",
+    )?;
+    Ok(())
+}
+
+fn create_history_schema(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS store_generation (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            generation INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO store_generation (singleton, generation) VALUES (1, 0);
+        CREATE TRIGGER IF NOT EXISTS memory_generation_on_insert AFTER INSERT ON memories
+        BEGIN UPDATE store_generation SET generation = generation + 1 WHERE singleton = 1; END;
+        CREATE TRIGGER IF NOT EXISTS memory_generation_on_update AFTER UPDATE ON memories
+        BEGIN UPDATE store_generation SET generation = generation + 1 WHERE singleton = 1; END;
+        CREATE TRIGGER IF NOT EXISTS memory_generation_on_delete AFTER DELETE ON memories
+        BEGIN UPDATE store_generation SET generation = generation + 1 WHERE singleton = 1; END;
+        CREATE TRIGGER IF NOT EXISTS relation_generation_on_insert AFTER INSERT ON relations
+        BEGIN UPDATE store_generation SET generation = generation + 1 WHERE singleton = 1; END;
+        CREATE TRIGGER IF NOT EXISTS relation_generation_on_update AFTER UPDATE ON relations
+        BEGIN UPDATE store_generation SET generation = generation + 1 WHERE singleton = 1; END;
+        CREATE TRIGGER IF NOT EXISTS relation_generation_on_delete AFTER DELETE ON relations
+        BEGIN UPDATE store_generation SET generation = generation + 1 WHERE singleton = 1; END;
+        CREATE TABLE IF NOT EXISTS memory_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            memory_key TEXT NOT NULL,
+            val TEXT NOT NULL,
+            anchor TEXT,
+            kind TEXT NOT NULL,
+            archived_at INTEGER,
+            archive_reason TEXT,
+            updated_at INTEGER NOT NULL,
+            superseded_at INTEGER NOT NULL,
+            provenance TEXT,
+            trust TEXT,
+            change_type TEXT NOT NULL CHECK (change_type IN ('updated', 'deleted', 'conflict'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_revisions_key
+            ON memory_revisions(memory_key, id DESC);
+        CREATE TRIGGER IF NOT EXISTS memory_revision_on_update
+        AFTER UPDATE ON memories
+        WHEN OLD.val IS NOT NEW.val OR OLD.anchor IS NOT NEW.anchor
+          OR OLD.kind IS NOT NEW.kind OR OLD.archived_at IS NOT NEW.archived_at
+          OR OLD.archive_reason IS NOT NEW.archive_reason
+        BEGIN
+            INSERT INTO memory_revisions
+                (memory_key, val, anchor, kind, archived_at, archive_reason,
+                 updated_at, superseded_at, provenance, trust, change_type)
+            VALUES (OLD.key, OLD.val, OLD.anchor, OLD.kind, OLD.archived_at,
+                    OLD.archive_reason, OLD.updated_at, unixepoch(),
+                    (SELECT provenance FROM memory_metadata WHERE memory_key = OLD.key),
+                    (SELECT trust FROM memory_metadata WHERE memory_key = OLD.key), 'updated');
+            DELETE FROM memory_revisions
+             WHERE memory_key = OLD.key AND id NOT IN
+               (SELECT id FROM memory_revisions WHERE memory_key = OLD.key
+                ORDER BY id DESC LIMIT 20);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memory_revision_on_delete
+        AFTER DELETE ON memories
+        BEGIN
+            INSERT INTO memory_revisions
+                (memory_key, val, anchor, kind, archived_at, archive_reason,
+                 updated_at, superseded_at, provenance, trust, change_type)
+            VALUES (OLD.key, OLD.val, OLD.anchor, OLD.kind, OLD.archived_at,
+                    OLD.archive_reason, OLD.updated_at, unixepoch(),
+                    (SELECT provenance FROM memory_metadata WHERE memory_key = OLD.key),
+                    (SELECT trust FROM memory_metadata WHERE memory_key = OLD.key), 'deleted');
+            DELETE FROM memory_revisions
+             WHERE memory_key = OLD.key AND id NOT IN
+               (SELECT id FROM memory_revisions WHERE memory_key = OLD.key
+                ORDER BY id DESC LIMIT 20);
+        END;",
     )?;
     Ok(())
 }
