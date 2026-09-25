@@ -83,9 +83,9 @@ function sha256(filePath) {
   });
 }
 
-async function verifyArchive(archivePath, asset, releaseBaseUrl) {
+async function verifyArchive(archivePath, asset, releaseBaseUrl, downloadFile = download) {
   const checksumsPath = `${archivePath}.sha256sums`;
-  await download(`${releaseBaseUrl}/SHA256SUMS.txt`, checksumsPath);
+  await downloadFile(`${releaseBaseUrl}/SHA256SUMS.txt`, checksumsPath);
   const line = fs.readFileSync(checksumsPath, 'utf8')
     .split(/\r?\n/)
     .find((entry) => entry.trim().endsWith(` ${asset}`));
@@ -100,7 +100,7 @@ async function verifyArchive(archivePath, asset, releaseBaseUrl) {
   }
 }
 
-async function ensureBinary() {
+async function ensureBinary(options = {}) {
   // Deliberately never fall back to PATH: `npx agent-mem@X` must execute X,
   // not an unrelated global install. This override exists for package smoke
   // tests and controlled development only, and is version checked.
@@ -113,24 +113,27 @@ async function ensureBinary() {
   const asset = getTargetAsset();
   const isWin = os.platform() === 'win32';
   const binName = isWin ? 'agent-mem.exe' : 'agent-mem';
-  const cacheDir = path.join(os.homedir(), '.cache', 'agent-mem', `v${VERSION}`);
+  const cacheDir = options.cacheDir || path.join(os.homedir(), '.cache', 'agent-mem', `v${VERSION}`);
   const binPath = path.join(cacheDir, binName);
+  const digestPath = `${binPath}.sha256`;
 
-  if (fs.existsSync(binPath)) {
+  if (fs.existsSync(binPath) && fs.existsSync(digestPath)
+      && fs.readFileSync(digestPath, 'utf8').trim() === await sha256(binPath)) {
     verifyBinaryVersion(binPath);
     return binPath;
   }
 
   fs.mkdirSync(cacheDir, { recursive: true });
   const archivePath = path.join(cacheDir, asset);
-  const releaseBaseUrl = `https://github.com/${REPO}/releases/download/v${VERSION}`;
+  const releaseBaseUrl = options.releaseBaseUrl || `https://github.com/${REPO}/releases/download/v${VERSION}`;
   const downloadUrl = `${releaseBaseUrl}/${asset}`;
+  const downloadFile = options.download || download;
 
   // Log to stderr only so stdout JSON-RPC MCP channel is NEVER polluted
   process.stderr.write(`[agent-mem] Downloading native binary v${VERSION} for ${os.platform()}-${os.arch()}...\n`);
 
-  await download(downloadUrl, archivePath);
-  await verifyArchive(archivePath, asset, releaseBaseUrl);
+  await downloadFile(downloadUrl, archivePath);
+  await verifyArchive(archivePath, asset, releaseBaseUrl, downloadFile);
 
   if (asset.endsWith('.tar.gz')) {
     const result = spawnSync('tar', ['-xzf', archivePath, '-C', cacheDir], { stdio: 'ignore' });
@@ -155,6 +158,7 @@ async function ensureBinary() {
   }
 
   verifyBinaryVersion(binPath);
+  fs.writeFileSync(digestPath, `${await sha256(binPath)}\n`, { mode: 0o600 });
 
   return binPath;
 }
@@ -178,4 +182,6 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { ensureBinary, getTargetAsset };
