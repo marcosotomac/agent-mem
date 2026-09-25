@@ -187,7 +187,10 @@ fn retrieval_eval_noisy_daily_queries_preserve_recall_and_context_efficiency() {
         mean_payload_ratio * 100.0
     );
     assert_eq!(recall_at_five, 1.0, "all qrels must appear in the top five");
-    assert!(mrr >= 0.95, "MRR must remain >= 0.95, got {mrr:.3}");
+    assert_eq!(
+        mrr, 1.0,
+        "all fixed qrels should rank first, got MRR {mrr:.3}"
+    );
     assert!(
         mean_payload_ratio <= 0.02,
         "top-five retrieval should emit <=2% of full-corpus bytes, got {:.2}%",

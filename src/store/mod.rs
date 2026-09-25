@@ -657,32 +657,47 @@ impl Store {
 
     /// Build bounded, safe FTS5 terms from user input without breaking Porter stemming.
     fn sanitized_fts_terms(raw: &str) -> Vec<String> {
-        raw.split(|c: char| {
-            c.is_whitespace() || (c.is_ascii_punctuation() && c != '_' && c != '-' && c != '*')
-        })
-        .filter_map(|token| {
-            let is_prefix = token.ends_with('*');
-            let trimmed = if is_prefix {
-                token.trim_end_matches('*')
-            } else {
-                token
-            };
-            let sanitized: String = trimmed
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                .take(64)
-                .collect();
+        const STOP_WORDS: &[&str] = &[
+            "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "of", "on", "or",
+            "out", "the", "to", "with", "con", "de", "del", "el", "en", "la", "las", "los", "para",
+            "por", "que", "un", "una",
+        ];
+        let terms: Vec<(String, bool)> = raw
+            .split(|c: char| {
+                c.is_whitespace() || (c.is_ascii_punctuation() && c != '_' && c != '-' && c != '*')
+            })
+            .filter_map(|token| {
+                let is_prefix = token.ends_with('*');
+                let trimmed = if is_prefix {
+                    token.trim_end_matches('*')
+                } else {
+                    token
+                };
+                let sanitized: String = trimmed
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                    .take(64)
+                    .collect();
 
-            if sanitized.is_empty() {
-                None
-            } else if is_prefix {
-                Some(format!("\"{}\"*", sanitized))
-            } else {
-                Some(format!("\"{}\"", sanitized))
-            }
-        })
-        .take(16)
-        .collect()
+                if sanitized.is_empty() {
+                    None
+                } else if is_prefix {
+                    Some((format!("\"{}\"*", sanitized), false))
+                } else {
+                    let stop_word = STOP_WORDS
+                        .iter()
+                        .any(|word| sanitized.eq_ignore_ascii_case(word));
+                    Some((format!("\"{}\"", sanitized), stop_word))
+                }
+            })
+            .take(16)
+            .collect();
+        let has_content_term = terms.iter().any(|(_, stop_word)| !stop_word);
+        terms
+            .into_iter()
+            .filter(|(_, stop_word)| !has_content_term || !stop_word)
+            .map(|(term, _)| term)
+            .collect()
     }
 
     fn sanitize_fts_query(raw: &str) -> String {
