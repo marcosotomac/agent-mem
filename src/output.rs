@@ -181,6 +181,48 @@ pub fn print_metadata(metadata: &crate::store::MemoryMetadata) {
     }
 }
 
+pub fn print_history(key: &str, history: &[crate::store::MemoryRevision]) {
+    println!("history {key}");
+    for revision in history {
+        println!(
+            "  [{} @ {}{}{}{}{}] {}{}",
+            revision.change_type,
+            revision.updated_at,
+            revision
+                .superseded_at
+                .map(|until| format!(" until={until}"))
+                .unwrap_or_default(),
+            revision
+                .provenance
+                .as_ref()
+                .map(|source| format!(" source={source}"))
+                .unwrap_or_default(),
+            revision
+                .trust
+                .as_ref()
+                .map(|trust| format!(" trust={trust}"))
+                .unwrap_or_default(),
+            revision
+                .archived_at
+                .map(|_| format!(
+                    " archived{}",
+                    revision
+                        .archive_reason
+                        .as_ref()
+                        .map(|reason| format!("={reason}"))
+                        .unwrap_or_default()
+                ))
+                .unwrap_or_default(),
+            revision.val,
+            revision
+                .anchor
+                .as_ref()
+                .map(|anchor| format!(" ({anchor})"))
+                .unwrap_or_default()
+        );
+    }
+}
+
 pub fn print_dump(entries: &[(String, String, Option<String>)]) {
     let is_tty = io::stdout().is_terminal();
     if entries.is_empty() {
@@ -611,11 +653,14 @@ pub fn print_help() {
             "    {ACCENT}metadata{RESET} {MUTED}<key>{RESET}          Inspect provenance and trust"
         );
         println!(
+            "    {ACCENT}history{RESET} {MUTED}<key>{RESET}           Inspect current and previous values"
+        );
+        println!(
             "    {ACCENT}find{RESET}    {MUTED}<query>{RESET}         Search rules via BM25 index"
         );
         println!("    {ACCENT}dump{RESET}                    List all active rules");
         println!(
-            "    {ACCENT}sync{RESET}    {MUTED}[file] [--export]{RESET} Synchronize team rules (.agent-rules)"
+            "    {ACCENT}sync{RESET}    {MUTED}[file] [--export|--accept-conflicts]{RESET} Synchronize team rules"
         );
         println!(
             "    {ACCENT}semantic{RESET} {MUTED}[build|status|clear]{RESET} Manage local semantic fallback"
@@ -654,7 +699,7 @@ pub fn print_help() {
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, clean, find, dump, context, session add, session list, hook post-commit, sync, semantic, mcp [--read-only], mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, history, clean, find, dump, context, session add, session list, hook post-commit, sync [--accept-conflicts], semantic, mcp [--read-only], mcp install, doctor, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }

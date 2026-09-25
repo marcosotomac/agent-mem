@@ -38,6 +38,20 @@ pub struct MemoryMetadata {
     pub reviewed_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRevision {
+    pub val: String,
+    pub anchor: Option<String>,
+    pub kind: String,
+    pub archived_at: Option<i64>,
+    pub archive_reason: Option<String>,
+    pub updated_at: i64,
+    pub superseded_at: Option<i64>,
+    pub provenance: Option<String>,
+    pub trust: Option<String>,
+    pub change_type: String,
+}
+
 impl RuleRecord {
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()

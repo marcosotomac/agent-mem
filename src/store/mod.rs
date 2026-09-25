@@ -334,6 +334,58 @@ impl Store {
         }
     }
 
+    /// Current value followed by its retained previous revisions, newest first.
+    pub fn history(&self, key: &str) -> Result<Vec<MemoryRevision>> {
+        let key = key.trim();
+        let mut history = Vec::new();
+        let mut current = self.conn.prepare_cached(
+            "SELECT m.val, m.anchor, m.kind, m.archived_at, m.archive_reason,
+                        m.updated_at, d.provenance, d.trust
+                 FROM memories m LEFT JOIN memory_metadata d ON d.memory_key = m.key
+                 WHERE m.key = ?1;",
+        )?;
+        let mut rows = current.query(params![key])?;
+        if let Some(row) = rows.next()? {
+            history.push(MemoryRevision {
+                val: row.get(0)?,
+                anchor: row.get(1)?,
+                kind: row.get(2)?,
+                archived_at: row.get(3)?,
+                archive_reason: row.get(4)?,
+                updated_at: row.get(5)?,
+                superseded_at: None,
+                provenance: row.get(6)?,
+                trust: row.get(7)?,
+                change_type: "current".into(),
+            });
+        }
+        drop(rows);
+        drop(current);
+        let mut revisions = self.conn.prepare_cached(
+            "SELECT val, anchor, kind, archived_at, archive_reason,
+                    updated_at, superseded_at, provenance, trust, change_type
+             FROM memory_revisions WHERE memory_key = ?1 ORDER BY id DESC LIMIT 20;",
+        )?;
+        let rows = revisions.query_map(params![key], |row| {
+            Ok(MemoryRevision {
+                val: row.get(0)?,
+                anchor: row.get(1)?,
+                kind: row.get(2)?,
+                archived_at: row.get(3)?,
+                archive_reason: row.get(4)?,
+                updated_at: row.get(5)?,
+                superseded_at: row.get(6)?,
+                provenance: row.get(7)?,
+                trust: row.get(8)?,
+                change_type: row.get(9)?,
+            })
+        })?;
+        for revision in rows {
+            history.push(revision?);
+        }
+        Ok(history)
+    }
+
     /// Trust transitions are deliberately exposed through the native CLI only;
     /// an MCP model cannot promote its own untrusted input.
     pub fn set_trust(&mut self, key: &str, trust: &str) -> Result<bool> {

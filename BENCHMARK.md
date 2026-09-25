@@ -39,12 +39,14 @@ Savings from the result cap must not be attributed to filtering; the cap can omi
 
 The separate ignored release-scale gate seeds 100,000 anchored memories through one atomic batch,
 checks that all exact-path rules outrank sibling candidates, and runs 1,000 selective context calls.
-On the same macOS/arm64 machine, schema v6 measured 1.85 s initial ingest, 1.736 ms p50,
-1.797 ms p95, 1.838 ms p99, a 123,531,264-byte database, and 99.9800% fewer key/value
-bytes than the full corpus. A full 100,000-record export took 0.05 s and produced
+On the same macOS/arm64 machine, schema v7 measured 3.19 s initial ingest, 1.767 ms p50,
+1.853 ms p95, 2.109 ms p99, a 123,539,456-byte database, and 99.9800% fewer key/value
+bytes than the full corpus. A full 100,000-record export took 0.07 s and produced
 17,762,027 bytes. Two writers, two readers, and one exporter then ran concurrently;
 the exported replica retained all 100,000 records and left no temporary artifacts.
 These figures describe this fixture and machine.
+The slower initial ingest reflects the per-write generation and revision triggers used to
+invalidate stale sync fingerprints and preserve local history.
 
 The fixed 20-slot graph-context test contains 40 exact-path distractors, five
 decision-changing related memories, and two repository-wide rules. Direct-only

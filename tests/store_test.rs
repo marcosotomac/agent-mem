@@ -270,7 +270,7 @@ fn test_v3_migration_backfills_route_index() {
     let route_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM memory_routes;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert!(route_count > 0);
 
     drop(conn);
@@ -553,10 +553,12 @@ feature/auth = Use Passkeys WebAuthn (@ src/webauthn.rs:20)
     std::fs::write(&rules_path, conflict_content).unwrap();
 
     // Sync must not crash with UNIQUE constraint error
-    let report = store.sync_with_file(&rules_path).unwrap();
-    assert_eq!(report.total, 2); // arch/db and feature/auth (last one wins)
+    assert!(store.sync_with_file(&rules_path).is_err());
+    assert!(store.get("feature/auth").unwrap().is_none());
+    let report = store.sync_with_file_accept_conflicts(&rules_path).unwrap();
+    assert_eq!(report.total, 2); // explicit last-definition choice
     assert_eq!(store.get_all_relations().unwrap().len(), 1);
-    store.sync_with_file(&rules_path).unwrap();
+    assert!(store.sync_with_file(&rules_path).is_err());
     assert_eq!(store.get_all_relations().unwrap().len(), 1);
     assert_eq!(
         store.get("feature/auth").unwrap().as_deref(),
@@ -950,7 +952,10 @@ gotcha/auth = use constant-time comparison for tokens (@ src/crypto.rs:45)
 "#;
     std::fs::write(&rules_path, file_content).unwrap();
 
-    let report = store.sync_with_file(&rules_path).unwrap();
+    let error = store.sync_with_file(&rules_path).unwrap_err().to_string();
+    assert!(error.contains("gotcha/auth"));
+    assert!(store.get("gotcha/auth").unwrap().is_none());
+    let report = store.sync_with_file_accept_conflicts(&rules_path).unwrap();
     assert_eq!(report.total, 1);
     assert_eq!(
         report.conflicts_resolved, 1,
@@ -964,6 +969,12 @@ gotcha/auth = use constant-time comparison for tokens (@ src/crypto.rs:45)
         .expect("Rule must exist");
     assert_eq!(stored.val, "use constant-time comparison for tokens");
     assert_eq!(stored.anchor.as_deref(), Some("src/crypto.rs:45"));
+    let history = store.history("gotcha/auth").unwrap();
+    assert!(history.iter().any(|revision| {
+        revision.change_type == "conflict"
+            && revision.val == "validate JWT issuer before expiration"
+            && revision.anchor.as_deref() == Some("src/auth.rs:12")
+    }));
 
     // Verify session audit log provenance
     let sessions = store.session_list(10).unwrap();
@@ -978,6 +989,36 @@ gotcha/auth = use constant-time comparison for tokens (@ src/crypto.rs:45)
 
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_sync_detects_active_vs_archived_conflict() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_archive_conflict_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rules_path = dir.join(".agent-rules");
+    let mut store = Store::open(&dir.join("mem.db"), true).unwrap();
+    std::fs::write(
+        &rules_path,
+        "decision/auth = Use RS256\n[archived] decision/auth = Use RS256 --reason: obsolete\n",
+    )
+    .unwrap();
+    assert!(store.sync_with_file(&rules_path).is_err());
+    assert!(store.get("decision/auth").unwrap().is_none());
+    store.sync_with_file_accept_conflicts(&rules_path).unwrap();
+    let history = store.history("decision/auth").unwrap();
+    assert!(history[0].archived_at.is_some());
+    assert_eq!(history[0].archive_reason.as_deref(), Some("obsolete"));
+    assert_eq!(history[1].change_type, "conflict");
+    assert!(history[1].archived_at.is_none());
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -1080,6 +1121,14 @@ fn test_sync_noop_detection_and_invalidation() {
     // Second sync without modifications hits no-op path
     let report2 = store.sync_with_file(&rules_path).unwrap();
     assert_eq!(report2.total, 2);
+
+    // A same-key edit in the same second must also invalidate the cache.
+    store.set("rule/one", "local conflicting edit").unwrap();
+    store.sync_with_file(&rules_path).unwrap();
+    assert_eq!(
+        store.get("rule/one").unwrap().as_deref(),
+        Some("first rule")
+    );
 
     // File change invalidates no-op cache and triggers sync
     std::fs::write(
@@ -1242,7 +1291,7 @@ fn test_v5_migration_preserves_rules_and_backfills_metadata() {
     let metadata = store.metadata("decision/preserved").unwrap().unwrap();
     assert_eq!(metadata.provenance, "migration:legacy");
     assert_eq!(metadata.trust, agent_mem::store::TRUST_LOCAL);
-    assert_eq!(store.stats(&db_path).unwrap().user_version, 6);
+    assert_eq!(store.stats(&db_path).unwrap().user_version, 7);
 
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
@@ -1262,20 +1311,77 @@ fn test_newer_schema_fails_closed_without_mutation() {
     let db_path = dir.join("mem.db");
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch("PRAGMA user_version = 7;").unwrap();
+        conn.execute_batch("PRAGMA user_version = 8;").unwrap();
     }
 
     let error = match Store::open(&db_path, true) {
         Ok(_) => panic!("future schemas must be rejected"),
         Err(error) => error.to_string(),
     };
-    assert!(error.contains("newer than supported schema 6"));
+    assert!(error.contains("newer than supported schema 7"));
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 
     drop(conn);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_history_retains_prior_values_and_deletion() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.set("decision/auth", "Use RS256").unwrap();
+    store.set("decision/auth", "Use Ed25519").unwrap();
+    let history = store.history("decision/auth").unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].val, "Use Ed25519");
+    assert_eq!(history[0].change_type, "current");
+    assert_eq!(history[1].val, "Use RS256");
+    assert_eq!(history[1].change_type, "updated");
+
+    store.del("decision/auth").unwrap();
+    let history = store.history("decision/auth").unwrap();
+    assert_eq!(history[0].val, "Use Ed25519");
+    assert_eq!(history[0].change_type, "deleted");
+    assert_eq!(history[1].val, "Use RS256");
+}
+
+#[test]
+fn test_v6_migration_adds_history_without_losing_rules() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_history_migration_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    {
+        let mut store = Store::open(&db_path, true).unwrap();
+        store.set("decision/auth", "Use RS256").unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER memory_revision_on_update;
+             DROP TRIGGER memory_revision_on_delete;
+             DROP TABLE memory_revisions;
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&db_path, true).unwrap();
+    assert_eq!(
+        store.get("decision/auth").unwrap().as_deref(),
+        Some("Use RS256")
+    );
+    store.set("decision/auth", "Use Ed25519").unwrap();
+    assert_eq!(store.history("decision/auth").unwrap()[1].val, "Use RS256");
+    assert_eq!(store.stats(&db_path).unwrap().user_version, 7);
+    drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }

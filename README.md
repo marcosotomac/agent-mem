@@ -96,6 +96,7 @@ agent-mem unarchive <key>
 
 # Inspect provenance/trust or explicitly review a memory (CLI-only elevation)
 agent-mem metadata <key>
+agent-mem history <key>
 agent-mem trust <key>
 agent-mem untrust <key>
 
@@ -114,6 +115,7 @@ agent-mem context [--anchor <path:line>] [--topic <prefix>] [--limit <n>]
 
 # Synchronize team rules (.agent-rules) without SQLite binary conflicts
 agent-mem sync [file] [--export]
+agent-mem sync [file] --accept-conflicts # Explicitly choose the last same-key definition
 
 # Launch interactive Terminal UI (Hypergraph inspector, Rules, Sessions, Project switcher, Doctor)
 agent-mem tui
@@ -170,6 +172,8 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 - Simple rules retain the readable format above. Ambiguous content (multiline text, literal ` @ `, reserved key prefixes or metadata delimiters) uses `[rule-json-v1]` followed by a JSON record on one line. Ambiguous relation fields use `[rel-json-v1]` followed by a three-string JSON array. Escapes preserve the original content; MCP responses remain unchanged. Encoded archive timestamps use the stable marker `1`, like the legacy format. Sync rejects malformed encoded records before changing the database. Team members must use a version supporting these markers before syncing such files.
 - Obsolete conventions are soft-deprecated into an `# Archived Rules` block with migration reasons, preventing AI agents from repeating dead patterns while sparing prompt tokens.
 - `agent-mem init` installs Git hooks (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) that automatically keep `.agent-rules` and local SQLite in sync across rebases and branch switches. Zero binary conflicts, 100% PR visibility!
+
+`agent-mem history <key>` shows the current value and up to 20 previous local versions, including values superseded by a team-file merge. Each entry includes its available provenance and trust state. History lives in the local SQLite database; `.agent-rules` remains the shared current-state file. By default, sync rejects conflicting definitions of the same key without changing SQLite. Edit the team file to resolve the conflict, or explicitly run `agent-mem sync --accept-conflicts` to choose the last definition and retain the alternative in local history.
 
 ## Model Context Protocol (MCP) Setup
 

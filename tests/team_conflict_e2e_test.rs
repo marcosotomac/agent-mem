@@ -232,7 +232,8 @@ fn test_conflicting_edits_on_same_rule_key_across_branches() {
 
     // Sync must resolve deterministically via UPSERT without database crash
     let mut store = Store::open(&db_path, true).unwrap();
-    let report = store.sync_with_file(&rules_path).unwrap();
+    assert!(store.sync_with_file(&rules_path).is_err());
+    let report = store.sync_with_file_accept_conflicts(&rules_path).unwrap();
     assert_eq!(report.total, 1);
 
     let val = store.get("auth/token").unwrap().expect("rule exists");

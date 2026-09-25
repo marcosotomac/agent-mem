@@ -4,8 +4,8 @@
 
 | Scenario | Failure it detects | Main invariant |
 |---|---|---|
-| Clone and conflicting Git branches | Lost shared rules, ambiguous merge values, broken multiline encoding | A fresh replica is byte-for-byte equivalent after conflict consolidation |
-| Corruption and conflict storm | Partial imports, stale FTS rows, unbounded audit history | Failed sync is atomic; the winner is searchable; sessions stay capped |
+| Clone and conflicting Git branches | Lost shared rules, ambiguous merge values, broken multiline encoding | Default sync rejects same-key contradictions; explicit acceptance preserves a searchable winner and an auditable alternative |
+| Corruption and conflict storm | Partial imports, stale FTS rows, unbounded audit history | Failed sync is atomic; explicit conflict acceptance preserves the alternative; sessions stay capped |
 | Large monorepo with generic filenames | `mod.rs` basename collisions and ignored topic filters | Exact path and topic matches outrank unrelated services |
 | MCP context under large incident payloads | A stack trace starving critical or global rules | Output stays within 16 KiB and retains critical, related, session, and global context |
 | Concurrent writers, readers, and exports | WAL lock failures, torn exports, missing relations | Final text snapshot imports into an equivalent replica |
