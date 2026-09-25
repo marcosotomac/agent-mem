@@ -1,0 +1,1014 @@
+{
+  "method": "MCP stdio, warm server, one write per record, fixed corpus",
+  "environment": {
+    "platform": "Linux",
+    "machine": "aarch64",
+    "distractors": 200,
+    "query_profile": "natural"
+  },
+  "results": [
+    {
+      "name": "agent-mem",
+      "records": 210,
+      "queries": 20,
+      "recall_at_5": 1.0,
+      "mrr": 1.0,
+      "ingest_seconds": 0.05768750000061118,
+      "query_ms_p50": 0.17137449999999999,
+      "query_ms_p95": 0.70525,
+      "query_ms_p99": 0.726583,
+      "peak_rss_kib": 4928,
+      "stored_bytes": 4421693,
+      "cases": [
+        {
+          "query": "avoid duplicate rows while paging changing data with cursor",
+          "expected": "BID0009",
+          "rank": 1,
+          "returned": [
+            "BID0009",
+            "BID0008",
+            "BID0003",
+            "BID0005"
+          ],
+          "output_bytes": 570,
+          "query_ms": 0.419917
+        },
+        {
+          "query": "avoid lock upgrade failure with immediate transaction",
+          "expected": "BID0002",
+          "rank": 1,
+          "returned": [
+            "BID0002",
+            "BID0005"
+          ],
+          "output_bytes": 287,
+          "query_ms": 0.21625
+        },
+        {
+          "query": "trace correlation identifiers queue HTTP",
+          "expected": "BID0007",
+          "rank": 1,
+          "returned": [
+            "BID0007"
+          ],
+          "output_bytes": 126,
+          "query_ms": 0.128542
+        },
+        {
+          "query": "SQLite BEGIN IMMEDIATE writer deadlocks",
+          "expected": "BID0002",
+          "rank": 1,
+          "returned": [
+            "BID0002"
+          ],
+          "output_bytes": 141,
+          "query_ms": 0.128
+        },
+        {
+          "query": "collapse concurrent cache recomputation single flight",
+          "expected": "BID0004",
+          "rank": 1,
+          "returned": [
+            "BID0004",
+            "BID1000",
+            "BID1001",
+            "BID1002",
+            "BID1003"
+          ],
+          "output_bytes": 1722,
+          "query_ms": 0.713542
+        },
+        {
+          "query": "database change compatible across old and new versions expand",
+          "expected": "BID0006",
+          "rank": 1,
+          "returned": [
+            "BID0006",
+            "BID0007",
+            "BID1000",
+            "BID1001",
+            "BID1002"
+          ],
+          "output_bytes": 1701,
+          "query_ms": 0.729625
+        },
+        {
+          "query": "follow request across worker logs correlation id",
+          "expected": "BID0007",
+          "rank": 1,
+          "returned": [
+            "BID0007",
+            "BID1000",
+            "BID1001",
+            "BID1002",
+            "BID1003"
+          ],
+          "output_bytes": 1701,
+          "query_ms": 0.726583
+        },
+        {
+          "query": "cursor pagination stable tiebreaker mutable dataset",
+          "expected": "BID0009",
+          "rank": 1,
+          "returned": [
+            "BID0009"
+          ],
+          "output_bytes": 146,
+          "query_ms": 0.131125
+        },
+        {
+          "query": "duplicate payment retry idempotency key",
+          "expected": "BID0003",
+          "rank": 1,
+          "returned": [
+            "BID0003"
+          ],
+          "output_bytes": 156,
+          "query_ms": 0.132708
+        },
+        {
+          "query": "rolling deploy expand contract database migration",
+          "expected": "BID0006",
+          "rank": 1,
+          "returned": [
+            "BID0006"
+          ],
+          "output_bytes": 174,
+          "query_ms": 0.1465
+        },
+        {
+          "query": "keep secrets and PII out of logs with token redaction",
+          "expected": "BID0008",
+          "rank": 1,
+          "returned": [
+            "BID0008",
+            "BID1000",
+            "BID1001",
+            "BID1002",
+            "BID1003"
+          ],
+          "output_bytes": 1695,
+          "query_ms": 0.700791
+        },
+        {
+          "query": "lost event publish transactional outbox commit",
+          "expected": "BID0005",
+          "rank": 1,
+          "returned": [
+            "BID0005"
+          ],
+          "output_bytes": 145,
+          "query_ms": 0.131917
+        },
+        {
+          "query": "stop forged tenant token with issuer validation",
+          "expected": "BID0000",
+          "rank": 1,
+          "returned": [
+            "BID0000",
+            "BID0004",
+            "BID0008",
+            "BID0001",
+            "BID1000"
+          ],
+          "output_bytes": 1594,
+          "query_ms": 0.649333
+        },
+        {
+          "query": "message disappears after commit use an outbox",
+          "expected": "BID0005",
+          "rank": 1,
+          "returned": [
+            "BID0005",
+            "BID0009",
+            "BID0006",
+            "BID0004",
+            "BID1000"
+          ],
+          "output_bytes": 1665,
+          "query_ms": 0.696292
+        },
+        {
+          "query": "constant time HMAC signature comparison",
+          "expected": "BID0001",
+          "rank": 1,
+          "returned": [
+            "BID0001"
+          ],
+          "output_bytes": 139,
+          "query_ms": 0.151208
+        },
+        {
+          "query": "redact passwords tokens personal data logs",
+          "expected": "BID0008",
+          "rank": 1,
+          "returned": [
+            "BID0008"
+          ],
+          "output_bytes": 120,
+          "query_ms": 0.134625
+        },
+        {
+          "query": "prevent charging twice using payment idempotency",
+          "expected": "BID0003",
+          "rank": 1,
+          "returned": [
+            "BID0003",
+            "BID0000",
+            "BID0002",
+            "BID0009",
+            "BID0006"
+          ],
+          "output_bytes": 904,
+          "query_ms": 0.390167
+        },
+        {
+          "query": "single flight cache stampede herd",
+          "expected": "BID0004",
+          "rank": 1,
+          "returned": [
+            "BID0004"
+          ],
+          "output_bytes": 147,
+          "query_ms": 0.130292
+        },
+        {
+          "query": "JWT issuer audience cross tenant",
+          "expected": "BID0000",
+          "rank": 1,
+          "returned": [
+            "BID0000"
+          ],
+          "output_bytes": 135,
+          "query_ms": 0.121125
+        },
+        {
+          "query": "prevent token timing leak constant comparison",
+          "expected": "BID0001",
+          "rank": 1,
+          "returned": [
+            "BID0001",
+            "BID0000",
+            "BID0002",
+            "BID0008",
+            "BID1000"
+          ],
+          "output_bytes": 1588,
+          "query_ms": 0.658
+        }
+      ],
+      "latency_samples_ms": [
+        0.419917,
+        0.21625,
+        0.128542,
+        0.128,
+        0.713542,
+        0.729625,
+        0.726583,
+        0.131125,
+        0.132708,
+        0.1465,
+        0.700791,
+        0.131917,
+        0.649333,
+        0.696292,
+        0.151208,
+        0.134625,
+        0.390167,
+        0.130292,
+        0.121125,
+        0.658,
+        0.125333,
+        0.697042,
+        0.199708,
+        0.141708,
+        0.12525,
+        0.645041,
+        0.690875,
+        0.116375,
+        0.12825,
+        0.127958,
+        0.372125,
+        0.296875,
+        0.14175,
+        0.70525,
+        0.126417,
+        0.666583,
+        0.121959,
+        0.116958,
+        0.684792,
+        0.651375,
+        0.124125,
+        0.121333,
+        0.699833,
+        0.131625,
+        0.140292,
+        0.1415,
+        0.365625,
+        0.676375,
+        0.685292,
+        0.646375,
+        0.303667,
+        0.115959,
+        0.117125,
+        0.126333,
+        0.124667,
+        0.199041,
+        0.656208,
+        0.6815,
+        0.126416,
+        0.695875,
+        0.126416,
+        0.652083,
+        0.125041,
+        0.125,
+        0.68075,
+        0.695084,
+        0.132958,
+        0.121542,
+        0.663125,
+        0.141625,
+        0.366042,
+        0.654875,
+        0.120875,
+        0.19225,
+        0.116792,
+        0.1405,
+        0.316291,
+        0.700375,
+        0.709666,
+        0.122959,
+        0.704375,
+        0.694458,
+        0.642167,
+        0.296625,
+        0.120375,
+        0.12725,
+        0.124667,
+        0.123875,
+        0.191541,
+        0.69,
+        0.684125,
+        0.119041,
+        0.128,
+        0.128833,
+        0.717333,
+        0.117667,
+        0.367417,
+        0.656292,
+        0.14175,
+        0.139875
+      ]
+    },
+    {
+      "name": "engram",
+      "records": 210,
+      "queries": 20,
+      "recall_at_5": 0.85,
+      "mrr": 0.85,
+      "ingest_seconds": 0.8025420419999136,
+      "query_ms_p50": 2.1106045,
+      "query_ms_p95": 4.016292,
+      "query_ms_p99": 4.580166,
+      "peak_rss_kib": 26648,
+      "stored_bytes": 4804433,
+      "cases": [
+        {
+          "query": "avoid duplicate rows while paging changing data with cursor",
+          "expected": "BID0009",
+          "rank": 1,
+          "returned": [
+            "BID0009",
+            "BID0005",
+            "BID0003",
+            "BID0002",
+            "BID0008"
+          ],
+          "output_bytes": 2045,
+          "query_ms": 2.978833
+        },
+        {
+          "query": "avoid lock upgrade failure with immediate transaction",
+          "expected": "BID0002",
+          "rank": 1,
+          "returned": [
+            "BID0002",
+            "BID0005",
+            "BID0001",
+            "BID0009"
+          ],
+          "output_bytes": 1654,
+          "query_ms": 1.807083
+        },
+        {
+          "query": "trace correlation identifiers queue HTTP",
+          "expected": "BID0007",
+          "rank": 1,
+          "returned": [
+            "BID0007",
+            "BID1007",
+            "BID1002",
+            "BID1003",
+            "BID1008"
+          ],
+          "output_bytes": 2202,
+          "query_ms": 2.25275
+        },
+        {
+          "query": "SQLite BEGIN IMMEDIATE writer deadlocks",
+          "expected": "BID0002",
+          "rank": 1,
+          "returned": [
+            "BID0002"
+          ],
+          "output_bytes": 499,
+          "query_ms": 1.249292
+        },
+        {
+          "query": "collapse concurrent cache recomputation single flight",
+          "expected": "BID0004",
+          "rank": 1,
+          "returned": [
+            "BID0004",
+            "BID1007",
+            "BID1002",
+            "BID1003",
+            "BID1008"
+          ],
+          "output_bytes": 2210,
+          "query_ms": 2.551083
+        },
+        {
+          "query": "database change compatible across old and new versions expand",
+          "expected": "BID0006",
+          "rank": 1,
+          "returned": [
+            "BID0006",
+            "BID0007",
+            "BID1007",
+            "BID1002",
+            "BID1003"
+          ],
+          "output_bytes": 2197,
+          "query_ms": 2.576583
+        },
+        {
+          "query": "follow request across worker logs correlation id",
+          "expected": "BID0007",
+          "rank": null,
+          "returned": [
+            "BID1199",
+            "BID1198",
+            "BID1197",
+            "BID1196",
+            "BID1195"
+          ],
+          "output_bytes": 2265,
+          "query_ms": 1.837458
+        },
+        {
+          "query": "cursor pagination stable tiebreaker mutable dataset",
+          "expected": "BID0009",
+          "rank": 1,
+          "returned": [
+            "BID0009"
+          ],
+          "output_bytes": 513,
+          "query_ms": 1.432083
+        },
+        {
+          "query": "duplicate payment retry idempotency key",
+          "expected": "BID0003",
+          "rank": 1,
+          "returned": [
+            "BID0003"
+          ],
+          "output_bytes": 520,
+          "query_ms": 1.134042
+        },
+        {
+          "query": "rolling deploy expand contract database migration",
+          "expected": "BID0006",
+          "rank": 1,
+          "returned": [
+            "BID0006",
+            "BID1007",
+            "BID1002",
+            "BID1003",
+            "BID1008"
+          ],
+          "output_bytes": 2240,
+          "query_ms": 2.767791
+        },
+        {
+          "query": "keep secrets and PII out of logs with token redaction",
+          "expected": "BID0008",
+          "rank": null,
+          "returned": [
+            "BID1199",
+            "BID1198",
+            "BID1197",
+            "BID1196",
+            "BID1195"
+          ],
+          "output_bytes": 2265,
+          "query_ms": 1.866291
+        },
+        {
+          "query": "lost event publish transactional outbox commit",
+          "expected": "BID0005",
+          "rank": 1,
+          "returned": [
+            "BID0005",
+            "BID0000",
+            "BID0002"
+          ],
+          "output_bytes": 1250,
+          "query_ms": 1.483875
+        },
+        {
+          "query": "stop forged tenant token with issuer validation",
+          "expected": "BID0000",
+          "rank": 1,
+          "returned": [
+            "BID0000",
+            "BID0004",
+            "BID0002",
+            "BID0009",
+            "BID0008"
+          ],
+          "output_bytes": 2024,
+          "query_ms": 2.215833
+        },
+        {
+          "query": "message disappears after commit use an outbox",
+          "expected": "BID0005",
+          "rank": null,
+          "returned": [
+            "BID1199",
+            "BID1198",
+            "BID1197",
+            "BID1196",
+            "BID1195"
+          ],
+          "output_bytes": 2265,
+          "query_ms": 1.447459
+        },
+        {
+          "query": "constant time HMAC signature comparison",
+          "expected": "BID0001",
+          "rank": 1,
+          "returned": [
+            "BID0001"
+          ],
+          "output_bytes": 501,
+          "query_ms": 1.293917
+        },
+        {
+          "query": "redact passwords tokens personal data logs",
+          "expected": "BID0008",
+          "rank": 1,
+          "returned": [
+            "BID0008",
+            "BID1007",
+            "BID1002",
+            "BID1003",
+            "BID1008"
+          ],
+          "output_bytes": 2192,
+          "query_ms": 2.273333
+        },
+        {
+          "query": "prevent charging twice using payment idempotency",
+          "expected": "BID0003",
+          "rank": 1,
+          "returned": [
+            "BID0003",
+            "BID0000",
+            "BID0002"
+          ],
+          "output_bytes": 1269,
+          "query_ms": 1.433458
+        },
+        {
+          "query": "single flight cache stampede herd",
+          "expected": "BID0004",
+          "rank": 1,
+          "returned": [
+            "BID0004",
+            "BID1007",
+            "BID1002",
+            "BID1003",
+            "BID1008"
+          ],
+          "output_bytes": 2210,
+          "query_ms": 2.18375
+        },
+        {
+          "query": "JWT issuer audience cross tenant",
+          "expected": "BID0000",
+          "rank": 1,
+          "returned": [
+            "BID0000",
+            "BID0007"
+          ],
+          "output_bytes": 872,
+          "query_ms": 1.142125
+        },
+        {
+          "query": "prevent token timing leak constant comparison",
+          "expected": "BID0001",
+          "rank": 1,
+          "returned": [
+            "BID0001",
+            "BID0000",
+            "BID0002",
+            "BID0008",
+            "BID1007"
+          ],
+          "output_bytes": 2047,
+          "query_ms": 2.108
+        }
+      ],
+      "latency_samples_ms": [
+        2.978833,
+        1.807083,
+        2.25275,
+        1.249292,
+        2.551083,
+        2.576583,
+        1.837458,
+        1.432083,
+        1.134042,
+        2.767791,
+        1.866291,
+        1.483875,
+        2.215833,
+        1.447459,
+        1.293917,
+        2.273333,
+        1.433458,
+        2.18375,
+        1.142125,
+        2.108,
+        1.884167,
+        2.792666,
+        2.103291,
+        2.439667,
+        1.780667,
+        3.448917,
+        1.818625,
+        1.42,
+        2.445792,
+        1.554042,
+        1.316125,
+        2.027542,
+        3.608709,
+        1.590125,
+        1.518375,
+        1.3735,
+        2.164583,
+        1.320875,
+        2.706417,
+        2.113209,
+        1.994166,
+        2.040459,
+        1.771083,
+        1.477042,
+        1.5035,
+        3.410291,
+        1.516708,
+        2.006083,
+        1.41375,
+        2.38575,
+        2.143667,
+        1.078292,
+        1.788084,
+        2.215916,
+        1.708208,
+        1.80075,
+        2.336333,
+        1.876334,
+        3.130709,
+        4.432708,
+        3.841625,
+        3.164959,
+        2.323166,
+        2.053084,
+        2.234333,
+        2.364458,
+        1.735334,
+        4.016292,
+        2.398125,
+        4.194875,
+        2.078917,
+        3.107875,
+        1.477625,
+        2.376333,
+        1.647792,
+        2.843541,
+        2.832625,
+        1.839666,
+        3.938834,
+        2.915125,
+        3.704417,
+        1.856458,
+        2.586625,
+        2.786625,
+        2.655083,
+        3.064958,
+        1.709917,
+        2.049709,
+        2.544667,
+        2.380167,
+        1.857584,
+        1.65825,
+        2.686375,
+        4.580166,
+        3.954292,
+        2.81325,
+        2.048584,
+        4.777167,
+        4.321583,
+        1.794417
+      ]
+    },
+    {
+      "name": "projectmem",
+      "records": 210,
+      "queries": 20,
+      "recall_at_5": 0.0,
+      "mrr": 0.0,
+      "ingest_seconds": 0.5009449169992877,
+      "query_ms_p50": 1.3223544999999999,
+      "query_ms_p95": 1.41975,
+      "query_ms_p99": 1.479083,
+      "peak_rss_kib": 73320,
+      "stored_bytes": 72934,
+      "cases": [
+        {
+          "query": "avoid duplicate rows while paging changing data with cursor",
+          "expected": "BID0009",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 78,
+          "query_ms": 1.479083
+        },
+        {
+          "query": "avoid lock upgrade failure with immediate transaction",
+          "expected": "BID0002",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 72,
+          "query_ms": 1.41975
+        },
+        {
+          "query": "trace correlation identifiers queue HTTP",
+          "expected": "BID0007",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 59,
+          "query_ms": 1.414
+        },
+        {
+          "query": "SQLite BEGIN IMMEDIATE writer deadlocks",
+          "expected": "BID0002",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 58,
+          "query_ms": 1.384333
+        },
+        {
+          "query": "collapse concurrent cache recomputation single flight",
+          "expected": "BID0004",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 72,
+          "query_ms": 1.391917
+        },
+        {
+          "query": "database change compatible across old and new versions expand",
+          "expected": "BID0006",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 80,
+          "query_ms": 1.362
+        },
+        {
+          "query": "follow request across worker logs correlation id",
+          "expected": "BID0007",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 67,
+          "query_ms": 1.373791
+        },
+        {
+          "query": "cursor pagination stable tiebreaker mutable dataset",
+          "expected": "BID0009",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 70,
+          "query_ms": 1.374875
+        },
+        {
+          "query": "duplicate payment retry idempotency key",
+          "expected": "BID0003",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 58,
+          "query_ms": 1.322125
+        },
+        {
+          "query": "rolling deploy expand contract database migration",
+          "expected": "BID0006",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 68,
+          "query_ms": 1.315542
+        },
+        {
+          "query": "keep secrets and PII out of logs with token redaction",
+          "expected": "BID0008",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 72,
+          "query_ms": 1.322833
+        },
+        {
+          "query": "lost event publish transactional outbox commit",
+          "expected": "BID0005",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 65,
+          "query_ms": 1.37625
+        },
+        {
+          "query": "stop forged tenant token with issuer validation",
+          "expected": "BID0000",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 66,
+          "query_ms": 1.411167
+        },
+        {
+          "query": "message disappears after commit use an outbox",
+          "expected": "BID0005",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 64,
+          "query_ms": 1.377875
+        },
+        {
+          "query": "constant time HMAC signature comparison",
+          "expected": "BID0001",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 58,
+          "query_ms": 1.4
+        },
+        {
+          "query": "redact passwords tokens personal data logs",
+          "expected": "BID0008",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 61,
+          "query_ms": 1.340833
+        },
+        {
+          "query": "prevent charging twice using payment idempotency",
+          "expected": "BID0003",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 67,
+          "query_ms": 1.365583
+        },
+        {
+          "query": "single flight cache stampede herd",
+          "expected": "BID0004",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 52,
+          "query_ms": 1.315542
+        },
+        {
+          "query": "JWT issuer audience cross tenant",
+          "expected": "BID0000",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 51,
+          "query_ms": 1.329042
+        },
+        {
+          "query": "prevent token timing leak constant comparison",
+          "expected": "BID0001",
+          "rank": null,
+          "returned": [],
+          "output_bytes": 64,
+          "query_ms": 1.3145
+        }
+      ],
+      "latency_samples_ms": [
+        1.479083,
+        1.41975,
+        1.414,
+        1.384333,
+        1.391917,
+        1.362,
+        1.373791,
+        1.374875,
+        1.322125,
+        1.315542,
+        1.322833,
+        1.37625,
+        1.411167,
+        1.377875,
+        1.4,
+        1.340833,
+        1.365583,
+        1.315542,
+        1.329042,
+        1.3145,
+        1.305917,
+        1.32075,
+        1.345458,
+        1.288375,
+        1.354291,
+        1.475666,
+        1.304333,
+        1.298375,
+        1.319625,
+        1.303333,
+        1.301417,
+        1.323958,
+        1.300417,
+        1.298917,
+        1.322584,
+        1.361416,
+        1.352833,
+        1.312666,
+        1.324541,
+        1.70825,
+        1.308792,
+        1.304625,
+        1.300333,
+        1.309333,
+        1.39175,
+        1.365667,
+        1.316833,
+        1.310458,
+        1.335459,
+        1.307083,
+        1.373167,
+        1.33425,
+        1.30175,
+        1.301916,
+        1.367458,
+        1.302333,
+        1.364292,
+        1.319083,
+        1.301292,
+        1.334625,
+        1.290625,
+        1.319792,
+        1.348333,
+        1.300042,
+        1.306208,
+        1.327833,
+        1.300791,
+        1.393708,
+        1.336667,
+        1.349834,
+        1.42675,
+        1.343208,
+        1.298458,
+        1.355917,
+        1.295625,
+        1.386667,
+        1.460667,
+        1.328292,
+        1.328834,
+        1.317,
+        1.326375,
+        1.317167,
+        1.306541,
+        1.309042,
+        1.333541,
+        1.303834,
+        1.293167,
+        1.292166,
+        1.298083,
+        1.317542,
+        1.342208,
+        1.294583,
+        1.3055,
+        1.287291,
+        1.297417,
+        1.297583,
+        1.298292,
+        1.332416,
+        1.409417,
+        1.288
+      ]
+    }
+  ]
+}
