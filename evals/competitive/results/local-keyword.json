@@ -1,0 +1,512 @@
+{
+  "method": "MCP stdio, warm server, one write per record, fixed corpus",
+  "environment": {
+    "platform": "Linux",
+    "machine": "aarch64",
+    "distractors": 200,
+    "query_profile": "keyword"
+  },
+  "results": [
+    {
+      "name": "agent-mem",
+      "records": 210,
+      "queries": 10,
+      "recall_at_5": 1.0,
+      "mrr": 1.0,
+      "ingest_seconds": 0.05965379199915333,
+      "query_ms_p50": 0.0893755,
+      "query_ms_p95": 0.101625,
+      "query_ms_p99": 0.112542,
+      "peak_rss_kib": 4804,
+      "stored_bytes": 4421693,
+      "cases": [
+        {
+          "query": "correlation",
+          "expected": "BID0007",
+          "rank": 1,
+          "returned": [
+            "BID0007"
+          ],
+          "output_bytes": 126,
+          "query_ms": 0.200459
+        },
+        {
+          "query": "idempotency",
+          "expected": "BID0003",
+          "rank": 1,
+          "returned": [
+            "BID0003"
+          ],
+          "output_bytes": 156,
+          "query_ms": 0.112542
+        },
+        {
+          "query": "IMMEDIATE",
+          "expected": "BID0002",
+          "rank": 1,
+          "returned": [
+            "BID0002"
+          ],
+          "output_bytes": 141,
+          "query_ms": 0.094042
+        },
+        {
+          "query": "redact",
+          "expected": "BID0008",
+          "rank": 1,
+          "returned": [
+            "BID0008"
+          ],
+          "output_bytes": 120,
+          "query_ms": 0.087709
+        },
+        {
+          "query": "outbox",
+          "expected": "BID0005",
+          "rank": 1,
+          "returned": [
+            "BID0005"
+          ],
+          "output_bytes": 145,
+          "query_ms": 0.09275
+        },
+        {
+          "query": "migrations",
+          "expected": "BID0006",
+          "rank": 1,
+          "returned": [
+            "BID0006"
+          ],
+          "output_bytes": 174,
+          "query_ms": 0.101625
+        },
+        {
+          "query": "pagination",
+          "expected": "BID0009",
+          "rank": 1,
+          "returned": [
+            "BID0009"
+          ],
+          "output_bytes": 146,
+          "query_ms": 0.092292
+        },
+        {
+          "query": "stampede",
+          "expected": "BID0004",
+          "rank": 1,
+          "returned": [
+            "BID0004"
+          ],
+          "output_bytes": 147,
+          "query_ms": 0.092167
+        },
+        {
+          "query": "issuer",
+          "expected": "BID0000",
+          "rank": 1,
+          "returned": [
+            "BID0000"
+          ],
+          "output_bytes": 135,
+          "query_ms": 0.089
+        },
+        {
+          "query": "HMAC",
+          "expected": "BID0001",
+          "rank": 1,
+          "returned": [
+            "BID0001"
+          ],
+          "output_bytes": 139,
+          "query_ms": 0.089125
+        }
+      ],
+      "latency_samples_ms": [
+        0.200459,
+        0.112542,
+        0.094042,
+        0.087709,
+        0.09275,
+        0.101625,
+        0.092292,
+        0.092167,
+        0.089,
+        0.089125,
+        0.084416,
+        0.088791,
+        0.091,
+        0.09825,
+        0.090459,
+        0.084917,
+        0.094917,
+        0.088584,
+        0.090166,
+        0.087,
+        0.091166,
+        0.089125,
+        0.086834,
+        0.088208,
+        0.089417,
+        0.092166,
+        0.084834,
+        0.100292,
+        0.083958,
+        0.098042,
+        0.088917,
+        0.092833,
+        0.088958,
+        0.089334,
+        0.083583,
+        0.08725,
+        0.088875,
+        0.083916,
+        0.111875,
+        0.093958,
+        0.096542,
+        0.096667,
+        0.088083,
+        0.089334,
+        0.090083,
+        0.082875,
+        0.090417,
+        0.086167,
+        0.098375,
+        0.087708
+      ]
+    },
+    {
+      "name": "engram",
+      "records": 210,
+      "queries": 10,
+      "recall_at_5": 1.0,
+      "mrr": 1.0,
+      "ingest_seconds": 0.8221941669999069,
+      "query_ms_p50": 0.979708,
+      "query_ms_p95": 1.29225,
+      "query_ms_p99": 1.347125,
+      "peak_rss_kib": 25732,
+      "stored_bytes": 4804433,
+      "cases": [
+        {
+          "query": "correlation",
+          "expected": "BID0007",
+          "rank": 1,
+          "returned": [
+            "BID0007"
+          ],
+          "output_bytes": 502,
+          "query_ms": 1.278375
+        },
+        {
+          "query": "idempotency",
+          "expected": "BID0003",
+          "rank": 1,
+          "returned": [
+            "BID0003"
+          ],
+          "output_bytes": 520,
+          "query_ms": 1.008208
+        },
+        {
+          "query": "IMMEDIATE",
+          "expected": "BID0002",
+          "rank": 1,
+          "returned": [
+            "BID0002"
+          ],
+          "output_bytes": 499,
+          "query_ms": 0.890833
+        },
+        {
+          "query": "redact",
+          "expected": "BID0008",
+          "rank": 1,
+          "returned": [
+            "BID0008"
+          ],
+          "output_bytes": 492,
+          "query_ms": 0.742041
+        },
+        {
+          "query": "outbox",
+          "expected": "BID0005",
+          "rank": 1,
+          "returned": [
+            "BID0005"
+          ],
+          "output_bytes": 501,
+          "query_ms": 1.224959
+        },
+        {
+          "query": "migrations",
+          "expected": "BID0006",
+          "rank": 1,
+          "returned": [
+            "BID0006"
+          ],
+          "output_bytes": 540,
+          "query_ms": 0.96525
+        },
+        {
+          "query": "pagination",
+          "expected": "BID0009",
+          "rank": 1,
+          "returned": [
+            "BID0009"
+          ],
+          "output_bytes": 513,
+          "query_ms": 0.891042
+        },
+        {
+          "query": "stampede",
+          "expected": "BID0004",
+          "rank": 1,
+          "returned": [
+            "BID0004"
+          ],
+          "output_bytes": 510,
+          "query_ms": 1.13275
+        },
+        {
+          "query": "issuer",
+          "expected": "BID0000",
+          "rank": 1,
+          "returned": [
+            "BID0000"
+          ],
+          "output_bytes": 490,
+          "query_ms": 0.8505
+        },
+        {
+          "query": "HMAC",
+          "expected": "BID0001",
+          "rank": 1,
+          "returned": [
+            "BID0001"
+          ],
+          "output_bytes": 501,
+          "query_ms": 0.975584
+        }
+      ],
+      "latency_samples_ms": [
+        1.278375,
+        1.008208,
+        0.890833,
+        0.742041,
+        1.224959,
+        0.96525,
+        0.891042,
+        1.13275,
+        0.8505,
+        0.975584,
+        0.999542,
+        0.976416,
+        1.100166,
+        1.029875,
+        0.89075,
+        1.240709,
+        0.888125,
+        0.916917,
+        0.943459,
+        1.107042,
+        0.936542,
+        0.983,
+        0.964042,
+        0.966625,
+        1.275459,
+        0.874291,
+        0.96375,
+        0.928,
+        1.02,
+        1.120416,
+        0.705458,
+        1.315958,
+        0.704625,
+        1.347125,
+        0.748584,
+        1.050583,
+        1.033834,
+        1.056375,
+        1.105792,
+        1.794083,
+        1.29225,
+        0.675208,
+        1.108542,
+        0.915166,
+        1.158083,
+        0.690459,
+        1.19625,
+        0.922542,
+        1.10775,
+        0.838375
+      ]
+    },
+    {
+      "name": "projectmem",
+      "records": 210,
+      "queries": 10,
+      "recall_at_5": 1.0,
+      "mrr": 1.0,
+      "ingest_seconds": 0.45941462500013586,
+      "query_ms_p50": 1.44375,
+      "query_ms_p95": 3.393708,
+      "query_ms_p99": 4.130625,
+      "peak_rss_kib": 73128,
+      "stored_bytes": 72934,
+      "cases": [
+        {
+          "query": "correlation",
+          "expected": "BID0007",
+          "rank": 1,
+          "returned": [
+            "BID0007"
+          ],
+          "output_bytes": 162,
+          "query_ms": 1.777083
+        },
+        {
+          "query": "idempotency",
+          "expected": "BID0003",
+          "rank": 1,
+          "returned": [
+            "BID0003"
+          ],
+          "output_bytes": 181,
+          "query_ms": 1.685459
+        },
+        {
+          "query": "IMMEDIATE",
+          "expected": "BID0002",
+          "rank": 1,
+          "returned": [
+            "BID0002"
+          ],
+          "output_bytes": 166,
+          "query_ms": 1.596541
+        },
+        {
+          "query": "redact",
+          "expected": "BID0008",
+          "rank": 1,
+          "returned": [
+            "BID0008"
+          ],
+          "output_bytes": 151,
+          "query_ms": 1.652708
+        },
+        {
+          "query": "outbox",
+          "expected": "BID0005",
+          "rank": 1,
+          "returned": [
+            "BID0005"
+          ],
+          "output_bytes": 166,
+          "query_ms": 3.393708
+        },
+        {
+          "query": "migrations",
+          "expected": "BID0006",
+          "rank": 1,
+          "returned": [
+            "BID0006"
+          ],
+          "output_bytes": 199,
+          "query_ms": 4.130625
+        },
+        {
+          "query": "pagination",
+          "expected": "BID0009",
+          "rank": 1,
+          "returned": [
+            "BID0009"
+          ],
+          "output_bytes": 170,
+          "query_ms": 4.713084
+        },
+        {
+          "query": "stampede",
+          "expected": "BID0004",
+          "rank": 1,
+          "returned": [
+            "BID0004"
+          ],
+          "output_bytes": 170,
+          "query_ms": 3.545584
+        },
+        {
+          "query": "issuer",
+          "expected": "BID0000",
+          "rank": 1,
+          "returned": [
+            "BID0000"
+          ],
+          "output_bytes": 157,
+          "query_ms": 1.874041
+        },
+        {
+          "query": "HMAC",
+          "expected": "BID0001",
+          "rank": 1,
+          "returned": [
+            "BID0001"
+          ],
+          "output_bytes": 159,
+          "query_ms": 1.506542
+        }
+      ],
+      "latency_samples_ms": [
+        1.777083,
+        1.685459,
+        1.596541,
+        1.652708,
+        3.393708,
+        4.130625,
+        4.713084,
+        3.545584,
+        1.874041,
+        1.506542,
+        1.509083,
+        1.544959,
+        1.549375,
+        1.50125,
+        1.438583,
+        1.436834,
+        1.424125,
+        1.429625,
+        1.441917,
+        1.399958,
+        1.394584,
+        1.474333,
+        1.543375,
+        1.4505,
+        1.416458,
+        1.433208,
+        1.420458,
+        1.420042,
+        1.427208,
+        1.50775,
+        1.545208,
+        1.500083,
+        1.429375,
+        1.494417,
+        1.445583,
+        1.402417,
+        1.43675,
+        1.428458,
+        1.451333,
+        1.550792,
+        1.399791,
+        1.420791,
+        1.374792,
+        1.381708,
+        1.398292,
+        1.418958,
+        1.387541,
+        1.377208,
+        1.526708,
+        1.385208
+      ]
+    }
+  ]
+}

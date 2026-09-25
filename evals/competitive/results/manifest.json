@@ -1,0 +1,46 @@
+{
+  "date_utc": "2026-09-25",
+  "environment": {
+    "host": "Docker Desktop on macOS arm64",
+    "server": "Docker 28.5.1 linux/arm64",
+    "rust_image": "sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6",
+    "python_image": "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de",
+    "tencent_image": "sha256:4e97d5eab3fbcdef970c78b71b10bde6781c2e24a55374fc12901747e18dc5ba"
+  },
+  "sources": {
+    "agent-mem": {
+      "commit": "6150c0571dc93fe81ca1d38ffa1d0aa0f8e157b1",
+      "binary_sha256": "58430395670ec11f9c62207a3bfd341983d8a577b132d4fa11949668894270df",
+      "build": "rust:1.89-slim-bookworm, cargo build --locked --release --no-default-features"
+    },
+    "engram": {
+      "commit": "facaba842db32b55d3a13a6ea16ea31968ae6ce6",
+      "binary_sha256": "2b16df955459050b9d0b9d27d92e4cb12ddd7484e7bbc568e2ad02e8c34e58de",
+      "build": "Go 1.25.1 Linux/ARM64"
+    },
+    "mem0": {
+      "commit": "94c3fe9f238f3dbf29c9ce98643bd71eb13077cd",
+      "package": "mem0ai 2.2.1",
+      "embedding": "OpenAI text-embedding-3-small",
+      "infer": false
+    },
+    "tencentdb": {
+      "commit": "bd88cc83870bf9e7dbd2ec36aa13608d2295c7f4",
+      "mode": "MemoryCore v3 conversation L0, English BM25, extraction disabled"
+    },
+    "projectmem": {
+      "commit": "e8d73137acde6f091ef6196f88ba5eccf6eb0e8a",
+      "package": "projectmem 0.3.3"
+    }
+  },
+  "dataset": {
+    "records": 210,
+    "answer_records": 10,
+    "distractors": 200,
+    "natural_queries": 20,
+    "keyword_queries": 10,
+    "latency_passes": 5,
+    "answer_metric": "Recall@5 and MRR@5 from first pass",
+    "latency_metric": "p50, p95 and p99 over five shuffled passes"
+  }
+}
