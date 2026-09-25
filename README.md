@@ -67,6 +67,19 @@ brew install marcosotomac/tap/agent-mem
 cargo install --path .
 ```
 
+### Optional local semantic search
+
+```bash
+cargo install --path . --locked --features semantic-local --force
+agent-mem semantic build
+```
+
+The first `semantic build` enables the local multilingual model for the current
+project. After a memory changes, the next search that needs semantic retrieval
+refreshes the index automatically. Unchanged embeddings are reused; keyword
+searches retain their fast path. `semantic status` shows when an automatic refresh
+is pending. `semantic clear` disables the fallback for that project.
+
 ## CLI Usage
 ```bash
 # Initialize isolated project memory (SQLite WAL, .gitignore, git hook)

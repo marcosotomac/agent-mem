@@ -1,10 +1,11 @@
 use super::{RuleRecord, SemanticBuildReport, SemanticStatus, Store, now_epoch};
 use crate::error::{Error, Result};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
-use std::collections::VecDeque;
+use fs2::FileExt;
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use std::collections::{HashMap, VecDeque};
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -41,10 +42,7 @@ impl Default for SemanticRuntime {
 #[derive(Clone)]
 struct SemanticDocument {
     id: u64,
-    key: String,
     text: String,
-    fingerprint_hi: i64,
-    fingerprint_lo: i64,
 }
 
 struct SemanticState {
@@ -261,10 +259,44 @@ impl Store {
             .map_err(Into::into)
     }
 
-    pub fn semantic_rebuild(&mut self) -> Result<SemanticBuildReport> {
+    fn lock_semantic_index(&self) -> Result<fs::File> {
+        let parent = self.semantic_parent()?;
+        fs::create_dir_all(parent)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join("semantic.lock"))?;
+        file.lock_exclusive()?;
+        Ok(file)
+    }
+
+    fn semantic_needs_refresh(&self, state: &SemanticState) -> Result<bool> {
+        Ok(state.dirty
+            || state.model_id != MODEL_ID
+            || state.dimensions != DIMENSIONS
+            || !index_file(self.semantic_parent()?, &state.generation).is_file())
+    }
+
+    pub fn semantic_rebuild(&self) -> Result<SemanticBuildReport> {
+        self.semantic_rebuild_inner(false)?
+            .ok_or_else(|| Error::Semantic("explicit semantic rebuild was skipped".into()))
+    }
+
+    fn semantic_rebuild_inner(&self, only_if_needed: bool) -> Result<Option<SemanticBuildReport>> {
+        let _lock = self.lock_semantic_index()?;
+        let previous_state = self.semantic_state()?;
+        if only_if_needed {
+            let Some(state) = previous_state.as_ref() else {
+                return Ok(None);
+            };
+            if !self.semantic_needs_refresh(state)? {
+                return Ok(None);
+            }
+        }
         let started = Instant::now();
         let parent = self.semantic_parent()?.to_path_buf();
-        fs::create_dir_all(&parent)?;
         let records_count: usize = self.conn.query_row(
             "SELECT COUNT(*) FROM memories WHERE archived_at IS NULL;",
             [],
@@ -273,6 +305,30 @@ impl Store {
         let index = new_index(records_count)?;
         let mut mappings = Vec::with_capacity(records_count);
         let mut corpus = (0x243f6a8885a308d3, 0x13198a2e03707344);
+        let previous_index = previous_state.as_ref().and_then(|state| {
+            (state.model_id == MODEL_ID && state.dimensions == DIMENSIONS)
+                .then(|| index_file(&parent, &state.generation))
+                .filter(|path| path.is_file())
+                .and_then(|path| Index::restore_view(path_for_usearch(&path).ok()?).ok())
+        });
+        let mut previous_mappings = HashMap::new();
+        if previous_index.is_some() {
+            let mut stmt = self.conn.prepare(
+                "SELECT memory_key, semantic_id, fingerprint_hi, fingerprint_lo
+                 FROM semantic_records;",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                previous_mappings.insert(
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ),
+                );
+            }
+        }
 
         if records_count > 0 {
             if std::io::stderr().is_terminal() && env::var("AGENT_MEM_QUIET").is_err() {
@@ -281,44 +337,52 @@ impl Store {
                     records_count
                 );
             }
-            with_model(|model| {
-                let mut stmt = self.conn.prepare(
-                    "SELECT key, val, anchor, kind FROM memories
-                     WHERE archived_at IS NULL ORDER BY key;",
-                )?;
-                let mut rows = stmt.query([])?;
-                let mut batch = Vec::with_capacity(BUILD_BATCH_SIZE);
-                let mut id = 1u64;
-                while let Some(row) = rows.next()? {
-                    let key: String = row.get(0)?;
-                    let val: String = row.get(1)?;
-                    let anchor: Option<String> = row.get(2)?;
-                    let kind: String = row.get(3)?;
-                    let (fingerprint_hi, fingerprint_lo) =
-                        fingerprint(&key, &val, anchor.as_deref(), &kind);
-                    update_corpus_fingerprint(&mut corpus, (fingerprint_hi, fingerprint_lo));
-                    let document = SemanticDocument {
+            let mut stmt = self.conn.prepare(
+                "SELECT key, val, anchor, kind FROM memories
+                 WHERE archived_at IS NULL ORDER BY key;",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut batch = Vec::with_capacity(BUILD_BATCH_SIZE);
+            let mut id = 1u64;
+            while let Some(row) = rows.next()? {
+                let key: String = row.get(0)?;
+                let val: String = row.get(1)?;
+                let anchor: Option<String> = row.get(2)?;
+                let kind: String = row.get(3)?;
+                let (fingerprint_hi, fingerprint_lo) =
+                    fingerprint(&key, &val, anchor.as_deref(), &kind);
+                update_corpus_fingerprint(&mut corpus, (fingerprint_hi, fingerprint_lo));
+                mappings.push((id, key.clone(), fingerprint_hi, fingerprint_lo));
+
+                let reused = if let (Some(old_index), Some((old_id, old_hi, old_lo))) =
+                    (previous_index.as_ref(), previous_mappings.get(&key))
+                    && (*old_hi, *old_lo) == (fingerprint_hi, fingerprint_lo)
+                {
+                    let mut vector = [0.0_f32; DIMENSIONS];
+                    if old_index.get(*old_id as u64, &mut vector).ok() == Some(1) {
+                        index.add(id, &vector).map_err(semantic_error)?;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !reused {
+                    batch.push(SemanticDocument {
                         id,
                         text: embedding_text(&key, &val, anchor.as_deref(), &kind),
-                        key,
-                        fingerprint_hi,
-                        fingerprint_lo,
-                    };
-                    mappings.push((
-                        document.id,
-                        document.key.clone(),
-                        document.fingerprint_hi,
-                        document.fingerprint_lo,
-                    ));
-                    batch.push(document);
-                    id += 1;
+                    });
                     if batch.len() == BUILD_BATCH_SIZE {
-                        embed_batch(model, &index, &batch)?;
+                        with_model(|model| embed_batch(model, &index, &batch))?;
                         batch.clear();
                     }
                 }
-                embed_batch(model, &index, &batch)
-            })?;
+                id += 1;
+            }
+            if !batch.is_empty() {
+                with_model(|model| embed_batch(model, &index, &batch))?;
+            }
         }
 
         let generation = format!(
@@ -337,10 +401,8 @@ impl Store {
         fs::File::open(&temp_path)?.sync_all()?;
         fs::rename(&temp_path, &final_path)?;
 
-        let old_generation = self.semantic_state()?.map(|state| state.generation);
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let old_generation = previous_state.map(|state| state.generation);
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let verified = {
             let mut verified_corpus = (0x243f6a8885a308d3, 0x13198a2e03707344);
             let mut verified_count = 0usize;
@@ -405,20 +467,21 @@ impl Store {
             return Err(error.into());
         }
 
+        *self.semantic_runtime.borrow_mut() = SemanticRuntime::default();
+        drop(previous_index);
         if let Some(old_generation) = old_generation
             && old_generation != generation
         {
             let _ = fs::remove_file(index_file(&parent, &old_generation));
         }
-        *self.semantic_runtime.borrow_mut() = SemanticRuntime::default();
         let index_bytes = fs::metadata(&final_path)?.len();
-        Ok(SemanticBuildReport {
+        Ok(Some(SemanticBuildReport {
             records_count: mappings.len(),
             elapsed_ms: started.elapsed().as_millis(),
             index_path: final_path,
             index_bytes,
             model_id: MODEL_ID.to_string(),
-        })
+        }))
     }
 
     pub fn semantic_status(&self) -> Result<SemanticStatus> {
@@ -449,6 +512,7 @@ impl Store {
     }
 
     pub fn semantic_clear(&mut self) -> Result<usize> {
+        let _lock = self.lock_semantic_index()?;
         let parent = self.semantic_parent()?.to_path_buf();
         let tx = self
             .conn
@@ -517,9 +581,15 @@ impl Store {
     }
 
     pub(crate) fn find_semantic(&self, query: &str) -> Result<Vec<RuleRecord>> {
-        let Some(state) = self.semantic_state()? else {
+        let Some(mut state) = self.semantic_state()? else {
             return Ok(Vec::new());
         };
+        if self.semantic_needs_refresh(&state)? {
+            self.semantic_rebuild_inner(true)?;
+            state = self.semantic_state()?.ok_or_else(|| {
+                Error::Semantic("semantic index was disabled during refresh".into())
+            })?;
+        }
         if state.model_id != MODEL_ID || state.dimensions != DIMENSIONS || state.records_count == 0
         {
             return Ok(Vec::new());

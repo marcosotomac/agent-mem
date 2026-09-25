@@ -733,7 +733,7 @@ pub fn print_semantic_status(status: &crate::store::SemanticStatus) {
         return;
     }
     let (dot, freshness) = if status.dirty {
-        (AMBER, "stale")
+        (AMBER, "refresh pending (automatic)")
     } else {
         (EMERALD, "fresh")
     };
