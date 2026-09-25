@@ -1,8 +1,10 @@
 use crate::error::{Error, Result};
 use crate::store::Store;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,22 +49,49 @@ impl ProjectRegistry {
         }
 
         let raw = fs::read_to_string(&path)?;
-        if raw.trim().is_empty() {
-            return Ok(Self::default());
-        }
-
-        match serde_json::from_str::<Self>(&raw) {
-            Ok(reg) => Ok(reg),
-            Err(_) => Ok(Self::default()),
-        }
+        serde_json::from_str::<Self>(&raw).map_err(|error| {
+            Error::Usage(format!(
+                "Project registry '{}' is invalid: {error}",
+                path.display()
+            ))
+        })
     }
 
     pub fn save(&self) -> Result<()> {
-        let dir = registry_dir();
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
-        }
+        let lock = Self::lock()?;
+        let result = (|| {
+            let current = Self::load()?;
+            if current.projects.iter().any(|existing| {
+                !self.projects.iter().any(|candidate| {
+                    candidate.id == existing.id
+                        && candidate.canonical_path == existing.canonical_path
+                })
+            }) {
+                return Err(Error::Usage(
+                    "Project registry changed since it was loaded; reload before saving or use deregister() to remove a project".into(),
+                ));
+            }
+            self.save_locked()
+        })();
+        FileExt::unlock(&lock)?;
+        result
+    }
 
+    fn lock() -> Result<fs::File> {
+        let dir = registry_dir();
+        fs::create_dir_all(&dir)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dir.join("projects.json.lock"))?;
+        file.lock_exclusive()?;
+        Ok(file)
+    }
+
+    fn save_locked(&self) -> Result<()> {
+        let dir = registry_dir();
         let path = registry_path();
         let tmp_path = dir.join(format!(
             "projects.json.tmp.{}",
@@ -79,6 +108,18 @@ impl ProjectRegistry {
         fs::rename(&tmp_path, &path)?;
 
         Ok(())
+    }
+
+    fn mutate<T>(&mut self, change: impl FnOnce(&mut Self) -> (T, bool)) -> Result<T> {
+        let lock = Self::lock()?;
+        let mut current = Self::load()?;
+        let (value, changed) = change(&mut current);
+        if changed {
+            current.save_locked()?;
+        }
+        self.projects = current.projects;
+        FileExt::unlock(&lock)?;
+        Ok(value)
     }
 
     /// Read git remote URL from .git/config without spawning subshells
@@ -186,24 +227,6 @@ impl ProjectRegistry {
 
         let id = Self::generate_id(&canonical_str, git_remote.as_deref());
 
-        // Anti-collision & Deduplication check:
-        // 1. Exact canonical path match
-        // 2. Git remote match with a dead path (moved/renamed folder)
-        let mut found_index = None;
-        for (i, p) in self.projects.iter().enumerate() {
-            if p.canonical_path == canonical_str {
-                found_index = Some(i);
-                break;
-            }
-            if let (Some(r1), Some(r2)) = (&p.git_remote, &git_remote)
-                && r1 == r2
-                && !Path::new(&p.canonical_path).exists()
-            {
-                found_index = Some(i);
-                break;
-            }
-        }
-
         let record = ProjectRecord {
             id,
             name,
@@ -223,47 +246,52 @@ impl ProjectRegistry {
             return Ok(record);
         }
 
-        if let Some(idx) = found_index {
-            self.projects[idx] = record.clone();
-        } else {
-            self.projects.push(record.clone());
-        }
-
-        // Sort most recently accessed first
-        self.projects
-            .sort_by_key(|a| std::cmp::Reverse(a.last_accessed));
-
-        self.save()?;
+        self.mutate(|current| {
+            let found_index = current.projects.iter().position(|project| {
+                project.canonical_path == record.canonical_path
+                    || (project.git_remote.is_some()
+                        && project.git_remote == record.git_remote
+                        && !Path::new(&project.canonical_path).exists())
+            });
+            if let Some(index) = found_index {
+                current.projects[index] = record.clone();
+            } else {
+                current.projects.push(record.clone());
+            }
+            current
+                .projects
+                .sort_by_key(|project| std::cmp::Reverse(project.last_accessed));
+            ((), true)
+        })?;
         Ok(record)
     }
 
     /// Prune dead projects (directories or databases that no longer exist, or ephemeral temp paths in global registry)
     pub fn prune(&mut self) -> Result<usize> {
-        let before_len = self.projects.len();
         let is_global_default = env::var("AGENT_MEM_GLOBAL_DIR").is_err();
-        self.projects.retain(|p| {
-            let path = Path::new(&p.canonical_path);
-            if is_global_default && Self::is_temporary_path(path) {
-                return false;
-            }
-            path.exists() && path.join(".agent-mem").join("mem.db").exists()
-        });
-        let removed = before_len - self.projects.len();
-        if removed > 0 {
-            self.save()?;
-        }
-        Ok(removed)
+        self.mutate(|current| {
+            let before_len = current.projects.len();
+            current.projects.retain(|project| {
+                let path = Path::new(&project.canonical_path);
+                if is_global_default && Self::is_temporary_path(path) {
+                    return false;
+                }
+                path.exists() && path.join(".agent-mem").join("mem.db").exists()
+            });
+            let removed = before_len - current.projects.len();
+            (removed, removed > 0)
+        })
     }
 
     /// Remove a project by id or path
     pub fn deregister(&mut self, id_or_path: &str) -> Result<bool> {
-        let before_len = self.projects.len();
-        self.projects
-            .retain(|p| p.id != id_or_path && p.canonical_path != id_or_path);
-        let removed = before_len != self.projects.len();
-        if removed {
-            self.save()?;
-        }
-        Ok(removed)
+        self.mutate(|current| {
+            let before_len = current.projects.len();
+            current
+                .projects
+                .retain(|project| project.id != id_or_path && project.canonical_path != id_or_path);
+            let removed = before_len != current.projects.len();
+            (removed, removed)
+        })
     }
 }

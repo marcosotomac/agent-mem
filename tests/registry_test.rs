@@ -5,6 +5,60 @@ use std::fs;
 static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
+fn test_stale_registry_handles_merge_under_lock() {
+    let _lock = REGISTRY_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let global_dir =
+        std::env::temp_dir().join(format!("agent_mem_reg_parallel_{}", std::process::id()));
+    fs::create_dir_all(&global_dir).unwrap();
+    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
+    let roots: Vec<_> = (0..12)
+        .map(|index| global_dir.join(format!("project-{index}")))
+        .collect();
+    for root in &roots {
+        fs::create_dir_all(root).unwrap();
+    }
+    let stale = ProjectRegistry::load().unwrap();
+    let handles: Vec<_> = roots
+        .into_iter()
+        .map(|root| {
+            let mut registry = stale.clone();
+            std::thread::spawn(move || registry.register(&root).unwrap())
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    assert_eq!(ProjectRegistry::load().unwrap().projects.len(), 12);
+    assert!(stale.save().is_err());
+    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
+    fs::remove_dir_all(global_dir).unwrap();
+}
+
+#[test]
+fn test_corrupt_registry_is_rejected_without_overwrite() {
+    let _lock = REGISTRY_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let global_dir =
+        std::env::temp_dir().join(format!("agent_mem_reg_corrupt_{}", std::process::id()));
+    fs::create_dir_all(&global_dir).unwrap();
+    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
+    let registry_file = global_dir.join("projects.json");
+    fs::write(&registry_file, "{broken").unwrap();
+    assert!(ProjectRegistry::load().is_err());
+    assert!(ProjectRegistry::default().save().is_err());
+    let project = global_dir.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let error = agent_mem::init::init_project(&project).unwrap_err();
+    assert!(error.to_string().contains("Project registry"));
+    assert_eq!(fs::read_to_string(&registry_file).unwrap(), "{broken");
+    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
+    fs::remove_dir_all(global_dir).unwrap();
+}
+
+#[test]
 fn test_registry_registration_and_anti_collision() {
     let _lock = REGISTRY_TEST_MUTEX
         .lock()

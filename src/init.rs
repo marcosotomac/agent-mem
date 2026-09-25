@@ -289,7 +289,7 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
     }
 
     // Auto-register project in the global canonical registry
-    let _ = crate::registry::ProjectRegistry::load().and_then(|mut reg| reg.register(root));
+    crate::registry::ProjectRegistry::load()?.register(root)?;
 
     // MCP client configuration is intentionally opt-in. Project initialization must never
     // mutate user-level editor configuration; use `agent-mem mcp install [client]` explicitly.
