@@ -166,6 +166,7 @@ fn test_cli_context_with_diff_in_git_repo() {
             limit: 20,
             diff: true,
             files: Vec::new(),
+            include_untrusted: false,
         }
     );
 

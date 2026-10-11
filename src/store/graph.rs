@@ -9,6 +9,64 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 impl Store {
+    fn context_key_is_trusted(&self, key: &str) -> Result<bool> {
+        let trust = self.conn.query_row(
+            "SELECT trust FROM memory_metadata WHERE memory_key = ?1;",
+            params![key],
+            |row| row.get::<_, String>(0),
+        );
+        match trust {
+            Ok(value) => Ok(value != super::TRUST_UNTRUSTED),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(true),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Remove quarantined memories and relations that touch them before
+    /// context is injected into an agent prompt. Explicit search/get APIs keep
+    /// exposing these records so a human can review and promote them.
+    pub fn filter_trusted_context(
+        &self,
+        rules: Vec<RuleRecord>,
+        relations: Vec<RelationRecord>,
+    ) -> Result<(Vec<RuleRecord>, Vec<RelationRecord>)> {
+        let mut trusted_keys = HashSet::with_capacity(rules.len());
+        let mut trusted_rules = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if self.context_key_is_trusted(&rule.key)? {
+                trusted_keys.insert(rule.key.clone());
+                trusted_rules.push(rule);
+            }
+        }
+
+        let mut endpoint_trust = HashMap::new();
+        let mut trusted_relations = Vec::with_capacity(relations.len());
+        for relation in relations {
+            let source_trusted = if trusted_keys.contains(&relation.source_key) {
+                true
+            } else if let Some(value) = endpoint_trust.get(&relation.source_key) {
+                *value
+            } else {
+                let value = self.context_key_is_trusted(&relation.source_key)?;
+                endpoint_trust.insert(relation.source_key.clone(), value);
+                value
+            };
+            let target_trusted = if trusted_keys.contains(&relation.target_key) {
+                true
+            } else if let Some(value) = endpoint_trust.get(&relation.target_key) {
+                *value
+            } else {
+                let value = self.context_key_is_trusted(&relation.target_key)?;
+                endpoint_trust.insert(relation.target_key.clone(), value);
+                value
+            };
+            if source_trusted && target_trusted {
+                trusted_relations.push(relation);
+            }
+        }
+        Ok((trusted_rules, trusted_relations))
+    }
+
     fn select_diverse_context_keys(
         direct: Vec<String>,
         related: Vec<String>,

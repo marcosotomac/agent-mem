@@ -172,6 +172,7 @@ fn test_parse_args() {
             limit: 20,
             diff: false,
             files: Vec::new(),
+            include_untrusted: false,
         }
     );
 
@@ -194,6 +195,7 @@ fn test_parse_args() {
             limit: 5,
             diff: false,
             files: Vec::new(),
+            include_untrusted: false,
         }
     );
 
@@ -213,6 +215,7 @@ fn test_parse_args() {
             limit: 20,
             diff: true,
             files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+            include_untrusted: false,
         }
     );
 
