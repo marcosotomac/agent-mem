@@ -136,11 +136,65 @@ impl Store {
             ));
         }
         let now = now_epoch();
-        self.conn.execute(
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for key in [s, t] {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1);",
+                params![key],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(crate::error::Error::NotFound(key.to_string()));
+            }
+        }
+        if r == "supersedes" {
+            if s == t {
+                return Err(crate::error::Error::Usage(
+                    "A memory cannot supersede itself".into(),
+                ));
+            }
+            let creates_cycle: bool = tx.query_row(
+                "WITH RECURSIVE chain(key) AS (
+                    SELECT target_key FROM relations
+                    WHERE source_key = ?1 AND rel_type = 'supersedes'
+                    UNION
+                    SELECT relations.target_key FROM relations
+                    JOIN chain ON relations.source_key = chain.key
+                    WHERE relations.rel_type = 'supersedes'
+                 )
+                 SELECT EXISTS(SELECT 1 FROM chain WHERE key = ?2);",
+                params![t, s],
+                |row| row.get(0),
+            )?;
+            if creates_cycle {
+                return Err(crate::error::Error::Usage(
+                    "A supersedes relation cannot create a cycle".into(),
+                ));
+            }
+        }
+        tx.execute(
             "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
             params![s, r, t, now],
         )?;
+        if r == "supersedes" {
+            tx.execute(
+                "UPDATE memories
+                 SET archived_at = ?1, archive_reason = ?2, updated_at = ?1
+                 WHERE key = ?3 AND archived_at IS NULL;",
+                params![now, format!("superseded_by: {s}"), t],
+            )?;
+            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![t])?;
+            tx.execute(
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind)
+                 SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
+                params![t],
+            )?;
+            mark_semantic_dirty(&tx)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
