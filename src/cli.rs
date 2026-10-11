@@ -84,6 +84,7 @@ pub enum Command {
         client: Option<String>,
     },
     Doctor,
+    Stats,
     Projects {
         prune: bool,
     },
@@ -411,6 +412,7 @@ where
         "--mcp" => Ok(Command::Mcp { read_only: false }),
         "tui" | "ui" => Ok(Command::Tui),
         "doctor" => Ok(Command::Doctor),
+        "stats" => Ok(Command::Stats),
         "projects" => {
             let prune = args
                 .get(2)
@@ -529,6 +531,34 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             let git_stats = crate::init::inspect_git_health(root);
             let clients = crate::installer::check_all_clients();
             print_doctor(store_stats.as_ref(), &git_stats, &clients);
+            Ok(())
+        }
+        Command::Stats => {
+            let db_path = root.join(".agent-mem").join("mem.db");
+            let (store_stats, zombies, db_bytes) = if db_path.exists() {
+                match Store::open(&db_path, false) {
+                    Ok(mut store) => {
+                        let stats = store.stats(&db_path).ok();
+                        let zombies = store
+                            .clean_zombies(root, true)
+                            .ok()
+                            .map(|report| report.len());
+                        let bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+                        (stats, zombies, bytes)
+                    }
+                    Err(_) => (None, None, 0),
+                }
+            } else {
+                (None, None, 0)
+            };
+            let registry = crate::registry::ProjectRegistry::load()?;
+            print_stats(
+                root,
+                store_stats.as_ref(),
+                zombies,
+                db_bytes,
+                &registry.projects,
+            );
             Ok(())
         }
         Command::Projects { prune } => {
@@ -772,6 +802,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 | Command::Help
                 | Command::Version
                 | Command::Doctor
+                | Command::Stats
                 | Command::Projects { .. }
                 | Command::HookPostCommit { .. }
                 | Command::Tui

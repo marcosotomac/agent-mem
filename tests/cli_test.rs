@@ -721,3 +721,40 @@ fn test_init_imports_cloned_rules_before_first_write() {
     drop(store);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn test_parse_stats() {
+    assert_eq!(parse_args(vec!["agent-mem".into(), "stats".into()]).unwrap(), Command::Stats);
+}
+
+#[test]
+fn test_stats_runs_without_project_memory() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_stats_empty_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let result = agent_mem::cli::execute_command(Command::Stats, &dir);
+    assert!(result.is_ok());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_stats_reports_zombies_and_registry() {
+    use agent_mem::store::Store;
+    let dir = std::env::temp_dir().join(format!("agent_mem_stats_zombies_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    agent_mem::init::init_project(&dir).unwrap();
+    let db = dir.join(".agent-mem/mem.db");
+    {
+        let mut store = Store::open(&db, true).unwrap();
+        store
+            .set_entry("arch/gone", "Anchored to a deleted file", Some("src/deleted_file.rs:1"), None)
+            .unwrap();
+    }
+    agent_mem::cli::execute_command(Command::Stats, &dir).unwrap();
+    {
+        let mut store = Store::open(&db, true).unwrap();
+        let zombies = store.clean_zombies(&dir, true).unwrap();
+        assert_eq!(zombies.len(), 1);
+        assert_eq!(zombies[0].key, "arch/gone");
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

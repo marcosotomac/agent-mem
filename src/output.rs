@@ -687,6 +687,9 @@ pub fn print_help() {
             "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
         );
         println!(
+            "    {ACCENT}stats{RESET}                   Adoption overview: rules, zombies, sessions, and registry"
+        );
+        println!(
             "    {ACCENT}hook{RESET}     {MUTED}post-commit [--dry-run]{RESET} Ephemeral git lifecycle auto-capture"
         );
         println!(
@@ -699,7 +702,7 @@ pub fn print_help() {
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, history, clean, find, dump, context, session add, session list, hook post-commit, sync [--accept-conflicts], semantic, mcp [--read-only], mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, history, clean, find, dump, context, session add, session list, hook post-commit, sync [--accept-conflicts], semantic, mcp [--read-only], mcp install, doctor, stats, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }
@@ -1001,6 +1004,108 @@ pub fn print_projects(projects: &[crate::registry::ProjectRecord]) {
                 p.sessions_count,
                 p.canonical_path,
                 p.git_remote.as_deref().unwrap_or("-")
+            );
+        }
+    }
+}
+
+pub fn print_stats(
+    root: &std::path::Path,
+    project: Option<&crate::store::StoreStats>,
+    zombies: Option<usize>,
+    db_bytes: u64,
+    projects: &[crate::registry::ProjectRecord],
+) {
+    let is_tty = io::stdout().is_terminal();
+    let name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+
+    if is_tty {
+        println!();
+        println!(
+            "  {ACCENT}agent-mem stats{RESET}  {SUBTLE}·{RESET}  {MUTED}project: {}{RESET}",
+            name
+        );
+        println!("  {MUTED}{}{RESET}", root.display());
+        println!();
+        match project {
+            Some(s) => {
+                let zombie_note = match zombies {
+                    Some(0) | None => String::new(),
+                    Some(n) => format!(
+                        "  {AMBER}· {} zombie{} with missing anchors{RESET}",
+                        n,
+                        if n == 1 { "" } else { "s" }
+                    ),
+                };
+                println!(
+                    "    {EMERALD}●{RESET}  {MUTED}rules{RESET}      {ACCENT}{} active{RESET}  {SUBTLE}·{RESET}  {MUTED}{} archived{RESET}{zombie_note}",
+                    s.active_rules_count, s.archived_rules_count
+                );
+                println!(
+                    "    {EMERALD}●{RESET}  {MUTED}sessions{RESET}   {ACCENT}{}{RESET}",
+                    s.sessions_count
+                );
+                println!(
+                    "    {SUBTLE}◆{RESET}  {MUTED}database{RESET}   {MUTED}{} KB  ·  schema v{}  ·  {}{RESET}",
+                    db_bytes.div_ceil(1024),
+                    s.user_version,
+                    s.journal_mode
+                );
+            }
+            None => {
+                println!(
+                    "    {AMBER}◇{RESET}  {MUTED}no project memory here  ·  run 'agent-mem init'{RESET}"
+                );
+            }
+        }
+        println!();
+        println!(
+            "  {MUTED}canonical registry ({} registered){RESET}",
+            projects.len()
+        );
+        if projects.is_empty() {
+            println!(
+                "    {SUBTLE}·{RESET}  {MUTED}no projects registered yet{RESET}"
+            );
+        }
+        for p in projects {
+            let last_str = format_relative_time(p.last_accessed);
+            println!(
+                "    {EMERALD}▶{RESET}  {ACCENT}{:<20}{RESET}  {MUTED}{:>2} active{RESET}  {SUBTLE}·{RESET}  {MUTED}{:>2} sessions{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                p.name, p.rules_count, p.sessions_count, last_str
+            );
+            println!("       {SUBTLE}path:{RESET} {MUTED}{}{RESET}", p.canonical_path);
+        }
+        println!();
+    } else {
+        match project {
+            Some(s) => println!(
+                "project\t{}\tpath={}\trules_active={}\trules_archived={}\tzombies={}\tsessions={}\tdb_bytes={}\tschema=v{}\tjournal={}",
+                name,
+                root.display(),
+                s.active_rules_count,
+                s.archived_rules_count,
+                zombies.unwrap_or(0),
+                s.sessions_count,
+                db_bytes,
+                s.user_version,
+                s.journal_mode
+            ),
+            None => println!(
+                "project\t{}\tpath={}\tuninitialized=true",
+                name,
+                root.display()
+            ),
+        }
+        println!("registry_projects={}", projects.len());
+        println!("NAME\tACTIVE\tARCHIVED\tSESSIONS\tLAST_ACCESSED\tPATH");
+        for p in projects {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                p.name, p.rules_count, p.archived_count, p.sessions_count, p.last_accessed, p.canonical_path
             );
         }
     }
