@@ -281,7 +281,11 @@ fn test_parse_args() {
     // Doctor
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "doctor".into()]).unwrap(),
-        Command::Doctor
+        Command::Doctor { fix: false }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "doctor".into(), "--fix".into()]).unwrap(),
+        Command::Doctor { fix: true }
     );
 
     // Tui / Ui

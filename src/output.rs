@@ -684,7 +684,7 @@ pub fn print_help() {
             "    {ACCENT}mcp{RESET}     {MUTED}uninstall [client]{RESET} Remove from AI editors (or 'all')"
         );
         println!(
-            "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
+            "    {ACCENT}doctor{RESET}  {MUTED}[--fix]{RESET}          Verify or repair storage, git hooks, and registry"
         );
         println!(
             "    {ACCENT}stats{RESET}                   Adoption overview: rules, zombies, sessions, and registry"
@@ -849,7 +849,7 @@ pub fn print_doctor(
                 );
             } else {
                 println!(
-                    "    {SUBTLE}·{RESET}  {MUTED}hooks{RESET}     {MUTED}none installed  ·  run 'agent-mem init'{RESET}"
+                    "    {SUBTLE}·{RESET}  {MUTED}hooks{RESET}     {MUTED}none installed  ·  run 'agent-mem doctor --fix'{RESET}"
                 );
             }
             if git_stats.rules_file_exists {
