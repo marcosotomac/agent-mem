@@ -699,10 +699,13 @@ pub fn print_help() {
             "    {ACCENT}projects{RESET} {MUTED}[prune]{RESET}        List canonical project registry & anti-collision status"
         );
         println!("    {ACCENT}tui{RESET}                     Launch interactive terminal explorer");
+        println!(
+            "    {ACCENT}tutor{RESET}   {MUTED}[<step>] [--non-interactive]{RESET}  Interactive onboarding tutorial"
+        );
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, history, clean, find, dump, context, session add, session list, hook post-commit, sync [--accept-conflicts], semantic, mcp [--read-only], mcp install, doctor, stats, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, history, clean, find, dump, context, session add, session list, hook post-commit, sync [--accept-conflicts], semantic, mcp [--read-only], mcp install, doctor, stats, projects, tui, tutor",
             env!("CARGO_PKG_VERSION")
         );
     }

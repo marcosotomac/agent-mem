@@ -135,6 +135,10 @@ pub enum Command {
         client: Option<String>,
     },
     HooksStatus,
+    Tutor {
+        step: Option<usize>,
+        non_interactive: bool,
+    },
     Tui,
     Help,
     Version,
@@ -516,6 +520,23 @@ where
             }
         }
         "--mcp" => Ok(Command::Mcp { read_only: false }),
+        "tutor" => {
+            let mut step = None;
+            let mut non_interactive = false;
+            for arg in &args[2..] {
+                if arg == "--non-interactive" || arg == "-n" {
+                    non_interactive = true;
+                } else if let Ok(s) = arg.parse::<usize>() {
+                    step = Some(s);
+                } else if arg.starts_with("--step=") {
+                    step = arg.split('=').nth(1).and_then(|s| s.parse().ok());
+                }
+            }
+            Ok(Command::Tutor {
+                step,
+                non_interactive,
+            })
+        }
         "tui" | "ui" => Ok(Command::Tui),
         "doctor" => Ok(Command::Doctor {
             fix: args.iter().skip(2).any(|arg| arg == "--fix"),
@@ -645,6 +666,9 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     "TUI support is not compiled into this build of agent-mem. Reinstall with '--features tui'.".to_string(),
                 ))
             }
+        }
+        Command::Tutor { step, non_interactive } => {
+            crate::tutor::run_tutor(root, step, non_interactive)
         }
         Command::Doctor { fix } => {
             if fix {
@@ -1150,6 +1174,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 | Command::HooksInstall { .. }
                 | Command::HooksUninstall { .. }
                 | Command::HooksStatus
+                | Command::Tutor { .. }
                 | Command::Tui
                 | Command::Mcp { .. }
                 | Command::McpInstall { .. }

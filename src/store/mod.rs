@@ -759,62 +759,48 @@ impl Store {
         };
 
         #[cfg(feature = "semantic-local")]
-        if !Self::has_strong_lexical_evidence(trimmed, &relaxed_results)
-            && let Ok(semantic_results) = self.find_semantic(trimmed)
-            && !semantic_results.is_empty()
         {
-            return Ok(Self::merge_semantic_results(
-                semantic_results,
-                relaxed_results,
-            ));
+            // Run semantic search in parallel with relaxed BM25 when no strict match
+            // RRF fusion combines both signals for better recall
+            if let Ok(semantic_results) = self.find_semantic(trimmed)
+                && !semantic_results.is_empty()
+            {
+                return Ok(Self::merge_semantic_results(
+                    semantic_results,
+                    relaxed_results,
+                ));
+            }
         }
 
         Ok(relaxed_results)
     }
 
     #[cfg(feature = "semantic-local")]
-    fn lexical_terms(raw: &str) -> Vec<String> {
-        const STOP_WORDS: &[&str] = &[
-            "and", "are", "con", "como", "del", "for", "las", "los", "para", "por", "que", "the",
-            "una", "use", "using", "with",
-        ];
-        let mut terms = Vec::new();
-        for token in raw.split(|c: char| !c.is_alphanumeric()) {
-            let normalized = token.to_lowercase();
-            if normalized.chars().count() >= 3
-                && !STOP_WORDS.contains(&normalized.as_str())
-                && !terms.contains(&normalized)
-            {
-                terms.push(normalized);
-            }
-        }
-        terms
-    }
+    fn rrf_fuse(
+        list_a: &[RuleRecord],
+        list_b: &[RuleRecord],
+        k: usize,
+    ) -> Vec<RuleRecord> {
+        const RRF_K: usize = 60;
+        use std::collections::HashMap;
+        let mut scores: HashMap<String, (f64, RuleRecord)> = HashMap::new();
 
-    #[cfg(feature = "semantic-local")]
-    fn has_strong_lexical_evidence(query: &str, results: &[RuleRecord]) -> bool {
-        if results.is_empty() {
-            return false;
+        for (rank, rule) in list_a.iter().enumerate() {
+            scores
+                .entry(rule.key.clone())
+                .and_modify(|(s, _)| *s += 1.0 / (RRF_K + rank + 1) as f64)
+                .or_insert((1.0 / (RRF_K + rank + 1) as f64, rule.clone()));
         }
-        let terms = Self::lexical_terms(query);
-        if terms.len() <= 1 {
-            return true;
+        for (rank, rule) in list_b.iter().enumerate() {
+            scores
+                .entry(rule.key.clone())
+                .and_modify(|(s, _)| *s += 1.0 / (RRF_K + rank + 1) as f64)
+                .or_insert((1.0 / (RRF_K + rank + 1) as f64, rule.clone()));
         }
-        results.iter().take(3).any(|rule| {
-            let haystack = format!(
-                "{} {} {} {}",
-                rule.key,
-                rule.val,
-                rule.anchor.as_deref().unwrap_or_default(),
-                rule.kind
-            )
-            .to_lowercase();
-            let matched = terms
-                .iter()
-                .filter(|term| haystack.contains(term.as_str()))
-                .count();
-            matched >= 2 && matched * 2 >= terms.len()
-        })
+
+        let mut items: Vec<_> = scores.into_values().collect();
+        items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        items.into_iter().take(k).map(|(_, rule)| rule).collect()
     }
 
     #[cfg(feature = "semantic-local")]
@@ -822,12 +808,6 @@ impl Store {
         semantic: Vec<RuleRecord>,
         lexical: Vec<RuleRecord>,
     ) -> Vec<RuleRecord> {
-        let mut seen = HashSet::with_capacity(10);
-        semantic
-            .into_iter()
-            .chain(lexical)
-            .filter(|rule| seen.insert(rule.key.clone()))
-            .take(10)
-            .collect()
+        Self::rrf_fuse(&semantic, &lexical, 10)
     }
 }

@@ -11,6 +11,7 @@ pub mod security;
 pub mod store;
 #[cfg(feature = "tui")]
 pub mod tui;
+pub mod tutor;
 
 pub use error::{Error, Result};
 pub use mcp::McpServer;
