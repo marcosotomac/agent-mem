@@ -396,16 +396,19 @@ fn test_read_does_not_mutate_uninitialized_directory() {
         key: "some_key".into(),
     };
     let res = agent_mem::cli::execute_command(cmd, &temp_dir);
-    assert!(matches!(res, Err(agent_mem::error::Error::NotInitialized)));
+    let err_msg = res.unwrap_err().to_string();
+    assert!(err_msg.contains("no agent-mem project memory is initialized here"), "got: {err_msg}");
+    assert!(err_msg.contains("agent-mem init"), "got: {err_msg}");
     assert!(!temp_dir.join(".agent-mem").exists());
 
     // 2. Dump on uninitialized directory must also fail without creating .agent-mem
     let dump_cmd = Command::Dump;
     let dump_res = agent_mem::cli::execute_command(dump_cmd, &temp_dir);
-    assert!(matches!(
-        dump_res,
-        Err(agent_mem::error::Error::NotInitialized)
-    ));
+    let dump_err = dump_res.unwrap_err().to_string();
+    assert!(
+        dump_err.contains("no agent-mem project memory is initialized here"),
+        "got: {dump_err}"
+    );
     assert!(!temp_dir.join(".agent-mem").exists());
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -756,5 +759,77 @@ fn test_stats_reports_zombies_and_registry() {
         assert_eq!(zombies.len(), 1);
         assert_eq!(zombies[0].key, "arch/gone");
     }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_not_initialized_error_distinguishes_git_and_bare_dirs() {
+    let git_dir = std::env::temp_dir().join(format!("agent_mem_ni_git_{}", std::process::id()));
+    fs::create_dir_all(git_dir.join(".git")).unwrap();
+    let err = agent_mem::cli::not_initialized_error(&git_dir).to_string();
+    assert!(err.contains("git repository"), "got: {err}");
+    assert!(err.contains("agent-mem init"));
+    fs::remove_dir_all(git_dir).unwrap();
+
+    let plain_dir = std::env::temp_dir().join(format!("agent_mem_ni_plain_{}", std::process::id()));
+    fs::create_dir_all(&plain_dir).unwrap();
+    let err = agent_mem::cli::not_initialized_error(&plain_dir).to_string();
+    assert!(err.contains("path:"), "got: {err}");
+    assert!(err.contains("agent-mem init"));
+    assert!(!err.contains("git repository"), "got: {err}");
+    fs::remove_dir_all(plain_dir).unwrap();
+}
+
+#[test]
+fn test_not_initialized_error_suggests_most_recent_project() {
+    let lock = std::sync::Mutex::new(());
+    let _guard = lock.lock().unwrap();
+    let global_dir = std::env::temp_dir().join(format!("agent_mem_ni_reg_{}", std::process::id()));
+    fs::create_dir_all(global_dir.clone()).unwrap();
+    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
+
+    let project_dir = std::env::temp_dir().join(format!("agent_mem_ni_proj_{}", std::process::id()));
+    fs::create_dir_all(project_dir.join(".agent-mem")).unwrap();
+    fs::write(project_dir.join(".agent-mem/mem.db"), b"placeholder").unwrap();
+
+    let record = agent_mem::registry::ProjectRecord {
+        id: "deadbeef".into(),
+        name: "wired-project".into(),
+        canonical_path: project_dir.to_string_lossy().to_string(),
+        git_remote: None,
+        last_accessed: 1_000_000,
+        rules_count: 7,
+        archived_count: 0,
+        sessions_count: 2,
+        db_size_bytes: 4096,
+    };
+    let mut registry = agent_mem::registry::ProjectRegistry::default();
+    registry.projects.push(record);
+    registry.save().unwrap();
+
+    let elsewhere = std::env::temp_dir().join(format!("agent_mem_ni_else_{}", std::process::id()));
+    fs::create_dir_all(&elsewhere).unwrap();
+    let err = agent_mem::cli::not_initialized_error(&elsewhere).to_string();
+    assert!(err.contains("most recent project: wired-project (7 active rules)"), "got: {err}");
+    assert!(err.contains("cd ") && err.contains("agent-mem context"), "got: {err}");
+
+    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
+    fs::remove_dir_all(global_dir).unwrap();
+    fs::remove_dir_all(project_dir).unwrap();
+    fs::remove_dir_all(elsewhere).unwrap();
+}
+
+#[test]
+fn test_execute_command_guides_when_uninitialized() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_ni_exec_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let err = agent_mem::cli::execute_command(
+        Command::Get { key: "any".into() },
+        &dir,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no agent-mem project memory is initialized here"), "got: {err}");
+    assert!(err.contains("agent-mem init"), "got: {err}");
     fs::remove_dir_all(dir).unwrap();
 }
