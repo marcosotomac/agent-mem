@@ -112,7 +112,9 @@ pub enum Command {
     McpUninstall {
         client: Option<String>,
     },
-    Doctor,
+    Doctor {
+        fix: bool,
+    },
     Stats,
     Projects {
         prune: bool,
@@ -156,6 +158,7 @@ impl Command {
                 | Command::SemanticBuild
                 | Command::SemanticClear
                 | Command::HookPostCommit { dry_run: false }
+                | Command::Doctor { fix: true }
         )
     }
 }
@@ -514,7 +517,9 @@ where
         }
         "--mcp" => Ok(Command::Mcp { read_only: false }),
         "tui" | "ui" => Ok(Command::Tui),
-        "doctor" => Ok(Command::Doctor),
+        "doctor" => Ok(Command::Doctor {
+            fix: args.iter().skip(2).any(|arg| arg == "--fix"),
+        }),
         "stats" => Ok(Command::Stats),
         "projects" => {
             let prune = args
@@ -641,7 +646,19 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 ))
             }
         }
-        Command::Doctor => {
+        Command::Doctor { fix } => {
+            if fix {
+                if crate::init::resolve_git_dir(root).is_some()
+                    || root.join(".agent-mem").join("mem.db").exists()
+                {
+                    let _ = init_project(root)?;
+                }
+                let mut registry = crate::registry::ProjectRegistry::load()?;
+                let pruned = registry.prune()?;
+                println!(
+                    "doctor fix: repaired project integration; pruned {pruned} stale project(s)"
+                );
+            }
             let db_path = root.join(".agent-mem").join("mem.db");
             let store_stats = if db_path.exists() {
                 Store::open(&db_path, false)
@@ -1125,7 +1142,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 Command::Init { .. }
                 | Command::Help
                 | Command::Version
-                | Command::Doctor
+                | Command::Doctor { .. }
                 | Command::Stats
                 | Command::Projects { .. }
                 | Command::HookPostCommit { .. }
