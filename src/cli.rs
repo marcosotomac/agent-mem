@@ -121,11 +121,48 @@ impl Command {
     }
 }
 
+/// Build an actionable error for commands that need project memory but were
+/// run where `.agent-mem/mem.db` does not exist. Distinguishes an
+/// uninitialized git repository from a bare directory and, when the global
+/// registry has a usable project, points at the most recently accessed one.
+pub fn not_initialized_error(root: &Path) -> Error {
+    let mut msg = String::from("no agent-mem project memory is initialized here.");
+    msg.push_str(&format!("\n  path: {}", root.display()));
+    if crate::init::resolve_git_dir(root).is_some() {
+        msg.push_str(
+            "\n  this is a git repository - run 'agent-mem init' to create project memory here.",
+        );
+    } else {
+        msg.push_str(
+            "\n  run 'agent-mem init' inside a repository to create project memory here.",
+        );
+    }
+    if let Ok(registry) = crate::registry::ProjectRegistry::load() {
+        let candidates = registry
+            .projects
+            .iter()
+            .filter(|p| {
+                Path::new(&p.canonical_path)
+                    .join(".agent-mem")
+                    .join("mem.db")
+                    .exists()
+            })
+            .collect::<Vec<_>>();
+        // Records are kept sorted by last_accessed (descending) on register.
+        if let Some(nearest) = candidates.first() {
+            msg.push_str(&format!(
+                "\n  most recent project: {} ({} active rules)\n    {}\n  use: cd {} && agent-mem context",
+                nearest.name, nearest.rules_count, nearest.canonical_path, nearest.canonical_path
+            ));
+        }
+    }
+    Error::Usage(msg)
+}
+
 pub fn parse_args<I>(args: I) -> Result<Command>
 where
     I: IntoIterator<Item = String>,
-{
-    let args: Vec<String> = args.into_iter().collect();
+{    let args: Vec<String> = args.into_iter().collect();
     if args.len() < 2 {
         return Ok(Command::Help);
     }
@@ -582,6 +619,9 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
         }
         _ => {
             let db_path = root.join(".agent-mem").join("mem.db");
+            if !db_path.exists() {
+                return Err(not_initialized_error(root));
+            }
             let mut store = Store::open(&db_path, cmd.is_write())?;
 
             match cmd {
