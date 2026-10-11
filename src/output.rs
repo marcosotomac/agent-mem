@@ -1067,9 +1067,7 @@ pub fn print_stats(
             projects.len()
         );
         if projects.is_empty() {
-            println!(
-                "    {SUBTLE}·{RESET}  {MUTED}no projects registered yet{RESET}"
-            );
+            println!("    {SUBTLE}·{RESET}  {MUTED}no projects registered yet{RESET}");
         }
         for p in projects {
             let last_str = format_relative_time(p.last_accessed);
@@ -1077,7 +1075,10 @@ pub fn print_stats(
                 "    {EMERALD}▶{RESET}  {ACCENT}{:<20}{RESET}  {MUTED}{:>2} active{RESET}  {SUBTLE}·{RESET}  {MUTED}{:>2} sessions{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
                 p.name, p.rules_count, p.sessions_count, last_str
             );
-            println!("       {SUBTLE}path:{RESET} {MUTED}{}{RESET}", p.canonical_path);
+            println!(
+                "       {SUBTLE}path:{RESET} {MUTED}{}{RESET}",
+                p.canonical_path
+            );
         }
         println!();
     } else {
@@ -1105,8 +1106,165 @@ pub fn print_stats(
         for p in projects {
             println!(
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                p.name, p.rules_count, p.archived_count, p.sessions_count, p.last_accessed, p.canonical_path
+                p.name,
+                p.rules_count,
+                p.archived_count,
+                p.sessions_count,
+                p.last_accessed,
+                p.canonical_path
             );
+        }
+    }
+}
+
+/// Byte ceiling for injected session context. Session hooks run on every
+/// editor startup; the budget keeps the cost bounded even on rule-heavy
+/// projects.
+pub const SESSION_CONTEXT_BUDGET_BYTES: usize = 4096;
+
+/// Render the session-start injection payload with a hard byte budget.
+/// Mirrors print_context_filtered's line format so injected context and the
+/// `context` command stay visually identical.
+pub fn render_session_context(
+    rules: &[crate::store::RuleRecord],
+    relations: &[crate::store::RelationRecord],
+    sessions: &[(i64, String)],
+) -> String {
+    const TRUNCATION_NOTICE: &str = "\n...[truncated: session context budget]";
+    let budget = SESSION_CONTEXT_BUDGET_BYTES.saturating_sub(TRUNCATION_NOTICE.len());
+    let mut out = String::new();
+    let mut truncated = false;
+
+    let mut push_line = |out: &mut String, line: String| {
+        let cost = line.len() + 1;
+        if out.len() + cost > budget {
+            truncated = true;
+            return;
+        }
+        out.push_str(&line);
+        out.push('\n');
+    };
+
+    for r in rules {
+        let kind_badge = if r.kind != "rule" {
+            format!("[{}] ", r.kind)
+        } else {
+            String::new()
+        };
+        match &r.anchor {
+            Some(anchor) => push_line(
+                &mut out,
+                format!("{}{}: {} ({})", kind_badge, r.key, r.val, anchor),
+            ),
+            None => push_line(&mut out, format!("{}{}: {}", kind_badge, r.key, r.val)),
+        }
+    }
+    for rel in relations {
+        push_line(
+            &mut out,
+            format!(
+                "{} -> {} -> {}",
+                rel.source_key, rel.rel_type, rel.target_key
+            ),
+        );
+    }
+    // Only the most recent checkpoints matter at session start.
+    for (_id, summary) in sessions.iter().take(3) {
+        let mut line = summary.clone();
+        if line.len() > 200 {
+            line.truncate(197);
+            line.push_str("...");
+        }
+        push_line(&mut out, format!("[session] {line}"));
+    }
+
+    if out.is_empty() {
+        return String::new();
+    }
+    if truncated {
+        out.push_str(TRUNCATION_NOTICE);
+    }
+    out
+}
+
+pub fn print_hooks_install(results: &[crate::lifecycle::LifecycleResult]) {
+    let is_tty = io::stdout().is_terminal();
+    if results.is_empty() {
+        if is_tty {
+            println!(
+                "  {SUBTLE}◇{RESET}  {MUTED}no supported clients detected  ·  run 'agent-mem hooks install [zcode|claude-code]'{RESET}"
+            );
+        } else {
+            println!("no supported clients detected");
+        }
+        return;
+    }
+    for r in results {
+        let status = if r.configured {
+            "already configured"
+        } else {
+            "configured"
+        };
+        if is_tty {
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}{status}{RESET}  {ACCENT}SessionStart{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                r.client.display_name(),
+                r.path.display()
+            );
+        } else {
+            println!("{} {} in {}", status, r.client.name(), r.path.display());
+        }
+    }
+}
+
+pub fn print_hooks_uninstall(results: &[crate::lifecycle::LifecycleResult]) {
+    let is_tty = io::stdout().is_terminal();
+    if results.is_empty() {
+        if is_tty {
+            println!("  {SUBTLE}◇{RESET}  {MUTED}no session hooks were registered{RESET}");
+        } else {
+            println!("no session hooks were registered");
+        }
+        return;
+    }
+    for r in results {
+        if is_tty {
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}removed{RESET}  {ACCENT}SessionStart{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                r.client.display_name()
+            );
+        } else {
+            println!("removed {}", r.client.name());
+        }
+    }
+}
+
+pub fn print_hooks_status(
+    status: &[(
+        crate::lifecycle::LifecycleClient,
+        bool,
+        Option<std::path::PathBuf>,
+    )],
+) {
+    let is_tty = io::stdout().is_terminal();
+    for (client, configured, path) in status {
+        let shown_path = path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        if is_tty {
+            let (dot, state) = if *configured {
+                (EMERALD, "registered")
+            } else {
+                (SUBTLE, "not registered")
+            };
+            println!(
+                "  {dot}●{RESET}  {ACCENT}{:<12}{RESET}  {MUTED}{state}{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                client.display_name(),
+                shown_path
+            );
+        } else {
+            println!("{}\t{}\t{}", client.name(), *configured as u8, shown_path);
         }
     }
 }

@@ -444,7 +444,7 @@ pub fn strip_json_comments(input: &str) -> String {
 }
 
 /// Detect best command string for agent-mem executable
-fn resolve_binary_command() -> String {
+pub fn resolve_binary_command() -> String {
     if let Ok(exe_path) = env::current_exe()
         && exe_path.exists()
         && let Ok(canonical) = exe_path.canonicalize()
@@ -471,7 +471,7 @@ fn backup_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}.agent-mem.bak"))
 }
 
-fn write_config_safely(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_config_safely(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

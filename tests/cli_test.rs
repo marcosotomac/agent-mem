@@ -397,7 +397,10 @@ fn test_read_does_not_mutate_uninitialized_directory() {
     };
     let res = agent_mem::cli::execute_command(cmd, &temp_dir);
     let err_msg = res.unwrap_err().to_string();
-    assert!(err_msg.contains("no agent-mem project memory is initialized here"), "got: {err_msg}");
+    assert!(
+        err_msg.contains("no agent-mem project memory is initialized here"),
+        "got: {err_msg}"
+    );
     assert!(err_msg.contains("agent-mem init"), "got: {err_msg}");
     assert!(!temp_dir.join(".agent-mem").exists());
 
@@ -727,7 +730,10 @@ fn test_init_imports_cloned_rules_before_first_write() {
 
 #[test]
 fn test_parse_stats() {
-    assert_eq!(parse_args(vec!["agent-mem".into(), "stats".into()]).unwrap(), Command::Stats);
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "stats".into()]).unwrap(),
+        Command::Stats
+    );
 }
 
 #[test]
@@ -749,7 +755,12 @@ fn test_stats_reports_zombies_and_registry() {
     {
         let mut store = Store::open(&db, true).unwrap();
         store
-            .set_entry("arch/gone", "Anchored to a deleted file", Some("src/deleted_file.rs:1"), None)
+            .set_entry(
+                "arch/gone",
+                "Anchored to a deleted file",
+                Some("src/deleted_file.rs:1"),
+                None,
+            )
             .unwrap();
     }
     agent_mem::cli::execute_command(Command::Stats, &dir).unwrap();
@@ -788,7 +799,8 @@ fn test_not_initialized_error_suggests_most_recent_project() {
     fs::create_dir_all(global_dir.clone()).unwrap();
     unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
 
-    let project_dir = std::env::temp_dir().join(format!("agent_mem_ni_proj_{}", std::process::id()));
+    let project_dir =
+        std::env::temp_dir().join(format!("agent_mem_ni_proj_{}", std::process::id()));
     fs::create_dir_all(project_dir.join(".agent-mem")).unwrap();
     fs::write(project_dir.join(".agent-mem/mem.db"), b"placeholder").unwrap();
 
@@ -810,8 +822,14 @@ fn test_not_initialized_error_suggests_most_recent_project() {
     let elsewhere = std::env::temp_dir().join(format!("agent_mem_ni_else_{}", std::process::id()));
     fs::create_dir_all(&elsewhere).unwrap();
     let err = agent_mem::cli::not_initialized_error(&elsewhere).to_string();
-    assert!(err.contains("most recent project: wired-project (7 active rules)"), "got: {err}");
-    assert!(err.contains("cd ") && err.contains("agent-mem context"), "got: {err}");
+    assert!(
+        err.contains("most recent project: wired-project (7 active rules)"),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("cd ") && err.contains("agent-mem context"),
+        "got: {err}"
+    );
 
     unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
     fs::remove_dir_all(global_dir).unwrap();
@@ -823,13 +841,13 @@ fn test_not_initialized_error_suggests_most_recent_project() {
 fn test_execute_command_guides_when_uninitialized() {
     let dir = std::env::temp_dir().join(format!("agent_mem_ni_exec_{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let err = agent_mem::cli::execute_command(
-        Command::Get { key: "any".into() },
-        &dir,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("no agent-mem project memory is initialized here"), "got: {err}");
+    let err = agent_mem::cli::execute_command(Command::Get { key: "any".into() }, &dir)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("no agent-mem project memory is initialized here"),
+        "got: {err}"
+    );
     assert!(err.contains("agent-mem init"), "got: {err}");
     fs::remove_dir_all(dir).unwrap();
 }

@@ -94,6 +94,16 @@ pub enum Command {
     HookPostCommit {
         dry_run: bool,
     },
+    HookSessionStart {
+        json: bool,
+    },
+    HooksInstall {
+        client: Option<String>,
+    },
+    HooksUninstall {
+        client: Option<String>,
+    },
+    HooksStatus,
     Tui,
     Help,
     Version,
@@ -133,9 +143,7 @@ pub fn not_initialized_error(root: &Path) -> Error {
             "\n  this is a git repository - run 'agent-mem init' to create project memory here.",
         );
     } else {
-        msg.push_str(
-            "\n  run 'agent-mem init' inside a repository to create project memory here.",
-        );
+        msg.push_str("\n  run 'agent-mem init' inside a repository to create project memory here.");
     }
     if let Ok(registry) = crate::registry::ProjectRegistry::load() {
         let candidates = registry
@@ -162,7 +170,8 @@ pub fn not_initialized_error(root: &Path) -> Error {
 pub fn parse_args<I>(args: I) -> Result<Command>
 where
     I: IntoIterator<Item = String>,
-{    let args: Vec<String> = args.into_iter().collect();
+{
+    let args: Vec<String> = args.into_iter().collect();
     if args.len() < 2 {
         return Ok(Command::Help);
     }
@@ -460,7 +469,7 @@ where
         "hook" => {
             if args.len() < 3 {
                 return Err(Error::Usage(
-                    "Usage: agent-mem hook post-commit [--dry-run]".to_string(),
+                    "Usage: agent-mem hook [post-commit|session-start] [--dry-run]".to_string(),
                 ));
             }
             match args[2].as_str() {
@@ -468,12 +477,31 @@ where
                     let dry_run = args.iter().skip(3).any(|a| a == "--dry-run" || a == "-n");
                     Ok(Command::HookPostCommit { dry_run })
                 }
+                "session-start" => Ok(Command::HookSessionStart {
+                    json: args
+                        .iter()
+                        .skip(3)
+                        .any(|a| a == "--json" || a == "--format=json"),
+                }),
                 other => Err(Error::Usage(format!(
-                    "Unknown hook subcommand '{}'. Usage: agent-mem hook post-commit [--dry-run]",
+                    "Unknown hook subcommand '{}'. Usage: agent-mem hook [post-commit|session-start]",
                     other
                 ))),
             }
         }
+        "hooks" => match args.get(2).map(String::as_str) {
+            Some("install") => Ok(Command::HooksInstall {
+                client: args.get(3).cloned(),
+            }),
+            Some("uninstall") | Some("remove") | Some("rm") => Ok(Command::HooksUninstall {
+                client: args.get(3).cloned(),
+            }),
+            Some("status") | None => Ok(Command::HooksStatus),
+            other => Err(Error::Usage(format!(
+                "Unknown hooks subcommand '{}'. Usage: agent-mem hooks [install|uninstall|status] [zcode|claude-code]",
+                other.unwrap_or("")
+            ))),
+        },
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
         unknown => Err(Error::Usage(format!(
@@ -615,6 +643,50 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             if let Some(report) = crate::hook::run_post_commit(root, dry_run)? {
                 crate::output::print_hook_report(&report);
             }
+            Ok(())
+        }
+        Command::HookSessionStart { json } => {
+            // Session hooks must never break an editor session: stay silent,
+            // read-only, and cheap when project memory is absent.
+            let db_path = root.join(".agent-mem").join("mem.db");
+            if !db_path.exists() {
+                return Ok(());
+            }
+            let Ok(store) = Store::open(&db_path, false) else {
+                return Ok(());
+            };
+            let Ok((rules, rels, sessions)) = store.context_filtered(None, None, 12) else {
+                return Ok(());
+            };
+            let text = crate::output::render_session_context(&rules, &rels, &sessions);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "SessionStart",
+                            "additionalContext": text,
+                        }
+                    })
+                );
+            } else {
+                print!("{text}");
+            }
+            Ok(())
+        }
+        Command::HooksInstall { client } => {
+            let results = crate::lifecycle::install_session_hooks(client.as_deref())?;
+            crate::output::print_hooks_install(&results);
+            Ok(())
+        }
+        Command::HooksUninstall { client } => {
+            let results = crate::lifecycle::uninstall_session_hooks(client.as_deref())?;
+            crate::output::print_hooks_uninstall(&results);
+            Ok(())
+        }
+        Command::HooksStatus => {
+            let status = crate::lifecycle::session_hooks_status()?;
+            crate::output::print_hooks_status(&status);
             Ok(())
         }
         _ => {
@@ -845,6 +917,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 | Command::Stats
                 | Command::Projects { .. }
                 | Command::HookPostCommit { .. }
+                | Command::HookSessionStart { .. }
+                | Command::HooksInstall { .. }
+                | Command::HooksUninstall { .. }
+                | Command::HooksStatus
                 | Command::Tui
                 | Command::Mcp { .. }
                 | Command::McpInstall { .. }

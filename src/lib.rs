@@ -3,6 +3,7 @@ pub mod error;
 pub mod hook;
 pub mod init;
 pub mod installer;
+pub mod lifecycle;
 pub mod mcp;
 pub mod output;
 pub mod registry;
