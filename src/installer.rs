@@ -463,7 +463,7 @@ pub fn resolve_binary_command() -> String {
     "agent-mem".to_string()
 }
 
-fn backup_path(path: &Path) -> PathBuf {
+pub(crate) fn backup_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
