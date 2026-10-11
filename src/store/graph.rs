@@ -9,6 +9,64 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 impl Store {
+    fn context_key_is_trusted(&self, key: &str) -> Result<bool> {
+        let trust = self.conn.query_row(
+            "SELECT trust FROM memory_metadata WHERE memory_key = ?1;",
+            params![key],
+            |row| row.get::<_, String>(0),
+        );
+        match trust {
+            Ok(value) => Ok(value != super::TRUST_UNTRUSTED),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(true),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Remove quarantined memories and relations that touch them before
+    /// context is injected into an agent prompt. Explicit search/get APIs keep
+    /// exposing these records so a human can review and promote them.
+    pub fn filter_trusted_context(
+        &self,
+        rules: Vec<RuleRecord>,
+        relations: Vec<RelationRecord>,
+    ) -> Result<(Vec<RuleRecord>, Vec<RelationRecord>)> {
+        let mut trusted_keys = HashSet::with_capacity(rules.len());
+        let mut trusted_rules = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if self.context_key_is_trusted(&rule.key)? {
+                trusted_keys.insert(rule.key.clone());
+                trusted_rules.push(rule);
+            }
+        }
+
+        let mut endpoint_trust = HashMap::new();
+        let mut trusted_relations = Vec::with_capacity(relations.len());
+        for relation in relations {
+            let source_trusted = if trusted_keys.contains(&relation.source_key) {
+                true
+            } else if let Some(value) = endpoint_trust.get(&relation.source_key) {
+                *value
+            } else {
+                let value = self.context_key_is_trusted(&relation.source_key)?;
+                endpoint_trust.insert(relation.source_key.clone(), value);
+                value
+            };
+            let target_trusted = if trusted_keys.contains(&relation.target_key) {
+                true
+            } else if let Some(value) = endpoint_trust.get(&relation.target_key) {
+                *value
+            } else {
+                let value = self.context_key_is_trusted(&relation.target_key)?;
+                endpoint_trust.insert(relation.target_key.clone(), value);
+                value
+            };
+            if source_trusted && target_trusted {
+                trusted_relations.push(relation);
+            }
+        }
+        Ok((trusted_rules, trusted_relations))
+    }
+
     fn select_diverse_context_keys(
         direct: Vec<String>,
         related: Vec<String>,
@@ -78,11 +136,65 @@ impl Store {
             ));
         }
         let now = now_epoch();
-        self.conn.execute(
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for key in [s, t] {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1);",
+                params![key],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(crate::error::Error::NotFound(key.to_string()));
+            }
+        }
+        if r == "supersedes" {
+            if s == t {
+                return Err(crate::error::Error::Usage(
+                    "A memory cannot supersede itself".into(),
+                ));
+            }
+            let creates_cycle: bool = tx.query_row(
+                "WITH RECURSIVE chain(key) AS (
+                    SELECT target_key FROM relations
+                    WHERE source_key = ?1 AND rel_type = 'supersedes'
+                    UNION
+                    SELECT relations.target_key FROM relations
+                    JOIN chain ON relations.source_key = chain.key
+                    WHERE relations.rel_type = 'supersedes'
+                 )
+                 SELECT EXISTS(SELECT 1 FROM chain WHERE key = ?2);",
+                params![t, s],
+                |row| row.get(0),
+            )?;
+            if creates_cycle {
+                return Err(crate::error::Error::Usage(
+                    "A supersedes relation cannot create a cycle".into(),
+                ));
+            }
+        }
+        tx.execute(
             "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
             params![s, r, t, now],
         )?;
+        if r == "supersedes" {
+            tx.execute(
+                "UPDATE memories
+                 SET archived_at = ?1, archive_reason = ?2, updated_at = ?1
+                 WHERE key = ?3 AND archived_at IS NULL;",
+                params![now, format!("superseded_by: {s}"), t],
+            )?;
+            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![t])?;
+            tx.execute(
+                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind)
+                 SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
+                params![t],
+            )?;
+            mark_semantic_dirty(&tx)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -201,7 +313,7 @@ impl Store {
         Ok(relations)
     }
 
-    pub(crate) fn archive_zombies_tx(&mut self, zombies: &[ZombieReport]) -> Result<()> {
+    pub(crate) fn repair_zombies_tx(&mut self, zombies: &[ZombieReport]) -> Result<()> {
         if zombies.is_empty() {
             return Ok(());
         }
@@ -211,11 +323,24 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         for z in zombies {
-            let reason = format!("file_deleted: {}", z.missing_paths.join(", "));
-            tx.execute(
-                "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?3 WHERE key = ?4;",
-                params![now, reason, now, z.key],
-            )?;
+            if z.remaining_paths.is_empty() {
+                let reason = format!("file_deleted: {}", z.missing_paths.join(", "));
+                tx.execute(
+                    "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?3 WHERE key = ?4;",
+                    params![now, reason, now, z.key],
+                )?;
+            } else {
+                let anchor = z.remaining_paths.join(", ");
+                tx.execute(
+                    "UPDATE memories SET anchor = ?1, updated_at = ?2 WHERE key = ?3;",
+                    params![anchor, now, z.key],
+                )?;
+                tx.execute(
+                    "DELETE FROM memory_routes WHERE memory_key = ?1;",
+                    params![z.key],
+                )?;
+                super::insert_memory_routes(&tx, &z.key, Some(&anchor))?;
+            }
             tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![z.key])?;
             tx.execute(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) 
@@ -249,22 +374,28 @@ impl Store {
                 }
 
                 let missing: Vec<String> = paths
-                    .into_iter()
+                    .iter()
                     .filter(|p| !project_root.join(p).exists())
+                    .cloned()
                     .collect();
 
                 if !missing.is_empty() {
+                    let remaining = paths
+                        .into_iter()
+                        .filter(|p| !missing.contains(p))
+                        .collect::<Vec<_>>();
                     zombies.push(ZombieReport {
                         key: m.key.clone(),
                         missing_paths: missing,
-                        archived: !dry_run,
+                        archived: !dry_run && remaining.is_empty(),
+                        remaining_paths: remaining,
                     });
                 }
             }
         }
 
         if !dry_run {
-            self.archive_zombies_tx(&zombies)?;
+            self.repair_zombies_tx(&zombies)?;
         }
 
         Ok(zombies)
@@ -291,22 +422,28 @@ impl Store {
                 }
 
                 let missing: Vec<String> = paths
-                    .into_iter()
-                    .filter(|p| deleted_files.iter().any(|d| d == p))
+                    .iter()
+                    .filter(|p| deleted_files.iter().any(|d| d == *p))
+                    .cloned()
                     .collect();
 
                 if !missing.is_empty() {
+                    let remaining = paths
+                        .into_iter()
+                        .filter(|p| !missing.contains(p))
+                        .collect::<Vec<_>>();
                     zombies.push(ZombieReport {
                         key: m.key.clone(),
                         missing_paths: missing,
-                        archived: !dry_run,
+                        archived: !dry_run && remaining.is_empty(),
+                        remaining_paths: remaining,
                     });
                 }
             }
         }
 
         if !dry_run {
-            self.archive_zombies_tx(&zombies)?;
+            self.repair_zombies_tx(&zombies)?;
         }
 
         Ok(zombies)

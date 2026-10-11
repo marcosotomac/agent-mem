@@ -46,7 +46,34 @@ fn test_parse_args() {
             val: "v1 v2".into(),
             anchor: None,
             kind: None,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "find".into(),
+            "formatting".into(),
+            "--scope".into(),
+            "all".into(),
+        ])
+        .unwrap(),
+        Command::Find {
+            query: "formatting".into(),
+            scope: agent_mem::cli::MemoryScope::All,
+        }
+    );
+    assert!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "set".into(),
+            "key".into(),
+            "value".into(),
+            "--scope".into(),
+            "all".into(),
+        ])
+        .is_err()
     );
 
     assert_eq!(
@@ -80,6 +107,7 @@ fn test_parse_args() {
             val: "v1".into(),
             anchor: Some("src/lib.rs:42".into()),
             kind: Some("decision".into()),
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -139,7 +167,8 @@ fn test_parse_args() {
         ])
         .unwrap(),
         Command::Find {
-            query: "foo bar".into()
+            query: "foo bar".into(),
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -172,6 +201,8 @@ fn test_parse_args() {
             limit: 20,
             diff: false,
             files: Vec::new(),
+            include_untrusted: false,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -194,6 +225,8 @@ fn test_parse_args() {
             limit: 5,
             diff: false,
             files: Vec::new(),
+            include_untrusted: false,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -213,6 +246,8 @@ fn test_parse_args() {
             limit: 20,
             diff: true,
             files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+            include_untrusted: false,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -246,7 +281,11 @@ fn test_parse_args() {
     // Doctor
     assert_eq!(
         parse_args(vec!["agent-mem".into(), "doctor".into()]).unwrap(),
-        Command::Doctor
+        Command::Doctor { fix: false }
+    );
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "doctor".into(), "--fix".into()]).unwrap(),
+        Command::Doctor { fix: true }
     );
 
     // Tui / Ui
@@ -396,16 +435,22 @@ fn test_read_does_not_mutate_uninitialized_directory() {
         key: "some_key".into(),
     };
     let res = agent_mem::cli::execute_command(cmd, &temp_dir);
-    assert!(matches!(res, Err(agent_mem::error::Error::NotInitialized)));
+    let err_msg = res.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("no agent-mem project memory is initialized here"),
+        "got: {err_msg}"
+    );
+    assert!(err_msg.contains("agent-mem init"), "got: {err_msg}");
     assert!(!temp_dir.join(".agent-mem").exists());
 
     // 2. Dump on uninitialized directory must also fail without creating .agent-mem
     let dump_cmd = Command::Dump;
     let dump_res = agent_mem::cli::execute_command(dump_cmd, &temp_dir);
-    assert!(matches!(
-        dump_res,
-        Err(agent_mem::error::Error::NotInitialized)
-    ));
+    let dump_err = dump_res.unwrap_err().to_string();
+    assert!(
+        dump_err.contains("no agent-mem project memory is initialized here"),
+        "got: {dump_err}"
+    );
     assert!(!temp_dir.join(".agent-mem").exists());
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -456,7 +501,7 @@ fn test_init_creates_and_upgrades_trigger_block() {
     assert!(agents_md.exists());
     let content = fs::read_to_string(&agents_md).unwrap();
     assert!(content.contains("<!-- agent-mem -->"));
-    assert!(content.contains("Run `agent-mem context`"));
+    assert!(content.contains("Run `agent-mem context --scope all`"));
     assert!(content.contains("<!-- /agent-mem -->"));
 
     // 2. Second init is idempotent
@@ -473,7 +518,7 @@ fn test_init_creates_and_upgrades_trigger_block() {
     let report3 = agent_mem::init::init_project(&temp_dir).unwrap();
     assert!(report3.trigger_updated);
     let upgraded = fs::read_to_string(&agents_md).unwrap();
-    assert!(upgraded.contains("Run `agent-mem context`"));
+    assert!(upgraded.contains("Run `agent-mem context --scope all`"));
     assert!(!upgraded.contains("Memory: run `agent-mem get"));
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -543,6 +588,7 @@ fn test_cli_sync_and_auto_sync_lifecycle() {
         val: "SQLite WAL".into(),
         anchor: Some("src/main.rs:10".into()),
         kind: None,
+        scope: agent_mem::cli::MemoryScope::Project,
     };
     agent_mem::cli::execute_command(set_cmd, &temp_dir).unwrap();
 
@@ -706,6 +752,7 @@ fn test_init_imports_cloned_rules_before_first_write() {
             val: "New convention".into(),
             anchor: None,
             kind: None,
+            scope: agent_mem::cli::MemoryScope::Project,
         },
         &dir,
     )
@@ -719,5 +766,129 @@ fn test_init_imports_cloned_rules_before_first_write() {
     let store = Store::open(&db, false).unwrap();
     assert_eq!(store.dump_all().unwrap().len(), 3);
     drop(store);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_parse_stats() {
+    assert_eq!(
+        parse_args(vec!["agent-mem".into(), "stats".into()]).unwrap(),
+        Command::Stats
+    );
+}
+
+#[test]
+fn test_stats_runs_without_project_memory() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_stats_empty_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let result = agent_mem::cli::execute_command(Command::Stats, &dir);
+    assert!(result.is_ok());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_stats_reports_zombies_and_registry() {
+    use agent_mem::store::Store;
+    let dir = std::env::temp_dir().join(format!("agent_mem_stats_zombies_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    agent_mem::init::init_project(&dir).unwrap();
+    let db = dir.join(".agent-mem/mem.db");
+    {
+        let mut store = Store::open(&db, true).unwrap();
+        store
+            .set_entry(
+                "arch/gone",
+                "Anchored to a deleted file",
+                Some("src/deleted_file.rs:1"),
+                None,
+            )
+            .unwrap();
+    }
+    agent_mem::cli::execute_command(Command::Stats, &dir).unwrap();
+    {
+        let mut store = Store::open(&db, true).unwrap();
+        let zombies = store.clean_zombies(&dir, true).unwrap();
+        assert_eq!(zombies.len(), 1);
+        assert_eq!(zombies[0].key, "arch/gone");
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_not_initialized_error_distinguishes_git_and_bare_dirs() {
+    let git_dir = std::env::temp_dir().join(format!("agent_mem_ni_git_{}", std::process::id()));
+    fs::create_dir_all(git_dir.join(".git")).unwrap();
+    let err = agent_mem::cli::not_initialized_error(&git_dir).to_string();
+    assert!(err.contains("git repository"), "got: {err}");
+    assert!(err.contains("agent-mem init"));
+    fs::remove_dir_all(git_dir).unwrap();
+
+    let plain_dir = std::env::temp_dir().join(format!("agent_mem_ni_plain_{}", std::process::id()));
+    fs::create_dir_all(&plain_dir).unwrap();
+    let err = agent_mem::cli::not_initialized_error(&plain_dir).to_string();
+    assert!(err.contains("path:"), "got: {err}");
+    assert!(err.contains("agent-mem init"));
+    assert!(!err.contains("git repository"), "got: {err}");
+    fs::remove_dir_all(plain_dir).unwrap();
+}
+
+#[test]
+fn test_not_initialized_error_suggests_most_recent_project() {
+    let lock = std::sync::Mutex::new(());
+    let _guard = lock.lock().unwrap();
+    let global_dir = std::env::temp_dir().join(format!("agent_mem_ni_reg_{}", std::process::id()));
+    fs::create_dir_all(global_dir.clone()).unwrap();
+    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
+
+    let project_dir =
+        std::env::temp_dir().join(format!("agent_mem_ni_proj_{}", std::process::id()));
+    fs::create_dir_all(project_dir.join(".agent-mem")).unwrap();
+    fs::write(project_dir.join(".agent-mem/mem.db"), b"placeholder").unwrap();
+
+    let record = agent_mem::registry::ProjectRecord {
+        id: "deadbeef".into(),
+        name: "wired-project".into(),
+        canonical_path: project_dir.to_string_lossy().to_string(),
+        git_remote: None,
+        last_accessed: 1_000_000,
+        rules_count: 7,
+        archived_count: 0,
+        sessions_count: 2,
+        db_size_bytes: 4096,
+    };
+    let mut registry = agent_mem::registry::ProjectRegistry::default();
+    registry.projects.push(record);
+    registry.save().unwrap();
+
+    let elsewhere = std::env::temp_dir().join(format!("agent_mem_ni_else_{}", std::process::id()));
+    fs::create_dir_all(&elsewhere).unwrap();
+    let err = agent_mem::cli::not_initialized_error(&elsewhere).to_string();
+    assert!(
+        err.contains("most recent project: wired-project (7 active rules)"),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("cd ") && err.contains("agent-mem context"),
+        "got: {err}"
+    );
+
+    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
+    fs::remove_dir_all(global_dir).unwrap();
+    fs::remove_dir_all(project_dir).unwrap();
+    fs::remove_dir_all(elsewhere).unwrap();
+}
+
+#[test]
+fn test_execute_command_guides_when_uninitialized() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_ni_exec_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let err = agent_mem::cli::execute_command(Command::Get { key: "any".into() }, &dir)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("no agent-mem project memory is initialized here"),
+        "got: {err}"
+    );
+    assert!(err.contains("agent-mem init"), "got: {err}");
     fs::remove_dir_all(dir).unwrap();
 }

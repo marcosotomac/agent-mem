@@ -72,6 +72,7 @@ fn test_git_multi_branch_workflow_and_zero_merge_conflicts() {
         val: "Clerk Authentication".into(),
         anchor: Some("src/auth.rs:10".into()),
         kind: None,
+        scope: agent_mem::cli::MemoryScope::Project,
     };
     agent_mem::cli::execute_command(set_auth, &temp_dir).unwrap();
 
@@ -106,6 +107,7 @@ fn test_git_multi_branch_workflow_and_zero_merge_conflicts() {
         val: "Stripe Subscriptions API v3".into(),
         anchor: Some("src/billing.rs:25".into()),
         kind: None,
+        scope: agent_mem::cli::MemoryScope::Project,
     };
     agent_mem::cli::execute_command(set_billing, &temp_dir).unwrap();
 

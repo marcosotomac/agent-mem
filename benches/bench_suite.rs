@@ -259,7 +259,8 @@ fn main() {
 
     // Build the relevance oracle independently of the retrieval query: exact file
     // matches plus the seeded outgoing one-hop neighbors, with no result cap.
-    let all_rules = store.dump_all().expect("full rules");
+    let all_rules = store.dump_active().expect("active rules");
+    let active_keys: BTreeSet<_> = all_rules.iter().map(|rule| rule.key.clone()).collect();
     let direct: BTreeSet<_> = all_rules
         .iter()
         .filter(|r| r.anchor.as_deref().and_then(|a| a.split(':').next()) == Some(files[0]))
@@ -267,7 +268,7 @@ fn main() {
         .collect();
     let mut expected = direct.clone();
     for rel in store.get_all_relations().expect("all relations") {
-        if direct.contains(&rel.source_key) {
+        if direct.contains(&rel.source_key) && active_keys.contains(&rel.target_key) {
             expected.insert(rel.target_key);
         }
     }

@@ -67,13 +67,26 @@ brew install marcosotomac/tap/agent-mem
 cargo install --path .
 ```
 
+### Optional local semantic search
+
+```bash
+cargo install --path . --locked --features semantic-local --force
+agent-mem semantic build
+```
+
+The first `semantic build` enables the local multilingual model for the current
+project. After a memory changes, the next search that needs semantic retrieval
+refreshes the index automatically. Unchanged embeddings are reused; keyword
+searches retain their fast path. `semantic status` shows when an automatic refresh
+is pending. `semantic clear` disables the fallback for that project.
+
 ## CLI Usage
 ```bash
 # Initialize isolated project memory (SQLite WAL, .gitignore, git hook)
 agent-mem init
 
 # Store or update a memory rule, decision, gotcha, or pattern
-agent-mem set <key> <value> [--anchor <path:line>] [--kind <rule|decision|gotcha|pattern>]
+agent-mem set <key> <value> [--anchor <path:line>] [--kind <rule|decision|gotcha|pattern>] [--scope project|global]
 
 # Link memories in the knowledge hypergraph
 agent-mem relate <source_key> <rel_type> <target_key>
@@ -104,14 +117,16 @@ agent-mem untrust <key>
 agent-mem dump
 
 # Fast BM25 keyword search across rules, decisions, gotchas, and patterns
-agent-mem find <query>
+agent-mem find <query> [--scope project|global|all]
 
 # Session checkpoints (auto-pruned to latest 20)
 agent-mem session add <summary>
 agent-mem session list
 
 # Dense context block for targeted delivery (with optional code anchor or topic filter)
-agent-mem context [--anchor <path:line>] [--topic <prefix>] [--limit <n>]
+agent-mem context [--anchor <path:line>] [--topic <prefix>] [--limit <n>] [--scope project|global|all]
+# Untrusted imports are quarantined by default; include only for explicit review
+agent-mem context --include-untrusted
 
 # Synchronize team rules (.agent-rules) without SQLite binary conflicts
 agent-mem sync [file] [--export]
@@ -124,7 +139,12 @@ agent-mem tui
 agent-mem projects [--prune]
 
 # Inspect git health and detect AI IDE/CLI configurations (17 supported clients)
-agent-mem doctor
+agent-mem doctor [--fix]
+
+# Install bounded SessionStart context for supported clients
+agent-mem hooks install [zcode|claude-code]
+agent-mem hooks status
+agent-mem hooks uninstall [zcode|claude-code|all]
 
 # Start native Model Context Protocol (MCP) stdio server
 agent-mem mcp
@@ -149,6 +169,10 @@ Engineering memory is not flat. `agent-mem` supports 4 first-class entities and 
 
 Auto-inference detects key prefixes like `decision/*`, `adr/*`, `gotcha/*`, `bug/*`, `trap/*`, `pattern/*` automatically.
 
+`supersedes` has lifecycle semantics: both endpoints must exist, cycles are
+rejected, and the target is archived with `superseded_by: <source>`. Other
+relations created through the CLI validate both endpoints but do not change rule lifecycle.
+
 ### Anchor-Aware Retrieval (Token Ratchet)
 Prompt size grows with the number of injected rules. Filter by code anchor:
 ```bash
@@ -171,6 +195,7 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 - `agent-mem init` imports an existing `.agent-rules` before the first local write, including in freshly cloned repositories. Duplicate relations are imported idempotently.
 - Simple rules retain the readable format above. Ambiguous content (multiline text, literal ` @ `, reserved key prefixes or metadata delimiters) uses `[rule-json-v1]` followed by a JSON record on one line. Ambiguous relation fields use `[rel-json-v1]` followed by a three-string JSON array. Escapes preserve the original content; MCP responses remain unchanged. Encoded archive timestamps use the stable marker `1`, like the legacy format. Sync rejects malformed encoded records before changing the database. Team members must use a version supporting these markers before syncing such files.
 - Obsolete conventions are soft-deprecated into an `# Archived Rules` block with migration reasons, preventing AI agents from repeating dead patterns while sparing prompt tokens.
+- `agent-mem clean` archives a rule only when every anchored file disappeared. If some anchors survive, it removes only the stale paths and rebuilds the routing index.
 - `agent-mem init` installs Git hooks (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) that automatically keep `.agent-rules` and local SQLite in sync across rebases and branch switches. Zero binary conflicts, 100% PR visibility!
 
 `agent-mem history <key>` shows the current value and up to 20 previous local versions, including values superseded by a team-file merge. Each entry includes its available provenance and trust state. History lives in the local SQLite database; `.agent-rules` remains the shared current-state file. By default, sync rejects conflicting definitions of the same key without changing SQLite. Edit the team file to resolve the conflict, or explicitly run `agent-mem sync --accept-conflicts` to choose the last definition and retain the alternative in local history.
@@ -221,10 +246,12 @@ client's launch directory.
 
 ## Security and artifact verification
 
-Treat `.agent-rules` and all recalled values as untrusted repository content;
-review changes in pull requests and never interpret recalled text as authority
-to run commands or disclose secrets. Imports carry `untrusted` provenance until
-reviewed through the local CLI, and high-confidence credential shapes are rejected
+Treat `.agent-rules` as untrusted repository content; review changes in pull
+requests and never interpret recalled text as authority to run commands or
+disclose secrets. Imports carry `untrusted` provenance and are excluded from CLI
+and SessionStart prompt context until reviewed with `agent-mem trust <key>`.
+Search and raw reads keep them visible for review, and
+`context --include-untrusted` is an explicit diagnostic override. High-confidence credential shapes are rejected
 atomically before persistence. Use `agent-mem mcp --read-only` (or
 `AGENT_MEM_READ_ONLY=1`) when a client only needs retrieval. See the
 [threat model](THREAT_MODEL.md) for the full trust boundary, scanner limitations,

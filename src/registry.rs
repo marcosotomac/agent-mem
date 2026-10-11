@@ -80,12 +80,14 @@ impl ProjectRegistry {
     fn lock() -> Result<fs::File> {
         let dir = registry_dir();
         fs::create_dir_all(&dir)?;
+        crate::init::secure_private_dir(&dir)?;
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(dir.join("projects.json.lock"))?;
+        crate::init::secure_private_file(&dir.join("projects.json.lock"))?;
         file.lock_exclusive()?;
         Ok(file)
     }
@@ -105,7 +107,9 @@ impl ProjectRegistry {
             .map_err(|e| Error::Usage(format!("Failed to serialize project registry: {}", e)))?;
 
         fs::write(&tmp_path, format!("{}\n", formatted))?;
+        crate::init::secure_private_file(&tmp_path)?;
         fs::rename(&tmp_path, &path)?;
+        crate::init::secure_private_file(&path)?;
 
         Ok(())
     }
@@ -176,14 +180,20 @@ impl ProjectRegistry {
             || path.starts_with("/private/tmp")
     }
 
-    /// Generate deterministic stable ID
+    /// Generate a deterministic ID that distinguishes live clones of the same
+    /// remote while remaining stable for one canonical checkout path.
     pub fn generate_id(canonical_path: &str, git_remote: Option<&str>) -> String {
-        let key = git_remote.unwrap_or(canonical_path);
-        let mut hasher = 5381u64;
-        for b in key.bytes() {
-            hasher = ((hasher << 5).wrapping_add(hasher)).wrapping_add(b as u64);
+        let mut hasher = 0xcbf29ce484222325u64;
+        for b in git_remote
+            .unwrap_or("")
+            .bytes()
+            .chain(std::iter::once(0))
+            .chain(canonical_path.bytes())
+        {
+            hasher ^= u64::from(b);
+            hasher = hasher.wrapping_mul(0x100000001b3);
         }
-        format!("{:08x}", hasher & 0xFFFF_FFFF)
+        format!("{hasher:016x}")
     }
 
     /// Register or update a project record idempotently
@@ -246,7 +256,7 @@ impl ProjectRegistry {
             return Ok(record);
         }
 
-        self.mutate(|current| {
+        let record = self.mutate(|current| {
             let found_index = current.projects.iter().position(|project| {
                 project.canonical_path == record.canonical_path
                     || (project.git_remote.is_some()
@@ -254,14 +264,26 @@ impl ProjectRegistry {
                         && !Path::new(&project.canonical_path).exists())
             });
             if let Some(index) = found_index {
-                current.projects[index] = record.clone();
+                let mut effective = record.clone();
+                let previous = &current.projects[index];
+                if previous.canonical_path != effective.canonical_path
+                    && !Path::new(&previous.canonical_path).exists()
+                    && previous.git_remote == effective.git_remote
+                {
+                    effective.id = previous.id.clone();
+                }
+                current.projects[index] = effective.clone();
+                current
+                    .projects
+                    .sort_by_key(|project| std::cmp::Reverse(project.last_accessed));
+                (effective, true)
             } else {
                 current.projects.push(record.clone());
+                current
+                    .projects
+                    .sort_by_key(|project| std::cmp::Reverse(project.last_accessed));
+                (record.clone(), true)
             }
-            current
-                .projects
-                .sort_by_key(|project| std::cmp::Reverse(project.last_accessed));
-            ((), true)
         })?;
         Ok(record)
     }
