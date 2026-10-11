@@ -76,6 +76,7 @@ pub struct ParsedRules {
 pub struct ZombieReport {
     pub key: String,
     pub missing_paths: Vec<String>,
+    pub remaining_paths: Vec<String>,
     pub archived: bool,
 }
 

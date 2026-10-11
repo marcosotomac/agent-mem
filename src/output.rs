@@ -1327,10 +1327,11 @@ pub fn print_hook_report(report: &crate::hook::HookReport) {
 
     for z in &report.zombies {
         let prefix = if report.dry_run { "[dry-run] " } else { "" };
-        let action = if report.dry_run {
-            "would archive"
-        } else {
-            "archived"
+        let action = match (report.dry_run, z.remaining_paths.is_empty()) {
+            (true, true) => "would archive",
+            (false, true) => "archived",
+            (true, false) => "would repair anchor for",
+            (false, false) => "repaired anchor for",
         };
         if is_tty {
             println!(
@@ -1365,30 +1366,43 @@ pub fn print_clean(report: &[crate::store::ZombieReport], dry_run: bool) {
         }
     } else {
         let prefix = if dry_run { "[dry-run] " } else { "" };
-        let action = if dry_run { "would archive" } else { "archived" };
         if is_tty {
             println!(
-                "  {AMBER}!{RESET}  {MUTED}{}clean: {} {} zombie rule(s){RESET}",
+                "  {AMBER}!{RESET}  {MUTED}{}clean: found {} stale anchored rule(s){RESET}",
                 prefix,
-                action,
                 report.len()
             );
             for z in report {
+                let action = match (dry_run, z.remaining_paths.is_empty()) {
+                    (true, true) => "would archive",
+                    (false, true) => "archived",
+                    (true, false) => "would repair anchor",
+                    (false, false) => "repaired anchor",
+                };
                 println!(
-                    "    {SUBTLE}·{RESET}  {ACCENT}{}{RESET}  {MUTED}missing: {}{RESET}",
+                    "    {SUBTLE}·{RESET}  {MUTED}{action}{RESET}  {ACCENT}{}{RESET}  {MUTED}missing: {}{RESET}",
                     z.key,
                     z.missing_paths.join(", ")
                 );
             }
         } else {
             println!(
-                "{}clean: {} {} zombie rule(s)",
+                "{}clean: found {} stale anchored rule(s)",
                 prefix,
-                action,
                 report.len()
             );
             for z in report {
-                println!("  [{}] missing: {}", z.key, z.missing_paths.join(", "));
+                let action = match (dry_run, z.remaining_paths.is_empty()) {
+                    (true, true) => "would archive",
+                    (false, true) => "archived",
+                    (true, false) => "would repair anchor",
+                    (false, false) => "repaired anchor",
+                };
+                println!(
+                    "  {action} [{}], missing: {}",
+                    z.key,
+                    z.missing_paths.join(", ")
+                );
             }
         }
     }
