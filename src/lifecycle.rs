@@ -126,6 +126,36 @@ impl LifecycleClient {
         // Never remove `hooks` itself or ZCode's `enabled` flag: both may be
         // owned by the user or by other hooks.
     }
+
+    fn restore_enabled_state(&self, path: &std::path::Path, client_config: &mut Value) {
+        if self != &Self::ZCode {
+            return;
+        }
+        let has_other_events = client_config
+            .pointer("/hooks/events")
+            .and_then(Value::as_object)
+            .is_some_and(|events| !events.is_empty());
+        if has_other_events {
+            return;
+        }
+        let previous = load_config(&crate::installer::backup_path(path))
+            .ok()
+            .and_then(|value| value.pointer("/hooks/enabled").cloned());
+        let Some(hooks) = client_config
+            .get_mut("hooks")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        match previous {
+            Some(value @ Value::Bool(_)) => {
+                hooks.insert("enabled".into(), value);
+            }
+            _ => {
+                hooks.remove("enabled");
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -300,6 +330,7 @@ pub fn uninstall_session_hooks(target: Option<&str>) -> Result<Vec<LifecycleResu
         };
         if removed {
             client.cleanup_empty(&mut config);
+            client.restore_enabled_state(&path, &mut config);
             save_config(&path, &config)?;
             results.push(LifecycleResult {
                 client,
@@ -427,5 +458,26 @@ mod tests {
             "'/Applications/Agent Mem/agent-mem'"
         );
         assert_eq!(shell_quote("/tmp/it's/bin"), "'/tmp/it'\"'\"'s/bin'");
+    }
+
+    #[test]
+    fn zcode_uninstall_restores_previous_enabled_state() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_home("zcode-enabled");
+        let path = home.join(".zcode/cli/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"hooks":{"enabled":false}}"#).unwrap();
+        unsafe { env::set_var("AGENT_MEM_TEST_HOME", &home) };
+
+        install_session_hooks(Some("zcode")).unwrap();
+        let installed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(installed["hooks"]["enabled"], true);
+        uninstall_session_hooks(Some("zcode")).unwrap();
+        let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(restored["hooks"]["enabled"], false);
+        assert!(restored["hooks"].get("events").is_none());
+
+        unsafe { env::remove_var("AGENT_MEM_TEST_HOME") };
+        let _ = fs::remove_dir_all(home);
     }
 }
