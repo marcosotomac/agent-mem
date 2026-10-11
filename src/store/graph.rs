@@ -259,7 +259,7 @@ impl Store {
         Ok(relations)
     }
 
-    pub(crate) fn archive_zombies_tx(&mut self, zombies: &[ZombieReport]) -> Result<()> {
+    pub(crate) fn repair_zombies_tx(&mut self, zombies: &[ZombieReport]) -> Result<()> {
         if zombies.is_empty() {
             return Ok(());
         }
@@ -269,11 +269,24 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         for z in zombies {
-            let reason = format!("file_deleted: {}", z.missing_paths.join(", "));
-            tx.execute(
-                "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?3 WHERE key = ?4;",
-                params![now, reason, now, z.key],
-            )?;
+            if z.remaining_paths.is_empty() {
+                let reason = format!("file_deleted: {}", z.missing_paths.join(", "));
+                tx.execute(
+                    "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?3 WHERE key = ?4;",
+                    params![now, reason, now, z.key],
+                )?;
+            } else {
+                let anchor = z.remaining_paths.join(", ");
+                tx.execute(
+                    "UPDATE memories SET anchor = ?1, updated_at = ?2 WHERE key = ?3;",
+                    params![anchor, now, z.key],
+                )?;
+                tx.execute(
+                    "DELETE FROM memory_routes WHERE memory_key = ?1;",
+                    params![z.key],
+                )?;
+                super::insert_memory_routes(&tx, &z.key, Some(&anchor))?;
+            }
             tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![z.key])?;
             tx.execute(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) 
@@ -307,22 +320,28 @@ impl Store {
                 }
 
                 let missing: Vec<String> = paths
-                    .into_iter()
+                    .iter()
                     .filter(|p| !project_root.join(p).exists())
+                    .cloned()
                     .collect();
 
                 if !missing.is_empty() {
+                    let remaining = paths
+                        .into_iter()
+                        .filter(|p| !missing.contains(p))
+                        .collect::<Vec<_>>();
                     zombies.push(ZombieReport {
                         key: m.key.clone(),
                         missing_paths: missing,
-                        archived: !dry_run,
+                        archived: !dry_run && remaining.is_empty(),
+                        remaining_paths: remaining,
                     });
                 }
             }
         }
 
         if !dry_run {
-            self.archive_zombies_tx(&zombies)?;
+            self.repair_zombies_tx(&zombies)?;
         }
 
         Ok(zombies)
@@ -349,22 +368,28 @@ impl Store {
                 }
 
                 let missing: Vec<String> = paths
-                    .into_iter()
-                    .filter(|p| deleted_files.iter().any(|d| d == p))
+                    .iter()
+                    .filter(|p| deleted_files.iter().any(|d| d == *p))
+                    .cloned()
                     .collect();
 
                 if !missing.is_empty() {
+                    let remaining = paths
+                        .into_iter()
+                        .filter(|p| !missing.contains(p))
+                        .collect::<Vec<_>>();
                     zombies.push(ZombieReport {
                         key: m.key.clone(),
                         missing_paths: missing,
-                        archived: !dry_run,
+                        archived: !dry_run && remaining.is_empty(),
+                        remaining_paths: remaining,
                     });
                 }
             }
         }
 
         if !dry_run {
-            self.archive_zombies_tx(&zombies)?;
+            self.repair_zombies_tx(&zombies)?;
         }
 
         Ok(zombies)
