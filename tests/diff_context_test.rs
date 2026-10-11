@@ -167,6 +167,7 @@ fn test_cli_context_with_diff_in_git_repo() {
             diff: true,
             files: Vec::new(),
             include_untrusted: false,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 

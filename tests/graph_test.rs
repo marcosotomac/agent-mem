@@ -357,6 +357,7 @@ fn test_cli_relate_unrelate_and_context_filtered() {
         val: "Use DataLoader to prevent N+1 queries".into(),
         anchor: Some("src/graphql/schema.rs:40".into()),
         kind: Some("decision".into()),
+        scope: agent_mem::cli::MemoryScope::Project,
     };
     execute_command(set_cmd, &temp_dir).unwrap();
 
@@ -365,6 +366,7 @@ fn test_cli_relate_unrelate_and_context_filtered() {
         val: "Eager loading creates memory spikes".into(),
         anchor: None,
         kind: Some("gotcha".into()),
+        scope: agent_mem::cli::MemoryScope::Project,
     };
     execute_command(set_gotcha, &temp_dir).unwrap();
 

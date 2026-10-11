@@ -46,7 +46,34 @@ fn test_parse_args() {
             val: "v1 v2".into(),
             anchor: None,
             kind: None,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "find".into(),
+            "formatting".into(),
+            "--scope".into(),
+            "all".into(),
+        ])
+        .unwrap(),
+        Command::Find {
+            query: "formatting".into(),
+            scope: agent_mem::cli::MemoryScope::All,
+        }
+    );
+    assert!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "set".into(),
+            "key".into(),
+            "value".into(),
+            "--scope".into(),
+            "all".into(),
+        ])
+        .is_err()
     );
 
     assert_eq!(
@@ -80,6 +107,7 @@ fn test_parse_args() {
             val: "v1".into(),
             anchor: Some("src/lib.rs:42".into()),
             kind: Some("decision".into()),
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -139,7 +167,8 @@ fn test_parse_args() {
         ])
         .unwrap(),
         Command::Find {
-            query: "foo bar".into()
+            query: "foo bar".into(),
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -173,6 +202,7 @@ fn test_parse_args() {
             diff: false,
             files: Vec::new(),
             include_untrusted: false,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -196,6 +226,7 @@ fn test_parse_args() {
             diff: false,
             files: Vec::new(),
             include_untrusted: false,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -216,6 +247,7 @@ fn test_parse_args() {
             diff: true,
             files: vec!["src/main.rs".into(), "src/lib.rs".into()],
             include_untrusted: false,
+            scope: agent_mem::cli::MemoryScope::Project,
         }
     );
 
@@ -552,6 +584,7 @@ fn test_cli_sync_and_auto_sync_lifecycle() {
         val: "SQLite WAL".into(),
         anchor: Some("src/main.rs:10".into()),
         kind: None,
+        scope: agent_mem::cli::MemoryScope::Project,
     };
     agent_mem::cli::execute_command(set_cmd, &temp_dir).unwrap();
 
@@ -715,6 +748,7 @@ fn test_init_imports_cloned_rules_before_first_write() {
             val: "New convention".into(),
             anchor: None,
             kind: None,
+            scope: agent_mem::cli::MemoryScope::Project,
         },
         &dir,
     )
