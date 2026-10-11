@@ -501,7 +501,7 @@ fn test_init_creates_and_upgrades_trigger_block() {
     assert!(agents_md.exists());
     let content = fs::read_to_string(&agents_md).unwrap();
     assert!(content.contains("<!-- agent-mem -->"));
-    assert!(content.contains("Run `agent-mem context`"));
+    assert!(content.contains("Run `agent-mem context --scope all`"));
     assert!(content.contains("<!-- /agent-mem -->"));
 
     // 2. Second init is idempotent
@@ -518,7 +518,7 @@ fn test_init_creates_and_upgrades_trigger_block() {
     let report3 = agent_mem::init::init_project(&temp_dir).unwrap();
     assert!(report3.trigger_updated);
     let upgraded = fs::read_to_string(&agents_md).unwrap();
-    assert!(upgraded.contains("Run `agent-mem context`"));
+    assert!(upgraded.contains("Run `agent-mem context --scope all`"));
     assert!(!upgraded.contains("Memory: run `agent-mem get"));
 
     let _ = fs::remove_dir_all(&temp_dir);

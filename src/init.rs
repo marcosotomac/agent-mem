@@ -246,9 +246,9 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
     const TRIGGER_BLOCK: &str = "\
 <!-- agent-mem -->
 ## Persistent Memory Protocol
-- **On start:** Run `agent-mem context` (or MCP `mem_context`) to load project rules and recent sessions.
-- **On decisions:** Run `agent-mem set <key> \"<rule>\"` (or MCP `mem_set`) to record conventions or architecture.
-- **On search:** Run `agent-mem find <query>` (or MCP `mem_find`) to look up specific memories.
+- **On start:** Run `agent-mem context --scope all` (or MCP `mem_context`) to load trusted project rules and global preferences.
+- **On decisions:** Run `agent-mem set <key> \"<rule>\"` (or MCP `mem_set`) only for durable ADRs, conventions, patterns, and gotchas.
+- **On search:** Run `agent-mem find <query> --scope all` (or MCP `mem_find`) when past decisions may affect the task.
 <!-- /agent-mem -->\n";
 
     // 5. Inject minimal AI trigger instruction idempotently into rules file
