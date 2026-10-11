@@ -166,6 +166,47 @@ fn test_knowledge_hypergraph_relations_and_cascade_delete() {
 }
 
 #[test]
+fn supersedes_archives_target_and_rejects_dangling_or_cyclic_edges() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.set("decision/old", "Use the old design").unwrap();
+    store.set("decision/new", "Use the new design").unwrap();
+    store
+        .relate("decision/new", "supersedes", "decision/old")
+        .unwrap();
+
+    let old = store.get_entry("decision/old").unwrap().unwrap();
+    assert!(old.is_archived());
+    assert_eq!(
+        old.archive_reason.as_deref(),
+        Some("superseded_by: decision/new")
+    );
+    let (rules, _, _) = store.context_filtered(None, None, 20).unwrap();
+    assert_eq!(
+        rules
+            .iter()
+            .map(|rule| rule.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["decision/new"]
+    );
+
+    assert!(
+        store
+            .relate("decision/missing", "depends_on", "decision/new")
+            .is_err()
+    );
+    assert!(
+        store
+            .relate("decision/new", "supersedes", "decision/new")
+            .is_err()
+    );
+    assert!(
+        store
+            .relate("decision/old", "supersedes", "decision/new")
+            .is_err()
+    );
+}
+
+#[test]
 fn test_anchor_context_filtering_and_1_hop_traversal() {
     let mut store = Store::open_in_memory().unwrap();
 
