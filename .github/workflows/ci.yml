@@ -27,6 +27,7 @@ jobs:
         run: |
           python3 -m py_compile evals/run_matrix.py evals/summarize.py evals/report.py evals/package_evidence.py
           sh -n evals/bootstrap-mcp.sh
+          (cd evals && python3 -m unittest test_report test_run_matrix)
           python3 evals/run_matrix.py --generate-only
       - name: Verify npm first-run archive installation
         run: |
@@ -66,6 +67,20 @@ jobs:
         run: cargo test --locked --no-default-features
       - name: Test all features
         run: cargo test --locked --all-features
+
+  semantic-portability:
+    name: Semantic link (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile and link semantic-local integration
+        run: cargo test --locked --all-features --test semantic_retrieval_test
 
   docker-smoke:
     name: Linux CLI in Docker
