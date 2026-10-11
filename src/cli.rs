@@ -59,6 +59,7 @@ pub enum Command {
         limit: usize,
         diff: bool,
         files: Vec<String>,
+        include_untrusted: bool,
     },
     SessionAdd {
         summary: String,
@@ -351,6 +352,7 @@ where
             let mut limit = 20;
             let mut diff = false;
             let mut files = Vec::new();
+            let mut include_untrusted = false;
             let mut i = 2;
             while i < args.len() {
                 if (args[i] == "--anchor" || args[i] == "-a") && i + 1 < args.len() {
@@ -368,6 +370,9 @@ where
                     i += 2;
                 } else if args[i] == "--diff" || args[i] == "-d" {
                     diff = true;
+                    i += 1;
+                } else if args[i] == "--include-untrusted" {
+                    include_untrusted = true;
                     i += 1;
                 } else if (args[i] == "--files" || args[i] == "-f") && i + 1 < args.len() {
                     for f in args[i + 1].split(',') {
@@ -395,6 +400,7 @@ where
                 limit,
                 diff,
                 files,
+                include_untrusted,
             })
         }
         "sync" => {
@@ -658,6 +664,9 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             let Ok((rules, rels, sessions)) = store.context_filtered(None, None, 12) else {
                 return Ok(());
             };
+            let Ok((rules, rels)) = store.filter_trusted_context(rules, rels) else {
+                return Ok(());
+            };
             let text = crate::output::render_session_context(&rules, &rels, &sessions);
             if json {
                 println!(
@@ -827,6 +836,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     limit,
                     diff,
                     mut files,
+                    include_untrusted,
                 } => {
                     if diff {
                         let diff_files = crate::hook::get_diff_files(root);
@@ -841,6 +851,11 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                         store.context_for_files(&files, topic.as_deref(), limit)?
                     } else {
                         store.context_filtered(anchor.as_deref(), topic.as_deref(), limit)?
+                    };
+                    let (rules, rels) = if include_untrusted {
+                        (rules, rels)
+                    } else {
+                        store.filter_trusted_context(rules, rels)?
                     };
                     print_context_filtered(&rules, &rels, &sessions);
                 }

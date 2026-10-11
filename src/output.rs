@@ -666,7 +666,7 @@ pub fn print_help() {
             "    {ACCENT}semantic{RESET} {MUTED}[build|status|clear]{RESET} Manage local semantic fallback"
         );
         println!(
-            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>]{RESET} Export dense context"
+            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>] [--include-untrusted]{RESET} Export trusted context"
         );
         println!(
             "    {ACCENT}session{RESET} {MUTED}add <msg>{RESET}       Record session checkpoint"
