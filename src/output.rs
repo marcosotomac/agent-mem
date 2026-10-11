@@ -628,7 +628,7 @@ pub fn print_help() {
             "    {ACCENT}get{RESET}     {MUTED}<key>{RESET}           Retrieve raw value for key"
         );
         println!(
-            "    {ACCENT}set{RESET}     {MUTED}<key> <val> [--anchor <f:l>] [--kind <k>]{RESET} Record memory"
+            "    {ACCENT}set{RESET}     {MUTED}<key> <val> [--anchor <f:l>] [--kind <k>] [--scope project|global]{RESET} Record memory"
         );
         println!(
             "    {ACCENT}relate{RESET}  {MUTED}<src> <rel> <tgt>{RESET} Link memories in hypergraph"
@@ -656,7 +656,7 @@ pub fn print_help() {
             "    {ACCENT}history{RESET} {MUTED}<key>{RESET}           Inspect current and previous values"
         );
         println!(
-            "    {ACCENT}find{RESET}    {MUTED}<query>{RESET}         Search rules via BM25 index"
+            "    {ACCENT}find{RESET}    {MUTED}<query> [--scope project|global|all]{RESET} Search rules via BM25 index"
         );
         println!("    {ACCENT}dump{RESET}                    List all active rules");
         println!(
@@ -666,7 +666,7 @@ pub fn print_help() {
             "    {ACCENT}semantic{RESET} {MUTED}[build|status|clear]{RESET} Manage local semantic fallback"
         );
         println!(
-            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>]{RESET} Export dense context"
+            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>] [--scope project|global|all]{RESET} Export trusted context"
         );
         println!(
             "    {ACCENT}session{RESET} {MUTED}add <msg>{RESET}       Record session checkpoint"
@@ -684,7 +684,10 @@ pub fn print_help() {
             "    {ACCENT}mcp{RESET}     {MUTED}uninstall [client]{RESET} Remove from AI editors (or 'all')"
         );
         println!(
-            "    {ACCENT}doctor{RESET}                  Verify system health, SQLite WAL, git hooks, and MCP"
+            "    {ACCENT}doctor{RESET}  {MUTED}[--fix]{RESET}          Verify or repair storage, git hooks, and registry"
+        );
+        println!(
+            "    {ACCENT}stats{RESET}                   Adoption overview: rules, zombies, sessions, and registry"
         );
         println!(
             "    {ACCENT}hook{RESET}     {MUTED}post-commit [--dry-run]{RESET} Ephemeral git lifecycle auto-capture"
@@ -699,7 +702,7 @@ pub fn print_help() {
         println!();
     } else {
         println!(
-            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, history, clean, find, dump, context, session add, session list, hook post-commit, sync [--accept-conflicts], semantic, mcp [--read-only], mcp install, doctor, projects, tui",
+            "agent-mem {}\nUsage: agent-mem <command> [args]\nCommands: init, get, set, relate, unrelate, del, archive, unarchive, trust, untrust, metadata, history, clean, find, dump, context, session add, session list, hook post-commit, sync [--accept-conflicts], semantic, mcp [--read-only], mcp install, doctor, stats, projects, tui",
             env!("CARGO_PKG_VERSION")
         );
     }
@@ -733,7 +736,7 @@ pub fn print_semantic_status(status: &crate::store::SemanticStatus) {
         return;
     }
     let (dot, freshness) = if status.dirty {
-        (AMBER, "stale")
+        (AMBER, "refresh pending (automatic)")
     } else {
         (EMERALD, "fresh")
     };
@@ -846,7 +849,7 @@ pub fn print_doctor(
                 );
             } else {
                 println!(
-                    "    {SUBTLE}·{RESET}  {MUTED}hooks{RESET}     {MUTED}none installed  ·  run 'agent-mem init'{RESET}"
+                    "    {SUBTLE}·{RESET}  {MUTED}hooks{RESET}     {MUTED}none installed  ·  run 'agent-mem doctor --fix'{RESET}"
                 );
             }
             if git_stats.rules_file_exists {
@@ -1006,6 +1009,266 @@ pub fn print_projects(projects: &[crate::registry::ProjectRecord]) {
     }
 }
 
+pub fn print_stats(
+    root: &std::path::Path,
+    project: Option<&crate::store::StoreStats>,
+    zombies: Option<usize>,
+    db_bytes: u64,
+    projects: &[crate::registry::ProjectRecord],
+) {
+    let is_tty = io::stdout().is_terminal();
+    let name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+
+    if is_tty {
+        println!();
+        println!(
+            "  {ACCENT}agent-mem stats{RESET}  {SUBTLE}·{RESET}  {MUTED}project: {}{RESET}",
+            name
+        );
+        println!("  {MUTED}{}{RESET}", root.display());
+        println!();
+        match project {
+            Some(s) => {
+                let zombie_note = match zombies {
+                    Some(0) | None => String::new(),
+                    Some(n) => format!(
+                        "  {AMBER}· {} zombie{} with missing anchors{RESET}",
+                        n,
+                        if n == 1 { "" } else { "s" }
+                    ),
+                };
+                println!(
+                    "    {EMERALD}●{RESET}  {MUTED}rules{RESET}      {ACCENT}{} active{RESET}  {SUBTLE}·{RESET}  {MUTED}{} archived{RESET}{zombie_note}",
+                    s.active_rules_count, s.archived_rules_count
+                );
+                println!(
+                    "    {EMERALD}●{RESET}  {MUTED}sessions{RESET}   {ACCENT}{}{RESET}",
+                    s.sessions_count
+                );
+                println!(
+                    "    {SUBTLE}◆{RESET}  {MUTED}database{RESET}   {MUTED}{} KB  ·  schema v{}  ·  {}{RESET}",
+                    db_bytes.div_ceil(1024),
+                    s.user_version,
+                    s.journal_mode
+                );
+            }
+            None => {
+                println!(
+                    "    {AMBER}◇{RESET}  {MUTED}no project memory here  ·  run 'agent-mem init'{RESET}"
+                );
+            }
+        }
+        println!();
+        println!(
+            "  {MUTED}canonical registry ({} registered){RESET}",
+            projects.len()
+        );
+        if projects.is_empty() {
+            println!("    {SUBTLE}·{RESET}  {MUTED}no projects registered yet{RESET}");
+        }
+        for p in projects {
+            let last_str = format_relative_time(p.last_accessed);
+            println!(
+                "    {EMERALD}▶{RESET}  {ACCENT}{:<20}{RESET}  {MUTED}{:>2} active{RESET}  {SUBTLE}·{RESET}  {MUTED}{:>2} sessions{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                p.name, p.rules_count, p.sessions_count, last_str
+            );
+            println!(
+                "       {SUBTLE}path:{RESET} {MUTED}{}{RESET}",
+                p.canonical_path
+            );
+        }
+        println!();
+    } else {
+        match project {
+            Some(s) => println!(
+                "project\t{}\tpath={}\trules_active={}\trules_archived={}\tzombies={}\tsessions={}\tdb_bytes={}\tschema=v{}\tjournal={}",
+                name,
+                root.display(),
+                s.active_rules_count,
+                s.archived_rules_count,
+                zombies.unwrap_or(0),
+                s.sessions_count,
+                db_bytes,
+                s.user_version,
+                s.journal_mode
+            ),
+            None => println!(
+                "project\t{}\tpath={}\tuninitialized=true",
+                name,
+                root.display()
+            ),
+        }
+        println!("registry_projects={}", projects.len());
+        println!("NAME\tACTIVE\tARCHIVED\tSESSIONS\tLAST_ACCESSED\tPATH");
+        for p in projects {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                p.name,
+                p.rules_count,
+                p.archived_count,
+                p.sessions_count,
+                p.last_accessed,
+                p.canonical_path
+            );
+        }
+    }
+}
+
+/// Byte ceiling for injected session context. Session hooks run on every
+/// editor startup; the budget keeps the cost bounded even on rule-heavy
+/// projects.
+pub const SESSION_CONTEXT_BUDGET_BYTES: usize = 4096;
+
+/// Render the session-start injection payload with a hard byte budget.
+/// Mirrors print_context_filtered's line format so injected context and the
+/// `context` command stay visually identical.
+pub fn render_session_context(
+    rules: &[crate::store::RuleRecord],
+    relations: &[crate::store::RelationRecord],
+    sessions: &[(i64, String)],
+) -> String {
+    const TRUNCATION_NOTICE: &str = "\n...[truncated: session context budget]";
+    let budget = SESSION_CONTEXT_BUDGET_BYTES.saturating_sub(TRUNCATION_NOTICE.len());
+    let mut out = String::new();
+    let mut truncated = false;
+
+    let mut push_line = |out: &mut String, line: String| {
+        let cost = line.len() + 1;
+        if out.len() + cost > budget {
+            truncated = true;
+            return;
+        }
+        out.push_str(&line);
+        out.push('\n');
+    };
+
+    for r in rules {
+        let kind_badge = if r.kind != "rule" {
+            format!("[{}] ", r.kind)
+        } else {
+            String::new()
+        };
+        match &r.anchor {
+            Some(anchor) => push_line(
+                &mut out,
+                format!("{}{}: {} ({})", kind_badge, r.key, r.val, anchor),
+            ),
+            None => push_line(&mut out, format!("{}{}: {}", kind_badge, r.key, r.val)),
+        }
+    }
+    for rel in relations {
+        push_line(
+            &mut out,
+            format!(
+                "{} -> {} -> {}",
+                rel.source_key, rel.rel_type, rel.target_key
+            ),
+        );
+    }
+    // Only the most recent checkpoints matter at session start.
+    for (_id, summary) in sessions.iter().take(3) {
+        let mut line = summary.clone();
+        if line.len() > 200 {
+            line.truncate(197);
+            line.push_str("...");
+        }
+        push_line(&mut out, format!("[session] {line}"));
+    }
+
+    if out.is_empty() {
+        return String::new();
+    }
+    if truncated {
+        out.push_str(TRUNCATION_NOTICE);
+    }
+    out
+}
+
+pub fn print_hooks_install(results: &[crate::lifecycle::LifecycleResult]) {
+    let is_tty = io::stdout().is_terminal();
+    if results.is_empty() {
+        if is_tty {
+            println!(
+                "  {SUBTLE}◇{RESET}  {MUTED}no supported clients detected  ·  run 'agent-mem hooks install [zcode|claude-code]'{RESET}"
+            );
+        } else {
+            println!("no supported clients detected");
+        }
+        return;
+    }
+    for r in results {
+        let status = if r.configured {
+            "already configured"
+        } else {
+            "configured"
+        };
+        if is_tty {
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}{status}{RESET}  {ACCENT}SessionStart{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                r.client.display_name(),
+                r.path.display()
+            );
+        } else {
+            println!("{} {} in {}", status, r.client.name(), r.path.display());
+        }
+    }
+}
+
+pub fn print_hooks_uninstall(results: &[crate::lifecycle::LifecycleResult]) {
+    let is_tty = io::stdout().is_terminal();
+    if results.is_empty() {
+        if is_tty {
+            println!("  {SUBTLE}◇{RESET}  {MUTED}no session hooks were registered{RESET}");
+        } else {
+            println!("no session hooks were registered");
+        }
+        return;
+    }
+    for r in results {
+        if is_tty {
+            println!(
+                "  {EMERALD}✓{RESET}  {MUTED}removed{RESET}  {ACCENT}SessionStart{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                r.client.display_name()
+            );
+        } else {
+            println!("removed {}", r.client.name());
+        }
+    }
+}
+
+pub fn print_hooks_status(
+    status: &[(
+        crate::lifecycle::LifecycleClient,
+        bool,
+        Option<std::path::PathBuf>,
+    )],
+) {
+    let is_tty = io::stdout().is_terminal();
+    for (client, configured, path) in status {
+        let shown_path = path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        if is_tty {
+            let (dot, state) = if *configured {
+                (EMERALD, "registered")
+            } else {
+                (SUBTLE, "not registered")
+            };
+            println!(
+                "  {dot}●{RESET}  {ACCENT}{:<12}{RESET}  {MUTED}{state}{RESET}  {SUBTLE}·{RESET}  {MUTED}{}{RESET}",
+                client.display_name(),
+                shown_path
+            );
+        } else {
+            println!("{}\t{}\t{}", client.name(), *configured as u8, shown_path);
+        }
+    }
+}
+
 pub fn print_hook_report(report: &crate::hook::HookReport) {
     let is_tty = io::stdout().is_terminal();
 
@@ -1064,10 +1327,11 @@ pub fn print_hook_report(report: &crate::hook::HookReport) {
 
     for z in &report.zombies {
         let prefix = if report.dry_run { "[dry-run] " } else { "" };
-        let action = if report.dry_run {
-            "would archive"
-        } else {
-            "archived"
+        let action = match (report.dry_run, z.remaining_paths.is_empty()) {
+            (true, true) => "would archive",
+            (false, true) => "archived",
+            (true, false) => "would repair anchor for",
+            (false, false) => "repaired anchor for",
         };
         if is_tty {
             println!(
@@ -1102,30 +1366,43 @@ pub fn print_clean(report: &[crate::store::ZombieReport], dry_run: bool) {
         }
     } else {
         let prefix = if dry_run { "[dry-run] " } else { "" };
-        let action = if dry_run { "would archive" } else { "archived" };
         if is_tty {
             println!(
-                "  {AMBER}!{RESET}  {MUTED}{}clean: {} {} zombie rule(s){RESET}",
+                "  {AMBER}!{RESET}  {MUTED}{}clean: found {} stale anchored rule(s){RESET}",
                 prefix,
-                action,
                 report.len()
             );
             for z in report {
+                let action = match (dry_run, z.remaining_paths.is_empty()) {
+                    (true, true) => "would archive",
+                    (false, true) => "archived",
+                    (true, false) => "would repair anchor",
+                    (false, false) => "repaired anchor",
+                };
                 println!(
-                    "    {SUBTLE}·{RESET}  {ACCENT}{}{RESET}  {MUTED}missing: {}{RESET}",
+                    "    {SUBTLE}·{RESET}  {MUTED}{action}{RESET}  {ACCENT}{}{RESET}  {MUTED}missing: {}{RESET}",
                     z.key,
                     z.missing_paths.join(", ")
                 );
             }
         } else {
             println!(
-                "{}clean: {} {} zombie rule(s)",
+                "{}clean: found {} stale anchored rule(s)",
                 prefix,
-                action,
                 report.len()
             );
             for z in report {
-                println!("  [{}] missing: {}", z.key, z.missing_paths.join(", "));
+                let action = match (dry_run, z.remaining_paths.is_empty()) {
+                    (true, true) => "would archive",
+                    (false, true) => "archived",
+                    (true, false) => "would repair anchor",
+                    (false, false) => "repaired anchor",
+                };
+                println!(
+                    "  {action} [{}], missing: {}",
+                    z.key,
+                    z.missing_paths.join(", ")
+                );
             }
         }
     }

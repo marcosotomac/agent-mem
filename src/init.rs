@@ -57,6 +57,18 @@ pub fn global_db_path() -> PathBuf {
     }
 }
 
+pub(crate) fn secure_private_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+pub(crate) fn secure_private_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 /// Resolves the actual git directory for standard repositories, git worktrees, or submodules.
 pub fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
     let dot_git = root.join(".git");
@@ -126,6 +138,7 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
     if !mem_dir.exists() {
         fs::create_dir_all(&mem_dir)?;
     }
+    secure_private_dir(&mem_dir)?;
     let db_path = mem_dir.join("mem.db");
     let mut store = Store::open(&db_path, true)?;
 
@@ -233,9 +246,9 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
     const TRIGGER_BLOCK: &str = "\
 <!-- agent-mem -->
 ## Persistent Memory Protocol
-- **On start:** Run `agent-mem context` (or MCP `mem_context`) to load project rules and recent sessions.
-- **On decisions:** Run `agent-mem set <key> \"<rule>\"` (or MCP `mem_set`) to record conventions or architecture.
-- **On search:** Run `agent-mem find <query>` (or MCP `mem_find`) to look up specific memories.
+- **On start:** Run `agent-mem context --scope all` (or MCP `mem_context`) to load trusted project rules and global preferences.
+- **On decisions:** Run `agent-mem set <key> \"<rule>\"` (or MCP `mem_set`) only for durable ADRs, conventions, patterns, and gotchas.
+- **On search:** Run `agent-mem find <query> --scope all` (or MCP `mem_find`) when past decisions may affect the task.
 <!-- /agent-mem -->\n";
 
     // 5. Inject minimal AI trigger instruction idempotently into rules file

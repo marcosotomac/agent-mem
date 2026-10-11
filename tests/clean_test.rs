@@ -120,6 +120,41 @@ fn test_clean_zombies_dry_run_and_execution() {
 }
 
 #[test]
+fn test_clean_repairs_partial_anchors_instead_of_archiving_rule() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("agent_mem_clean_partial_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(temp_dir.join("src")).unwrap();
+    fs::write(temp_dir.join("src/live.rs"), "pub fn live() {}").unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_entry(
+            "architecture/multi-anchor",
+            "valid while an implementation anchor survives",
+            Some("src/dead.rs:1, src/live.rs:9"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let dry = store.clean_zombies(&temp_dir, true).unwrap();
+    assert_eq!(dry[0].missing_paths, vec!["src/dead.rs"]);
+    assert_eq!(dry[0].remaining_paths, vec!["src/live.rs"]);
+    assert!(!dry[0].archived);
+
+    let repaired = store.clean_zombies(&temp_dir, false).unwrap();
+    assert!(!repaired[0].archived);
+    let entry = store
+        .get_entry("architecture/multi-anchor")
+        .unwrap()
+        .unwrap();
+    assert!(entry.archived_at.is_none());
+    assert_eq!(entry.anchor.as_deref(), Some("src/live.rs"));
+    assert!(store.clean_zombies(&temp_dir, true).unwrap().is_empty());
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
+#[test]
 fn test_clean_cli_parsing_and_execution() {
     let cmd = parse_args(vec!["agent-mem".into(), "clean".into()]).unwrap();
     assert_eq!(cmd, Command::Clean { dry_run: false });
@@ -144,6 +179,7 @@ fn test_clean_cli_parsing_and_execution() {
             val: "stale rule".into(),
             anchor: Some("src/ghost.rs:1".into()),
             kind: Some("gotcha".into()),
+            scope: agent_mem::cli::MemoryScope::Project,
         },
         &temp_dir,
     )
@@ -196,6 +232,7 @@ fn test_clean_in_post_commit_hook() {
             val: "watch out for legacy quirks".into(),
             anchor: Some("src/legacy.rs:1".into()),
             kind: Some("gotcha".into()),
+            scope: agent_mem::cli::MemoryScope::Project,
         },
         &temp_dir,
     )

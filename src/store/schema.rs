@@ -17,10 +17,12 @@ impl Store {
             }
             if let Some(parent) = db_path.parent() {
                 fs::create_dir_all(parent)?;
+                crate::init::secure_private_dir(parent)?;
             }
         }
 
         let mut conn = Connection::open(db_path)?;
+        crate::init::secure_private_file(db_path)?;
         Self::configure_conn(&mut conn, need_write)?;
         Ok(Self {
             conn,

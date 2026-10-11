@@ -5,6 +5,31 @@ use crate::store::Store;
 use std::env;
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryScope {
+    Project,
+    Global,
+    All,
+}
+
+impl MemoryScope {
+    fn parse(value: &str, allow_all: bool) -> Result<Self> {
+        match value {
+            "project" => Ok(Self::Project),
+            "global" => Ok(Self::Global),
+            "all" if allow_all => Ok(Self::All),
+            _ => Err(Error::Usage(format!(
+                "Invalid scope '{value}'. Expected project{}",
+                if allow_all {
+                    ", global, or all"
+                } else {
+                    " or global"
+                }
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Init {
@@ -18,6 +43,7 @@ pub enum Command {
         val: String,
         anchor: Option<String>,
         kind: Option<String>,
+        scope: MemoryScope,
     },
     Relate {
         source: String,
@@ -51,6 +77,7 @@ pub enum Command {
     },
     Find {
         query: String,
+        scope: MemoryScope,
     },
     Dump,
     Context {
@@ -59,6 +86,8 @@ pub enum Command {
         limit: usize,
         diff: bool,
         files: Vec<String>,
+        include_untrusted: bool,
+        scope: MemoryScope,
     },
     SessionAdd {
         summary: String,
@@ -83,7 +112,10 @@ pub enum Command {
     McpUninstall {
         client: Option<String>,
     },
-    Doctor,
+    Doctor {
+        fix: bool,
+    },
+    Stats,
     Projects {
         prune: bool,
     },
@@ -93,6 +125,16 @@ pub enum Command {
     HookPostCommit {
         dry_run: bool,
     },
+    HookSessionStart {
+        json: bool,
+    },
+    HooksInstall {
+        client: Option<String>,
+    },
+    HooksUninstall {
+        client: Option<String>,
+    },
+    HooksStatus,
     Tui,
     Help,
     Version,
@@ -116,8 +158,45 @@ impl Command {
                 | Command::SemanticBuild
                 | Command::SemanticClear
                 | Command::HookPostCommit { dry_run: false }
+                | Command::Doctor { fix: true }
         )
     }
+}
+
+/// Build an actionable error for commands that need project memory but were
+/// run where `.agent-mem/mem.db` does not exist. Distinguishes an
+/// uninitialized git repository from a bare directory and, when the global
+/// registry has a usable project, points at the most recently accessed one.
+pub fn not_initialized_error(root: &Path) -> Error {
+    let mut msg = String::from("no agent-mem project memory is initialized here.");
+    msg.push_str(&format!("\n  path: {}", root.display()));
+    if crate::init::resolve_git_dir(root).is_some() {
+        msg.push_str(
+            "\n  this is a git repository - run 'agent-mem init' to create project memory here.",
+        );
+    } else {
+        msg.push_str("\n  run 'agent-mem init' inside a repository to create project memory here.");
+    }
+    if let Ok(registry) = crate::registry::ProjectRegistry::load() {
+        let candidates = registry
+            .projects
+            .iter()
+            .filter(|p| {
+                Path::new(&p.canonical_path)
+                    .join(".agent-mem")
+                    .join("mem.db")
+                    .exists()
+            })
+            .collect::<Vec<_>>();
+        // Records are kept sorted by last_accessed (descending) on register.
+        if let Some(nearest) = candidates.first() {
+            msg.push_str(&format!(
+                "\n  most recent project: {} ({} active rules)\n    {}\n  use: cd {} && agent-mem context",
+                nearest.name, nearest.rules_count, nearest.canonical_path, nearest.canonical_path
+            ));
+        }
+    }
+    Error::Usage(msg)
 }
 
 pub fn parse_args<I>(args: I) -> Result<Command>
@@ -153,6 +232,7 @@ where
             let mut val_parts = Vec::new();
             let mut anchor = None;
             let mut kind = None;
+            let mut scope = MemoryScope::Project;
             let mut i = 3;
             while i < args.len() {
                 if (args[i] == "--anchor" || args[i] == "-a") && i + 1 < args.len() {
@@ -160,6 +240,9 @@ where
                     i += 2;
                 } else if (args[i] == "--kind" || args[i] == "-k") && i + 1 < args.len() {
                     kind = Some(args[i + 1].clone());
+                    i += 2;
+                } else if args[i] == "--scope" && i + 1 < args.len() {
+                    scope = MemoryScope::parse(&args[i + 1], false)?;
                     i += 2;
                 } else {
                     val_parts.push(args[i].clone());
@@ -172,6 +255,7 @@ where
                 val,
                 anchor,
                 kind,
+                scope,
             })
         }
         "relate" | "link" => {
@@ -268,12 +352,25 @@ where
             if args.len() < 3 {
                 return Err(Error::Usage("Usage: agent-mem find <query>".to_string()));
             }
-            let query = args[3..].iter().fold(args[2].clone(), |mut acc, s| {
-                acc.push(' ');
-                acc.push_str(s);
-                acc
-            });
-            Ok(Command::Find { query })
+            let mut terms = Vec::new();
+            let mut scope = MemoryScope::Project;
+            let mut i = 2;
+            while i < args.len() {
+                if args[i] == "--scope" && i + 1 < args.len() {
+                    scope = MemoryScope::parse(&args[i + 1], true)?;
+                    i += 2;
+                } else {
+                    terms.push(args[i].clone());
+                    i += 1;
+                }
+            }
+            if terms.is_empty() {
+                return Err(Error::Usage("Usage: agent-mem find <query>".to_string()));
+            }
+            Ok(Command::Find {
+                query: terms.join(" "),
+                scope,
+            })
         }
         "session" => {
             if args.len() < 3 {
@@ -304,6 +401,8 @@ where
             let mut limit = 20;
             let mut diff = false;
             let mut files = Vec::new();
+            let mut include_untrusted = false;
+            let mut scope = MemoryScope::Project;
             let mut i = 2;
             while i < args.len() {
                 if (args[i] == "--anchor" || args[i] == "-a") && i + 1 < args.len() {
@@ -322,6 +421,12 @@ where
                 } else if args[i] == "--diff" || args[i] == "-d" {
                     diff = true;
                     i += 1;
+                } else if args[i] == "--include-untrusted" {
+                    include_untrusted = true;
+                    i += 1;
+                } else if args[i] == "--scope" && i + 1 < args.len() {
+                    scope = MemoryScope::parse(&args[i + 1], true)?;
+                    i += 2;
                 } else if (args[i] == "--files" || args[i] == "-f") && i + 1 < args.len() {
                     for f in args[i + 1].split(',') {
                         let trimmed = f.trim();
@@ -348,6 +453,8 @@ where
                 limit,
                 diff,
                 files,
+                include_untrusted,
+                scope,
             })
         }
         "sync" => {
@@ -410,7 +517,10 @@ where
         }
         "--mcp" => Ok(Command::Mcp { read_only: false }),
         "tui" | "ui" => Ok(Command::Tui),
-        "doctor" => Ok(Command::Doctor),
+        "doctor" => Ok(Command::Doctor {
+            fix: args.iter().skip(2).any(|arg| arg == "--fix"),
+        }),
+        "stats" => Ok(Command::Stats),
         "projects" => {
             let prune = args
                 .get(2)
@@ -421,7 +531,7 @@ where
         "hook" => {
             if args.len() < 3 {
                 return Err(Error::Usage(
-                    "Usage: agent-mem hook post-commit [--dry-run]".to_string(),
+                    "Usage: agent-mem hook [post-commit|session-start] [--dry-run]".to_string(),
                 ));
             }
             match args[2].as_str() {
@@ -429,12 +539,31 @@ where
                     let dry_run = args.iter().skip(3).any(|a| a == "--dry-run" || a == "-n");
                     Ok(Command::HookPostCommit { dry_run })
                 }
+                "session-start" => Ok(Command::HookSessionStart {
+                    json: args
+                        .iter()
+                        .skip(3)
+                        .any(|a| a == "--json" || a == "--format=json"),
+                }),
                 other => Err(Error::Usage(format!(
-                    "Unknown hook subcommand '{}'. Usage: agent-mem hook post-commit [--dry-run]",
+                    "Unknown hook subcommand '{}'. Usage: agent-mem hook [post-commit|session-start]",
                     other
                 ))),
             }
         }
+        "hooks" => match args.get(2).map(String::as_str) {
+            Some("install") => Ok(Command::HooksInstall {
+                client: args.get(3).cloned(),
+            }),
+            Some("uninstall") | Some("remove") | Some("rm") => Ok(Command::HooksUninstall {
+                client: args.get(3).cloned(),
+            }),
+            Some("status") | None => Ok(Command::HooksStatus),
+            other => Err(Error::Usage(format!(
+                "Unknown hooks subcommand '{}'. Usage: agent-mem hooks [install|uninstall|status] [zcode|claude-code]",
+                other.unwrap_or("")
+            ))),
+        },
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-v" => Ok(Command::Version),
         unknown => Err(Error::Usage(format!(
@@ -517,7 +646,19 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 ))
             }
         }
-        Command::Doctor => {
+        Command::Doctor { fix } => {
+            if fix {
+                if crate::init::resolve_git_dir(root).is_some()
+                    || root.join(".agent-mem").join("mem.db").exists()
+                {
+                    let _ = init_project(root)?;
+                }
+                let mut registry = crate::registry::ProjectRegistry::load()?;
+                let pruned = registry.prune()?;
+                println!(
+                    "doctor fix: repaired project integration; pruned {pruned} stale project(s)"
+                );
+            }
             let db_path = root.join(".agent-mem").join("mem.db");
             let store_stats = if db_path.exists() {
                 Store::open(&db_path, false)
@@ -529,6 +670,34 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             let git_stats = crate::init::inspect_git_health(root);
             let clients = crate::installer::check_all_clients();
             print_doctor(store_stats.as_ref(), &git_stats, &clients);
+            Ok(())
+        }
+        Command::Stats => {
+            let db_path = root.join(".agent-mem").join("mem.db");
+            let (store_stats, zombies, db_bytes) = if db_path.exists() {
+                match Store::open(&db_path, false) {
+                    Ok(mut store) => {
+                        let stats = store.stats(&db_path).ok();
+                        let zombies = store
+                            .clean_zombies(root, true)
+                            .ok()
+                            .map(|report| report.len());
+                        let bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+                        (stats, zombies, bytes)
+                    }
+                    Err(_) => (None, None, 0),
+                }
+            } else {
+                (None, None, 0)
+            };
+            let registry = crate::registry::ProjectRegistry::load()?;
+            print_stats(
+                root,
+                store_stats.as_ref(),
+                zombies,
+                db_bytes,
+                &registry.projects,
+            );
             Ok(())
         }
         Command::Projects { prune } => {
@@ -550,8 +719,199 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             }
             Ok(())
         }
+        Command::HookSessionStart { json } => {
+            // Session hooks must never break an editor session: stay silent,
+            // read-only, and cheap when project memory is absent.
+            let db_path = root.join(".agent-mem").join("mem.db");
+            if !db_path.exists() {
+                return Ok(());
+            }
+            let Ok(store) = Store::open(&db_path, false) else {
+                return Ok(());
+            };
+            let Ok((rules, rels, sessions)) = store.context_filtered(None, None, 12) else {
+                return Ok(());
+            };
+            let Ok((rules, rels)) = store.filter_trusted_context(rules, rels) else {
+                return Ok(());
+            };
+            let text = crate::output::render_session_context(&rules, &rels, &sessions);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "SessionStart",
+                            "additionalContext": text,
+                        }
+                    })
+                );
+            } else {
+                print!("{text}");
+            }
+            Ok(())
+        }
+        Command::HooksInstall { client } => {
+            let results = crate::lifecycle::install_session_hooks(client.as_deref())?;
+            crate::output::print_hooks_install(&results);
+            Ok(())
+        }
+        Command::HooksUninstall { client } => {
+            let results = crate::lifecycle::uninstall_session_hooks(client.as_deref())?;
+            crate::output::print_hooks_uninstall(&results);
+            Ok(())
+        }
+        Command::HooksStatus => {
+            let status = crate::lifecycle::session_hooks_status()?;
+            crate::output::print_hooks_status(&status);
+            Ok(())
+        }
+        Command::Set {
+            key,
+            val,
+            anchor,
+            kind,
+            scope: MemoryScope::Global,
+        } => {
+            let db_path = crate::init::global_db_path();
+            let mut store = Store::open(&db_path, true)?;
+            store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())?;
+            print_set(&key, anchor.as_deref(), kind.as_deref());
+            Ok(())
+        }
+        Command::Set {
+            scope: MemoryScope::All,
+            ..
+        } => Err(Error::Usage(
+            "The set command accepts --scope project or --scope global".into(),
+        )),
+        Command::Find { query, scope } if scope != MemoryScope::Project => {
+            let mut entries = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            let paths = match scope {
+                MemoryScope::Global => vec![crate::init::global_db_path()],
+                MemoryScope::All => vec![
+                    root.join(".agent-mem").join("mem.db"),
+                    crate::init::global_db_path(),
+                ],
+                MemoryScope::Project => unreachable!(),
+            };
+            for path in paths {
+                if !path.exists() {
+                    continue;
+                }
+                let store = Store::open(&path, false)?;
+                for entry in store.find(&query)? {
+                    if seen.insert(entry.key.clone()) {
+                        entries.push(entry);
+                    }
+                }
+            }
+            print_find(&query, &entries);
+            Ok(())
+        }
+        Command::Context {
+            anchor,
+            topic,
+            limit,
+            diff,
+            mut files,
+            include_untrusted,
+            scope,
+        } if scope != MemoryScope::Project => {
+            if diff {
+                for file in crate::hook::get_diff_files(root) {
+                    if !files.contains(&file) {
+                        files.push(file);
+                    }
+                }
+            }
+            let paths = match scope {
+                MemoryScope::Global => vec![crate::init::global_db_path()],
+                MemoryScope::All => vec![
+                    root.join(".agent-mem").join("mem.db"),
+                    crate::init::global_db_path(),
+                ],
+                MemoryScope::Project => unreachable!(),
+            };
+            let mut scoped_results = Vec::new();
+            for path in paths {
+                if !path.exists() {
+                    scoped_results.push((Vec::new(), Vec::new(), Vec::new()));
+                    continue;
+                }
+                let store = Store::open(&path, false)?;
+                let (found_rules, found_relations, found_sessions) = if !files.is_empty() {
+                    store.context_for_files(&files, topic.as_deref(), limit)?
+                } else {
+                    store.context_filtered(anchor.as_deref(), topic.as_deref(), limit)?
+                };
+                let (found_rules, found_relations) = if include_untrusted {
+                    (found_rules, found_relations)
+                } else {
+                    store.filter_trusted_context(found_rules, found_relations)?
+                };
+                scoped_results.push((found_rules, found_relations, found_sessions));
+            }
+            let mut rules = Vec::new();
+            let mut relations = Vec::new();
+            let mut sessions = Vec::new();
+            let mut seen_rules = std::collections::HashSet::new();
+            let mut seen_relations = std::collections::HashSet::new();
+            let targets = if scope == MemoryScope::All {
+                let global_target = (limit / 4).max(usize::from(limit > 0));
+                vec![limit.saturating_sub(global_target), global_target]
+            } else {
+                vec![limit]
+            };
+            for ((found_rules, found_relations, found_sessions), target) in
+                scoped_results.iter().zip(targets)
+            {
+                for rule in found_rules.iter().take(target) {
+                    if seen_rules.insert(rule.key.clone()) {
+                        rules.push(rule.clone());
+                    }
+                }
+                for relation in found_relations {
+                    let identity = (
+                        relation.source_key.clone(),
+                        relation.rel_type.clone(),
+                        relation.target_key.clone(),
+                    );
+                    if seen_relations.insert(identity) {
+                        relations.push(relation.clone());
+                    }
+                }
+                sessions.extend(found_sessions.iter().cloned());
+            }
+            for (found_rules, _, _) in &scoped_results {
+                for rule in found_rules {
+                    if rules.len() == limit {
+                        break;
+                    }
+                    if seen_rules.insert(rule.key.clone()) {
+                        rules.push(rule.clone());
+                    }
+                }
+            }
+            let selected_keys = rules
+                .iter()
+                .map(|rule| rule.key.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            relations.retain(|relation| {
+                selected_keys.contains(relation.source_key.as_str())
+                    || selected_keys.contains(relation.target_key.as_str())
+            });
+            sessions.sort_unstable_by_key(|(id, _)| std::cmp::Reverse(*id));
+            sessions.truncate(3);
+            print_context_filtered(&rules, &relations, &sessions);
+            Ok(())
+        }
         _ => {
             let db_path = root.join(".agent-mem").join("mem.db");
+            if !db_path.exists() {
+                return Err(not_initialized_error(root));
+            }
             let mut store = Store::open(&db_path, cmd.is_write())?;
 
             match cmd {
@@ -567,6 +927,7 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     val,
                     anchor,
                     kind,
+                    scope: MemoryScope::Project,
                 } => {
                     store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())?;
                     let rules_file = root.join(".agent-rules");
@@ -667,7 +1028,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     }
                     print_clean(&report, dry_run);
                 }
-                Command::Find { query } => {
+                Command::Find {
+                    query,
+                    scope: MemoryScope::Project,
+                } => {
                     let entries = store.find(&query)?;
                     print_find(&query, &entries);
                 }
@@ -685,6 +1049,8 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     limit,
                     diff,
                     mut files,
+                    include_untrusted,
+                    scope: MemoryScope::Project,
                 } => {
                     if diff {
                         let diff_files = crate::hook::get_diff_files(root);
@@ -699,6 +1065,11 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                         store.context_for_files(&files, topic.as_deref(), limit)?
                     } else {
                         store.context_filtered(anchor.as_deref(), topic.as_deref(), limit)?
+                    };
+                    let (rules, rels) = if include_untrusted {
+                        (rules, rels)
+                    } else {
+                        store.filter_trusted_context(rules, rels)?
                     };
                     print_context_filtered(&rules, &rels, &sessions);
                 }
@@ -771,13 +1142,21 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 Command::Init { .. }
                 | Command::Help
                 | Command::Version
-                | Command::Doctor
+                | Command::Doctor { .. }
+                | Command::Stats
                 | Command::Projects { .. }
                 | Command::HookPostCommit { .. }
+                | Command::HookSessionStart { .. }
+                | Command::HooksInstall { .. }
+                | Command::HooksUninstall { .. }
+                | Command::HooksStatus
                 | Command::Tui
                 | Command::Mcp { .. }
                 | Command::McpInstall { .. }
                 | Command::McpUninstall { .. } => unreachable!(),
+                Command::Set { .. } | Command::Find { .. } | Command::Context { .. } => {
+                    unreachable!()
+                }
             }
             Ok(())
         }

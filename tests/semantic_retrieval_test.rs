@@ -10,7 +10,7 @@ struct SemanticCase {
 
 #[test]
 #[ignore = "downloads the local embedding model and measures real inference"]
-fn semantic_fallback_recovers_disjoint_multilingual_paraphrases_and_rejects_stale_rows() {
+fn semantic_fallback_recovers_paraphrases_and_refreshes_changed_memories() {
     let dir = std::env::temp_dir().join(format!(
         "agent_mem_semantic_eval_{}_{}",
         std::process::id(),
@@ -65,6 +65,7 @@ fn semantic_fallback_recovers_disjoint_multilingual_paraphrases_and_rejects_stal
     let status = store.semantic_status().unwrap();
     assert!(status.enabled);
     assert!(!status.dirty);
+    let first_index = status.index_path;
 
     let cases = [
         SemanticCase {
@@ -133,19 +134,82 @@ fn semantic_fallback_recovers_disjoint_multilingual_paraphrases_and_rejects_stal
             "Render the account preferences page with compact spacing",
         )
         .unwrap();
+    store
+        .set(
+            "decision/incident-rotation",
+            "Rotate credentials after incident containment to prevent reuse of compromised keys",
+        )
+        .unwrap();
     assert!(store.semantic_status().unwrap().dirty);
-    let stale_results = store
+    assert!(!store.find("incident rotation").unwrap().is_empty());
+    assert!(
+        store.semantic_status().unwrap().dirty,
+        "strong lexical search should not pay the embedding refresh cost"
+    );
+    let refresh_started = Instant::now();
+    let refreshed_results = store
         .find("evitar que una persona pague dos veces por reintentar")
         .unwrap();
-    assert!(
-        stale_results
-            .iter()
-            .all(|rule| rule.key != "decision/payment-write-safety"),
-        "fingerprint validation must reject stale semantic rows"
+    println!(
+        "semantic auto refresh after two changed memories: {} ms",
+        refresh_started.elapsed().as_millis()
     );
+    assert!(
+        refreshed_results
+            .iter()
+            .all(|rule| rule.key != "decision/payment-write-safety"
+                || rule.val == "Render the account preferences page with compact spacing"),
+        "search must never return an old memory value"
+    );
+    let status = store.semantic_status().unwrap();
+    assert!(
+        !status.dirty,
+        "semantic search should refresh a dirty index"
+    );
+    assert_eq!(status.records_count, 206);
+    assert_ne!(status.index_path, first_index);
+    let new_hits = store
+        .find("rotar credenciales después de contener un incidente")
+        .unwrap();
+    assert!(
+        new_hits
+            .iter()
+            .take(5)
+            .any(|rule| rule.key == "decision/incident-rotation"),
+        "new memories must be available to semantic search without a manual build"
+    );
+
+    store
+        .set(
+            "decision/incident-rotation",
+            "Rotate credentials after incident containment and invalidate compromised keys",
+        )
+        .unwrap();
+    let searches: Vec<_> = (0..2)
+        .map(|_| {
+            let path = db_path.clone();
+            std::thread::spawn(move || {
+                Store::open(&path, false)
+                    .unwrap()
+                    .find("evitar que una persona pague dos veces por reintentar")
+                    .unwrap()
+            })
+        })
+        .collect();
+    for search in searches {
+        assert!(!search.join().unwrap().is_empty());
+    }
+    assert!(!store.semantic_status().unwrap().dirty);
 
     assert!(store.semantic_clear().unwrap() >= 1);
     assert!(!store.semantic_status().unwrap().enabled);
+    store
+        .find("rotar credenciales después de contener un incidente")
+        .unwrap();
+    assert!(
+        !store.semantic_status().unwrap().enabled,
+        "explicitly disabling semantic search must remain effective"
+    );
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
 }

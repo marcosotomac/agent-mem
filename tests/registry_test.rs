@@ -199,6 +199,55 @@ fn test_registry_registration_and_anti_collision() {
 }
 
 #[test]
+fn test_registry_ids_distinguish_live_clones_of_same_remote() {
+    let remote = Some("git@github.com:test/repo.git");
+    let first = ProjectRegistry::generate_id("/work/clone-a", remote);
+    let second = ProjectRegistry::generate_id("/work/clone-b", remote);
+    assert_ne!(first, second);
+    assert_eq!(first.len(), 16);
+    assert_eq!(first, ProjectRegistry::generate_id("/work/clone-a", remote));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_registry_and_database_use_private_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = REGISTRY_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let global_dir = std::env::temp_dir().join(format!("agent_mem_private_{}", std::process::id()));
+    let project = global_dir.join("project");
+    fs::create_dir_all(&project).unwrap();
+    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
+
+    let db_path = project.join(".agent-mem/mem.db");
+    Store::open(&db_path, true).unwrap();
+    let mut registry = ProjectRegistry::load().unwrap();
+    registry.register(&project).unwrap();
+
+    assert_eq!(
+        fs::metadata(&global_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(global_dir.join("projects.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
+    let _ = fs::remove_dir_all(global_dir);
+}
+
+#[test]
 fn test_registry_atomic_save_and_persistence() {
     let _lock = REGISTRY_TEST_MUTEX
         .lock()
