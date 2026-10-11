@@ -179,6 +179,7 @@ fn test_clean_cli_parsing_and_execution() {
             val: "stale rule".into(),
             anchor: Some("src/ghost.rs:1".into()),
             kind: Some("gotcha".into()),
+            scope: agent_mem::cli::MemoryScope::Project,
         },
         &temp_dir,
     )
@@ -231,6 +232,7 @@ fn test_clean_in_post_commit_hook() {
             val: "watch out for legacy quirks".into(),
             anchor: Some("src/legacy.rs:1".into()),
             kind: Some("gotcha".into()),
+            scope: agent_mem::cli::MemoryScope::Project,
         },
         &temp_dir,
     )

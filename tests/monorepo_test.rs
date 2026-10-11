@@ -72,6 +72,7 @@ fn test_monorepo_deep_nesting_and_subproject_isolation() {
         val: "Turborepo + Cargo Workspaces".into(),
         anchor: Some("Cargo.toml:1".into()),
         kind: None,
+        scope: agent_mem::cli::MemoryScope::Project,
     };
     execute_command(root_set, &found_from_web).unwrap();
 
@@ -81,6 +82,7 @@ fn test_monorepo_deep_nesting_and_subproject_isolation() {
         val: "Actix Web 4.0".into(),
         anchor: Some("src/main.rs:5".into()),
         kind: None,
+        scope: agent_mem::cli::MemoryScope::Project,
     };
     execute_command(sub_set, &found_from_isolated).unwrap();
 

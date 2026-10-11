@@ -628,7 +628,7 @@ pub fn print_help() {
             "    {ACCENT}get{RESET}     {MUTED}<key>{RESET}           Retrieve raw value for key"
         );
         println!(
-            "    {ACCENT}set{RESET}     {MUTED}<key> <val> [--anchor <f:l>] [--kind <k>]{RESET} Record memory"
+            "    {ACCENT}set{RESET}     {MUTED}<key> <val> [--anchor <f:l>] [--kind <k>] [--scope project|global]{RESET} Record memory"
         );
         println!(
             "    {ACCENT}relate{RESET}  {MUTED}<src> <rel> <tgt>{RESET} Link memories in hypergraph"
@@ -656,7 +656,7 @@ pub fn print_help() {
             "    {ACCENT}history{RESET} {MUTED}<key>{RESET}           Inspect current and previous values"
         );
         println!(
-            "    {ACCENT}find{RESET}    {MUTED}<query>{RESET}         Search rules via BM25 index"
+            "    {ACCENT}find{RESET}    {MUTED}<query> [--scope project|global|all]{RESET} Search rules via BM25 index"
         );
         println!("    {ACCENT}dump{RESET}                    List all active rules");
         println!(
@@ -666,7 +666,7 @@ pub fn print_help() {
             "    {ACCENT}semantic{RESET} {MUTED}[build|status|clear]{RESET} Manage local semantic fallback"
         );
         println!(
-            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>] [--include-untrusted]{RESET} Export trusted context"
+            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>] [--scope project|global|all]{RESET} Export trusted context"
         );
         println!(
             "    {ACCENT}session{RESET} {MUTED}add <msg>{RESET}       Record session checkpoint"
