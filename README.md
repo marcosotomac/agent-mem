@@ -11,10 +11,10 @@ Ultra-fast, local-first, zero-daemon knowledge hypergraph and memory engine for 
 - **Fast local reads**: Embedded SQLite in WAL mode with a clustered B-tree (`WITHOUT ROWID`) and memory-mapped I/O (`PRAGMA mmap_size`). See the benchmark for measured operation latencies, including MCP and export costs.
 - **Clustered Knowledge Hypergraph**: Evolve beyond flat key-value pairs into engineering entities (`rule`, `decision`, `gotcha`, `pattern`) linked with typed directed edges (`mitigates`, `supersedes`, `depends_on`, `relates_to`).
 - **Indexed Anchor-Aware Context Filtering**: Schema v4 routes exact paths, directory hierarchy, and basenames through a compact hash index, then validates original anchors before 1-hop graph expansion. Retrieval work stays bounded by the requested result limit.
-- **Minimal token footprint**: Four consolidated MCP tools in 1,366 schema bytes (~341 tokens by the documented 4-byte estimate), with bounded plain-text results and anchor-aware retrieval.
+- **Minimal token footprint**: Four consolidated MCP tools with bounded plain-text results and anchor-aware retrieval.
 - **Zero background daemons**: Direct stdio communication without background HTTP processes or port collisions.
 - **Dual scopes**: Seamless access to isolated `project` memory (`.agent-mem/mem.db`) and user-level `global` preferences (`~/.config/agent-mem/global.db`).
-- **BM25 search**: Weighted SQLite FTS5 search across keys, values, anchors, reasons, and kinds. Strict queries keep the one-query fast path; a bounded OR fallback runs only after zero hits.
+- **BM25 search**: Weighted SQLite FTS5 search across keys, values, anchors, reasons, and kinds. Clear lexical matches keep the one-query fast path; a bounded OR fallback runs after zero strict hits. With the optional semantic index, ambiguous strict matches combine lexical and semantic results.
 - **Session ring buffer**: Automatic atomic pruning preserving the latest 20 session checkpoints.
 
 ## Benchmarks
@@ -75,10 +75,11 @@ agent-mem semantic build
 ```
 
 The first `semantic build` enables the local multilingual model for the current
-project. After a memory changes, the next search that needs semantic retrieval
-refreshes the index automatically. Unchanged embeddings are reused; keyword
-searches retain their fast path. `semantic status` shows when an automatic refresh
-is pending. `semantic clear` disables the fallback for that project.
+project. After a memory changes, the next ambiguous or zero-hit lexical search
+refreshes the index automatically. Unchanged embeddings are reused; clear lexical
+and single-keyword searches retain their fast path. `semantic status` shows when an
+automatic refresh is pending. `semantic clear` disables semantic retrieval for
+that project.
 
 ## CLI Usage
 ```bash
@@ -123,8 +124,9 @@ agent-mem find <query> [--scope project|global|all]
 agent-mem session add <summary>
 agent-mem session list
 
-# Dense context block for targeted delivery (with optional code anchor or topic filter)
-agent-mem context [--anchor <path:line>] [--topic <prefix>] [--limit <n>] [--scope project|global|all]
+# Dense context for a task, optionally combined with changed files or a topic prefix
+agent-mem context [--query <task>] [--diff|--files <paths>] [--anchor <path:line>] [--topic <prefix>] [--limit <n>] [--scope project|global|all]
+agent-mem context --query "fix payment retries" --diff --explain
 # Untrusted imports are quarantined by default; include only for explicit review
 agent-mem context --include-untrusted
 
@@ -180,6 +182,12 @@ agent-mem context --anchor src/auth/jwt.rs
 ```
 `agent-mem` retrieves memories directly anchored to that file path plus their outgoing 1-hop neighbors (e.g. connected gotchas and ADRs). Savings depend on the corpus and query. A result limit can omit relevant memories; the benchmark reports that loss separately from filtering savings.
 
+`--query` searches keys and values for the task, then combines those results with
+file matches, linked memories, and repository-wide rules. `--topic` remains a
+key-prefix filter. `--explain` lists why each rule was selected and which
+candidates were left out by the result limit; the diagnostic candidate pool is
+bounded to avoid scanning the full corpus.
+
 ## Team Git Sync (No Binary Conflicts)
 
 Unlike legacy memory engines that commit binary SQLite databases into Git (causing unresolvable merge conflicts) or require proprietary cloud sync, `agent-mem` uses a deterministic text sync protocol:
@@ -197,6 +205,7 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 - Obsolete conventions are soft-deprecated into an `# Archived Rules` block with migration reasons, preventing AI agents from repeating dead patterns while sparing prompt tokens.
 - `agent-mem clean` archives a rule only when every anchored file disappeared. If some anchors survive, it removes only the stale paths and rebuilds the routing index.
 - `agent-mem init` installs Git hooks (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) that automatically keep `.agent-rules` and local SQLite in sync across rebases and branch switches. Zero binary conflicts, 100% PR visibility!
+- The post-commit hook skips duplicate memories and short or temporary automatic summaries while retaining commit sessions. Use `Decision:`, `Gotcha:`, `Pattern:`, or `Rule:` trailers to state durable content explicitly; `Key:` updates a chosen memory. `Supersedes: old/key` archives the replaced memory atomically with the new capture. `agent-mem hook post-commit --dry-run` reports why an automatic capture was skipped.
 
 `agent-mem history <key>` shows the current value and up to 20 previous local versions, including values superseded by a team-file merge. Each entry includes its available provenance and trust state. History lives in the local SQLite database; `.agent-rules` remains the shared current-state file. By default, sync rejects conflicting definitions of the same key without changing SQLite. Edit the team file to resolve the conflict, or explicitly run `agent-mem sync --accept-conflicts` to choose the last definition and retain the alternative in local history.
 
@@ -233,10 +242,10 @@ Add `agent-mem` to your agent's MCP configuration (e.g., Claude Desktop, Cursor,
 }
 ```
 
-### Surgical MCP Tools (~341 estimated tokens total schema)
+### Surgical MCP Tools
 - `mem_set`: Store rules, decisions, or gotchas with optional code anchor, kind, relation, and scope (`project` or `global`).
 - `mem_find`: Search memories via BM25 keywords across `project`, `global`, or `all` scopes.
-- `mem_context`: Retrieve dense context block with optional `anchor` or `topic` filter for surgical LLM prompt injection.
+- `mem_context`: Retrieve bounded context with optional task `query`, `files`, `anchor`, or `topic`; `explain: true` includes selection and limit diagnostics.
 - `mem_manage`: Archive, reactivate, delete, link, or unlink memories without expanding the tool surface.
 
 Every project-scoped MCP call accepts `project` as a registered project id,
