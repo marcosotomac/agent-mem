@@ -19,7 +19,7 @@ const BUILD_BATCH_SIZE: usize = 128;
 const QUERY_CACHE_CAPACITY: usize = 256;
 const ANN_CANDIDATES: usize = 24;
 const MAX_RESULTS: usize = 5;
-const MAX_COSINE_DISTANCE: f32 = 1.0;
+const MAX_COSINE_DISTANCE: f32 = 0.45;
 
 static MODEL: Mutex<Option<TextEmbedding>> = Mutex::new(None);
 
@@ -75,8 +75,7 @@ fn model_cache_dir() -> PathBuf {
     if let Some(path) = env::var_os("AGENT_MEM_MODEL_DIR") {
         return PathBuf::from(path);
     }
-    env::var_os("HOME")
-        .map(PathBuf::from)
+    crate::init::user_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".cache")
         .join("agent-mem")
