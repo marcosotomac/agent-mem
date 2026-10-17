@@ -18,6 +18,7 @@ const CACHE_TTL_MS: u64 = 86_400_000;
 const DEFAULT_CONTEXT_LIMIT: usize = 10;
 const MAX_CONTEXT_LIMIT: usize = 50;
 const MAX_TEXT_RESULT_BYTES: usize = 16 * 1024;
+const TRUNCATION_NOTICE: &str = "\n...[truncated: output budget]";
 const MAX_BATCH_ITEMS: usize = 256;
 const MAX_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -288,13 +289,12 @@ impl McpServer {
         if text.len() <= MAX_TEXT_RESULT_BYTES {
             return text;
         }
-        const NOTICE: &str = "\n...[truncated: output budget]";
-        let mut end = MAX_TEXT_RESULT_BYTES.saturating_sub(NOTICE.len());
+        let mut end = MAX_TEXT_RESULT_BYTES.saturating_sub(TRUNCATION_NOTICE.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }
         text.truncate(end);
-        text.push_str(NOTICE);
+        text.push_str(TRUNCATION_NOTICE);
         text
     }
 
@@ -460,6 +460,8 @@ impl McpServer {
                             "files": { "type": "string" },
                             "anchor": { "type": "string" },
                             "topic": { "type": "string" },
+                            "query": { "type": "string" },
+                            "explain": { "type": "boolean" },
                             "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
                             "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["all", "project", "global"] }
@@ -905,6 +907,11 @@ impl McpServer {
                 let project_root = self.project_for_scope(args, scope)?;
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
                 let topic = args.get("topic").and_then(|v| v.as_str());
+                let query = args.get("query").and_then(|v| v.as_str());
+                let explain = args
+                    .get("explain")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let diff = args.get("diff").and_then(|v| v.as_bool()).unwrap_or(false);
                 let files_arg = args.get("files").and_then(|v| v.as_str()).unwrap_or("");
                 let mut files = Vec::new();
@@ -930,7 +937,7 @@ impl McpServer {
                     }
                 }
 
-                let compact = limit > 1;
+                let compact = limit > 1 || explain;
 
                 let (project_rule_limit, mut global_rule_limit) = if scope == "all" {
                     let global_reserved = if limit >= 4 {
@@ -946,8 +953,10 @@ impl McpServer {
                     (0, limit)
                 };
 
-                const NOTICE_LEN: usize = 32;
-                let total_byte_budget = MAX_TEXT_RESULT_BYTES.saturating_sub(NOTICE_LEN);
+                const EXPLAIN_BYTES: usize = 2048;
+                let total_byte_budget = MAX_TEXT_RESULT_BYTES.saturating_sub(
+                    TRUNCATION_NOTICE.len() + if explain { EXPLAIN_BYTES } else { 0 },
+                );
                 let mut current_bytes = 0;
 
                 let reserved_global_bytes = if scope == "all" { 2560 } else { 0 };
@@ -963,19 +972,28 @@ impl McpServer {
 
                 let mut lines = Vec::new();
                 let mut actual_project_rule_count = 0;
+                let mut included_explanations = Vec::new();
+                let mut omitted_explanations = Vec::new();
 
                 if (scope == "all" || scope == "project")
                     && let Some(store) = self.open_read_store("project", project_root.as_deref())?
                 {
-                    let (rules, rels, sessions) = if !files.is_empty() {
-                        store.context_for_files(&files, topic, project_rule_limit)?
-                    } else {
-                        store.context_filtered(anchor, topic, project_rule_limit)?
-                    };
+                    let selected = store.context_for_task(
+                        &files,
+                        anchor,
+                        topic,
+                        query,
+                        project_rule_limit,
+                        explain,
+                    )?;
+                    let explanation = explain.then(|| selected.clone_explanation());
+                    let (rules, rels, sessions) =
+                        (selected.rules, selected.relations, selected.sessions);
 
                     actual_project_rule_count = rules.len();
 
                     let mut project_rule_lines = Vec::new();
+                    let mut emitted = std::collections::HashSet::new();
                     for r in rules {
                         let trust_badge = Self::trust_badge(&store, &r.key)?;
                         let line = Self::format_context_rule(
@@ -990,12 +1008,23 @@ impl McpServer {
                         if current_bytes + cost <= project_byte_budget {
                             current_bytes += cost;
                             project_rule_lines.push(line);
+                            if explain {
+                                emitted.insert(r.key.clone());
+                            }
                         } else if project_rule_lines.is_empty() {
                             // First rule is allowed even if long (e.g. limit=1 with large payload)
                             current_bytes += cost;
                             project_rule_lines.push(line);
+                            if explain {
+                                emitted.insert(r.key.clone());
+                            }
                             break;
                         }
+                    }
+                    if let Some(selection) = explanation {
+                        let (included, omitted) = selection.explanation_lines(&emitted, "project");
+                        included_explanations.extend(included);
+                        omitted_explanations.extend(omitted);
                     }
 
                     if !project_rule_lines.is_empty() {
@@ -1056,8 +1085,27 @@ impl McpServer {
                     && (scope == "all" || scope == "global")
                     && let Some(store) = self.open_read_store("global", None)?
                 {
-                    let rules = store.dump_limited(global_rule_limit)?;
+                    let (rules, explanation) = if query.is_some() || explain {
+                        let selected = store.context_for_task(
+                            &[],
+                            None,
+                            topic,
+                            query,
+                            global_rule_limit,
+                            explain,
+                        )?;
+                        let explanation = explain.then(|| selected.clone_explanation());
+                        let rules = selected
+                            .rules
+                            .into_iter()
+                            .map(|rule| (rule.key, rule.val, rule.anchor))
+                            .collect();
+                        (rules, explanation)
+                    } else {
+                        (store.dump_limited(global_rule_limit)?, None)
+                    };
                     let mut global_lines = Vec::new();
+                    let mut emitted = std::collections::HashSet::new();
                     for (k, v, a) in rules {
                         let trust_badge = Self::trust_badge(&store, &k)?;
                         let line = Self::format_context_rule(
@@ -1072,12 +1120,28 @@ impl McpServer {
                         if current_bytes + cost <= total_byte_budget {
                             current_bytes += cost;
                             global_lines.push(line);
+                            if explain {
+                                emitted.insert(k);
+                            }
                         }
+                    }
+                    if let Some(selection) = explanation {
+                        let (included, omitted) = selection.explanation_lines(&emitted, "global");
+                        included_explanations.extend(included);
+                        omitted_explanations.extend(omitted);
                     }
                     if !global_lines.is_empty() {
                         lines.push("== GLOBAL PREFERENCES ==".to_string());
                         lines.extend(global_lines);
                     }
+                }
+
+                if explain {
+                    lines.push(crate::output::render_context_explanation(
+                        &included_explanations,
+                        &omitted_explanations,
+                        EXPLAIN_BYTES,
+                    ));
                 }
 
                 if lines.is_empty() {

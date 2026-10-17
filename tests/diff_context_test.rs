@@ -4,6 +4,142 @@ use std::fs;
 use std::process::Command as SysCommand;
 
 #[test]
+fn task_context_combines_query_files_and_explains_limit_omissions() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set("decision/a-default", "General engineering convention")
+        .unwrap();
+    store
+        .set(
+            "decision/z-payment",
+            "Payment retries require an idempotency key",
+        )
+        .unwrap();
+    store
+        .set_with_anchor("rule/auth", "Validate session tokens", Some("src/auth.rs"))
+        .unwrap();
+    store
+        .set("gotcha/payment", "Duplicate charges after retry")
+        .unwrap();
+    store
+        .relate("decision/z-payment", "mitigates", "gotcha/payment")
+        .unwrap();
+
+    let (old, _, _) = store.context_filtered(None, Some("decision/"), 1).unwrap();
+    assert_eq!(old[0].key, "decision/a-default");
+    let topical = store
+        .context_for_task(
+            &[],
+            None,
+            Some("decision/"),
+            Some("idempotency payment retries"),
+            1,
+            false,
+        )
+        .unwrap();
+    assert_eq!(topical.rules[0].key, "decision/z-payment");
+
+    let result = store
+        .context_for_task(
+            &["src/auth.rs".to_string()],
+            None,
+            None,
+            Some("idempotency payment retries"),
+            2,
+            true,
+        )
+        .unwrap();
+    let keys = result
+        .rules
+        .iter()
+        .map(|rule| rule.key.as_str())
+        .collect::<Vec<_>>();
+    assert!(keys.contains(&"decision/z-payment"));
+    assert!(keys.contains(&"rule/auth"), "file match retains a slot");
+    let emitted = result.rules.iter().map(|rule| rule.key.clone()).collect();
+    let (included, omitted) = result
+        .clone_explanation()
+        .explanation_lines(&emitted, "project");
+    assert!(
+        included
+            .iter()
+            .any(|line| line.contains("decision/z-payment: task query"))
+    );
+    assert!(
+        included
+            .iter()
+            .any(|line| line.contains("rule/auth: file anchor"))
+    );
+    assert!(
+        omitted
+            .iter()
+            .any(|line| line
+                .contains("gotcha/payment: linked from decision/z-payment via mitigates"))
+    );
+
+    let default = store
+        .context_for_task(&[], None, None, None, 1, true)
+        .unwrap();
+    let emitted = default.rules.iter().map(|rule| rule.key.clone()).collect();
+    let (_, omitted) = default
+        .clone_explanation()
+        .explanation_lines(&emitted, "project");
+    assert!(
+        omitted
+            .iter()
+            .any(|line| line.contains("decision/z-payment"))
+    );
+}
+
+#[test]
+fn cli_context_query_and_explain_render_selection_reasons() {
+    let root = std::env::temp_dir().join(format!(
+        "agent_mem_cli_task_context_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let mut store = Store::open(&root.join(".agent-mem/mem.db"), true).unwrap();
+    store
+        .set("decision/a-default", "General convention")
+        .unwrap();
+    store
+        .set("decision/z-payment", "Payment retries require idempotency")
+        .unwrap();
+    store
+        .set_with_anchor("rule/auth", "Validate session tokens", Some("src/auth.rs"))
+        .unwrap();
+    drop(store);
+
+    let output = SysCommand::new(env!("CARGO_BIN_EXE_agent-mem"))
+        .args([
+            "context",
+            "--query",
+            "payment retries",
+            "--files",
+            "src/auth.rs",
+            "--limit",
+            "2",
+            "--explain",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("decision/z-payment: Payment retries require idempotency"));
+    assert!(text.contains("rule/auth: Validate session tokens"));
+    assert!(text.contains("== WHY SELECTED =="));
+    assert!(text.contains("decision/z-payment: task query"));
+    assert!(text.contains("rule/auth: file anchor"));
+    assert!(text.contains("== OMITTED BY RESULT LIMIT"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn test_store_context_for_files_and_hypergraph_expansion() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_diff_context_test_{}",
@@ -163,8 +299,10 @@ fn test_cli_context_with_diff_in_git_repo() {
         Command::Context {
             anchor: None,
             topic: None,
+            query: None,
             limit: 20,
             diff: true,
+            explain: false,
             files: Vec::new(),
             include_untrusted: false,
             scope: agent_mem::cli::MemoryScope::Project,

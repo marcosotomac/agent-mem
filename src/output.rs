@@ -428,6 +428,56 @@ pub fn print_context_filtered(
     let _ = out.flush();
 }
 
+pub fn render_context_explanation(
+    included: &[String],
+    omitted: &[String],
+    max_bytes: usize,
+) -> String {
+    let mut out = String::from("== WHY SELECTED ==\n");
+    let selected_budget = if omitted.is_empty() {
+        max_bytes
+    } else {
+        max_bytes / 2
+    };
+    for line in included.iter().take(50) {
+        if out.len().saturating_add(line.len() + 1) > selected_budget {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if included.is_empty() {
+        out.push_str("No rules selected.\n");
+    }
+    if !omitted.is_empty() {
+        out.push_str("== OMITTED BY RESULT LIMIT (BOUNDED CANDIDATES) ==\n");
+        let mut shown = 0;
+        for line in omitted.iter().take(20) {
+            if out.len().saturating_add(line.len() + 1) > max_bytes {
+                break;
+            }
+            out.push_str(line);
+            out.push('\n');
+            shown += 1;
+        }
+        let remaining = omitted.len().saturating_sub(shown);
+        if remaining > 0 {
+            let notice = format!("...and {remaining} more bounded candidates\n");
+            if out.len().saturating_add(notice.len()) <= max_bytes {
+                out.push_str(&notice);
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+pub fn print_context_explanation(included: &[String], omitted: &[String]) {
+    println!(
+        "{}",
+        render_context_explanation(included, omitted, 16 * 1024)
+    );
+}
+
 pub fn print_context(rules: &[(String, String, Option<String>)], sessions: &[(i64, String)]) {
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
@@ -666,7 +716,7 @@ pub fn print_help() {
             "    {ACCENT}semantic{RESET} {MUTED}[build|status|clear]{RESET} Manage local semantic fallback"
         );
         println!(
-            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--limit <n>] [--scope project|global|all]{RESET} Export trusted context"
+            "    {ACCENT}context{RESET} {MUTED}[--anchor <a>] [--topic <t>] [--query <task>] [--explain] [--limit <n>] [--scope project|global|all]{RESET} Export trusted context"
         );
         println!(
             "    {ACCENT}session{RESET} {MUTED}add <msg>{RESET}       Record session checkpoint"
@@ -1287,7 +1337,13 @@ pub fn print_hook_report(report: &crate::hook::HookReport) {
                 ent.kind, ent.key, ent.val, anchor_str
             );
         } else {
-            println!("[dry-run] (skipped hypergraph entity)");
+            println!(
+                "[dry-run] (skipped hypergraph entity{})",
+                report
+                    .skip_reason
+                    .map(|reason| format!(": {reason}"))
+                    .unwrap_or_default()
+            );
         }
         for (s, r, t) in &report.relations {
             println!("[dry-run] relation: {} -> {} -> {}", s, r, t);
@@ -1315,6 +1371,9 @@ pub fn print_hook_report(report: &crate::hook::HookReport) {
                 .unwrap_or_default();
             println!("captured [{}] {}{}", ent.kind, ent.key, anchor_str);
         }
+    }
+    if let Some(reason) = report.skip_reason {
+        println!("skipped memory: {reason}");
     }
 
     for (s, r, t) in &report.relations {

@@ -198,8 +198,10 @@ fn test_parse_args() {
         Command::Context {
             anchor: None,
             topic: None,
+            query: None,
             limit: 20,
             diff: false,
+            explain: false,
             files: Vec::new(),
             include_untrusted: false,
             scope: agent_mem::cli::MemoryScope::Project,
@@ -222,8 +224,10 @@ fn test_parse_args() {
         Command::Context {
             anchor: Some("src/auth.rs".into()),
             topic: Some("auth/".into()),
+            query: None,
             limit: 5,
             diff: false,
+            explain: false,
             files: Vec::new(),
             include_untrusted: false,
             scope: agent_mem::cli::MemoryScope::Project,
@@ -243,12 +247,45 @@ fn test_parse_args() {
         Command::Context {
             anchor: None,
             topic: None,
+            query: None,
             limit: 20,
             diff: true,
+            explain: false,
             files: vec!["src/main.rs".into(), "src/lib.rs".into()],
             include_untrusted: false,
             scope: agent_mem::cli::MemoryScope::Project,
         }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "context".into(),
+            "--query".into(),
+            "fix payment retries".into(),
+            "--explain".into(),
+        ])
+        .unwrap(),
+        Command::Context {
+            anchor: None,
+            topic: None,
+            query: Some("fix payment retries".into()),
+            limit: 20,
+            diff: false,
+            explain: true,
+            files: Vec::new(),
+            include_untrusted: false,
+            scope: agent_mem::cli::MemoryScope::Project,
+        }
+    );
+    assert!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "context".into(),
+            "--query".into(),
+            "--explain".into(),
+        ])
+        .is_err()
     );
 
     // Mcp

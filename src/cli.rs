@@ -83,8 +83,10 @@ pub enum Command {
     Context {
         anchor: Option<String>,
         topic: Option<String>,
+        query: Option<String>,
         limit: usize,
         diff: bool,
+        explain: bool,
         files: Vec<String>,
         include_untrusted: bool,
         scope: MemoryScope,
@@ -402,8 +404,10 @@ where
         "context" => {
             let mut anchor = None;
             let mut topic = None;
+            let mut query = None;
             let mut limit = 20;
             let mut diff = false;
+            let mut explain = false;
             let mut files = Vec::new();
             let mut include_untrusted = false;
             let mut scope = MemoryScope::Project;
@@ -415,6 +419,12 @@ where
                 } else if (args[i] == "--topic" || args[i] == "-t") && i + 1 < args.len() {
                     topic = Some(args[i + 1].clone());
                     i += 2;
+                } else if args[i] == "--query" || args[i] == "-q" {
+                    let value = args.get(i + 1).filter(|value| !value.starts_with('-'));
+                    query = Some(value.ok_or_else(|| {
+                        Error::Usage("--query requires a task description".into())
+                    })?.clone());
+                    i += 2;
                 } else if (args[i] == "--limit" || args[i] == "-l" || args[i] == "-n")
                     && i + 1 < args.len()
                 {
@@ -424,6 +434,9 @@ where
                     i += 2;
                 } else if args[i] == "--diff" || args[i] == "-d" {
                     diff = true;
+                    i += 1;
+                } else if args[i] == "--explain" {
+                    explain = true;
                     i += 1;
                 } else if args[i] == "--include-untrusted" {
                     include_untrusted = true;
@@ -454,8 +467,10 @@ where
             Ok(Command::Context {
                 anchor,
                 topic,
+                query,
                 limit,
                 diff,
+                explain,
                 files,
                 include_untrusted,
                 scope,
@@ -837,8 +852,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
         Command::Context {
             anchor,
             topic,
+            query,
             limit,
             diff,
+            explain,
             mut files,
             include_untrusted,
             scope,
@@ -859,17 +876,32 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 MemoryScope::Project => unreachable!(),
             };
             let mut scoped_results = Vec::new();
-            for path in paths {
+            let mut explanations = Vec::new();
+            for (index, path) in paths.into_iter().enumerate() {
                 if !path.exists() {
                     scoped_results.push((Vec::new(), Vec::new(), Vec::new()));
                     continue;
                 }
                 let store = Store::open(&path, false)?;
-                let (found_rules, found_relations, found_sessions) = if !files.is_empty() {
-                    store.context_for_files(&files, topic.as_deref(), limit)?
-                } else {
-                    store.context_filtered(anchor.as_deref(), topic.as_deref(), limit)?
-                };
+                let selected = store.context_for_task(
+                    &files,
+                    anchor.as_deref(),
+                    topic.as_deref(),
+                    query.as_deref(),
+                    limit,
+                    explain,
+                )?;
+                if explain {
+                    let scope_name = if scope == MemoryScope::Global || index == 1 {
+                        "global"
+                    } else {
+                        "project"
+                    };
+                    explanations.push((scope_name, selected.clone_explanation()));
+                }
+                let found_rules = selected.rules;
+                let found_relations = selected.relations;
+                let found_sessions = selected.sessions;
                 let (found_rules, found_relations) = if include_untrusted {
                     (found_rules, found_relations)
                 } else {
@@ -929,6 +961,20 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             sessions.sort_unstable_by_key(|(id, _)| std::cmp::Reverse(*id));
             sessions.truncate(3);
             print_context_filtered(&rules, &relations, &sessions);
+            if explain {
+                let emitted = rules
+                    .iter()
+                    .map(|rule| rule.key.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                let mut included = Vec::new();
+                let mut omitted = Vec::new();
+                for (scope_name, selection) in explanations {
+                    let (selected, excluded) = selection.explanation_lines(&emitted, scope_name);
+                    included.extend(selected);
+                    omitted.extend(excluded);
+                }
+                crate::output::print_context_explanation(&included, &omitted);
+            }
             Ok(())
         }
         _ => {
@@ -1070,8 +1116,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 Command::Context {
                     anchor,
                     topic,
+                    query,
                     limit,
                     diff,
+                    explain,
                     mut files,
                     include_untrusted,
                     scope: MemoryScope::Project,
@@ -1085,17 +1133,31 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                         }
                     }
 
-                    let (rules, rels, sessions) = if !files.is_empty() {
-                        store.context_for_files(&files, topic.as_deref(), limit)?
-                    } else {
-                        store.context_filtered(anchor.as_deref(), topic.as_deref(), limit)?
-                    };
+                    let selected = store.context_for_task(
+                        &files,
+                        anchor.as_deref(),
+                        topic.as_deref(),
+                        query.as_deref(),
+                        limit,
+                        explain,
+                    )?;
+                    let explanation = explain.then(|| selected.clone_explanation());
+                    let (rules, rels, sessions) =
+                        (selected.rules, selected.relations, selected.sessions);
                     let (rules, rels) = if include_untrusted {
                         (rules, rels)
                     } else {
                         store.filter_trusted_context(rules, rels)?
                     };
                     print_context_filtered(&rules, &rels, &sessions);
+                    if let Some(selection) = explanation {
+                        let emitted = rules
+                            .iter()
+                            .map(|rule| rule.key.clone())
+                            .collect::<std::collections::HashSet<_>>();
+                        let (included, omitted) = selection.explanation_lines(&emitted, "project");
+                        crate::output::print_context_explanation(&included, &omitted);
+                    }
                 }
                 Command::Sync { file, export } => {
                     let target_file = file.as_deref().unwrap_or(".agent-rules");
