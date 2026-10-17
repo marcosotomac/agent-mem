@@ -910,9 +910,9 @@ fn test_not_initialized_error_suggests_most_recent_project() {
     );
 
     unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
-    fs::remove_dir_all(global_dir).unwrap();
-    fs::remove_dir_all(project_dir).unwrap();
-    fs::remove_dir_all(elsewhere).unwrap();
+    let _ = fs::remove_file(global_dir.join("projects.json"));
+    let _ = fs::remove_dir_all(project_dir);
+    let _ = fs::remove_dir_all(elsewhere);
 }
 
 #[test]
