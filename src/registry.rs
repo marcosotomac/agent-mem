@@ -30,8 +30,8 @@ pub fn registry_dir() -> PathBuf {
     if let Ok(dir) = env::var("AGENT_MEM_GLOBAL_DIR") {
         return PathBuf::from(dir);
     }
-    if let Ok(home) = env::var("HOME").or_else(|_| env::var("USERPROFILE")) {
-        PathBuf::from(home).join(".config").join("agent-mem")
+    if let Some(home) = crate::init::user_home_dir() {
+        home.join(".config").join("agent-mem")
     } else {
         PathBuf::from(".config").join("agent-mem")
     }

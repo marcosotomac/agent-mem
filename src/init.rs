@@ -43,15 +43,19 @@ pub fn find_project_root() -> PathBuf {
     find_project_root_from(&cwd)
 }
 
+pub fn user_home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .filter(|val| !val.is_empty())
+        .map(PathBuf::from)
+}
+
 pub fn global_db_path() -> PathBuf {
     if let Ok(dir) = env::var("AGENT_MEM_GLOBAL_DIR") {
         return PathBuf::from(dir).join("global.db");
     }
-    if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home)
-            .join(".config")
-            .join("agent-mem")
-            .join("global.db")
+    if let Some(home) = user_home_dir() {
+        home.join(".config").join("agent-mem").join("global.db")
     } else {
         PathBuf::from(".config").join("agent-mem").join("global.db")
     }
