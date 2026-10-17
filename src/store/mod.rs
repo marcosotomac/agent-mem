@@ -674,10 +674,10 @@ impl Store {
     fn is_stop_word(token: &str) -> bool {
         const STOP_WORDS: &[&str] = &[
             "a", "al", "an", "and", "are", "as", "at", "be", "by", "como", "con", "de", "del",
-            "el", "en", "es", "esta", "este", "for", "from", "how", "in", "into", "is", "it",
-            "la", "las", "lo", "los", "mas", "no", "of", "on", "or", "out", "para", "pero",
-            "por", "que", "se", "si", "sobre", "su", "sus", "that", "the", "this", "to", "un",
-            "una", "uno", "was", "when", "where", "with", "without", "y", "ya",
+            "el", "en", "es", "esta", "este", "for", "from", "how", "in", "into", "is", "it", "la",
+            "las", "lo", "los", "mas", "no", "of", "on", "or", "out", "para", "pero", "por", "que",
+            "se", "si", "sobre", "su", "sus", "that", "the", "this", "to", "un", "una", "uno",
+            "was", "when", "where", "with", "without", "y", "ya",
         ];
         STOP_WORDS
             .iter()

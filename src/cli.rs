@@ -421,9 +421,13 @@ where
                     i += 2;
                 } else if args[i] == "--query" || args[i] == "-q" {
                     let value = args.get(i + 1).filter(|value| !value.starts_with('-'));
-                    query = Some(value.ok_or_else(|| {
-                        Error::Usage("--query requires a task description".into())
-                    })?.clone());
+                    query = Some(
+                        value
+                            .ok_or_else(|| {
+                                Error::Usage("--query requires a task description".into())
+                            })?
+                            .clone(),
+                    );
                     i += 2;
                 } else if (args[i] == "--limit" || args[i] == "-l" || args[i] == "-n")
                     && i + 1 < args.len()
@@ -682,9 +686,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 ))
             }
         }
-        Command::Tutor { step, non_interactive } => {
-            crate::tutor::run_tutor(root, step, non_interactive)
-        }
+        Command::Tutor {
+            step,
+            non_interactive,
+        } => crate::tutor::run_tutor(root, step, non_interactive),
         Command::Doctor { fix } => {
             if fix {
                 if crate::init::resolve_git_dir(root).is_some()

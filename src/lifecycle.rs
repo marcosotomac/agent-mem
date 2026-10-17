@@ -12,8 +12,9 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-/// Hook entries we own are identified by this marker in the command string.
-const OWNED_MARKER: &str = "agent-mem hook session-start";
+/// Hook entries we own are identified by this subcommand marker and status prefix.
+const OWNED_SUBCOMMAND: &str = "hook session-start";
+const OWNED_STATUS_PREFIX: &str = "agent-mem:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleClient {
@@ -215,6 +216,20 @@ fn save_config(path: &std::path::Path, config: &Value) -> Result<()> {
     crate::installer::write_config_safely(path, &format!("{formatted}\n"))
 }
 
+fn is_owned_hook(hook: &Value) -> bool {
+    let status_owned = hook
+        .get("statusMessage")
+        .and_then(|s| s.as_str())
+        .is_some_and(|s| s.starts_with(OWNED_STATUS_PREFIX));
+    let command_owned = hook
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| {
+            c.contains(OWNED_SUBCOMMAND) && (c.contains("agent-mem") || c.contains("agent_mem"))
+        });
+    status_owned || command_owned
+}
+
 fn owned_entries(entries: &[Value]) -> Vec<usize> {
     entries
         .iter()
@@ -223,13 +238,7 @@ fn owned_entries(entries: &[Value]) -> Vec<usize> {
             entry
                 .get("hooks")
                 .and_then(|h| h.as_array())
-                .is_some_and(|inner| {
-                    inner.iter().any(|h| {
-                        h.get("command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(|c| c.contains(OWNED_MARKER))
-                    })
-                })
+                .is_some_and(|inner| inner.iter().any(is_owned_hook))
         })
         .map(|(i, _)| i)
         .collect()
@@ -384,7 +393,7 @@ mod tests {
 
     #[test]
     fn install_is_idempotent_and_uninstall_preserves_other_hooks() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = temp_home("roundtrip");
         let path = home.join(".claude/settings.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -435,7 +444,7 @@ mod tests {
 
     #[test]
     fn invalid_json_is_never_modified() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = temp_home("invalid");
         let path = home.join(".claude/settings.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -461,8 +470,19 @@ mod tests {
     }
 
     #[test]
+    fn owned_entries_matches_quoted_windows_and_test_binaries() {
+        let entries = vec![
+            json!({"hooks": [{"type": "command", "command": "other-tool hook session-start"}]}),
+            json!({"hooks": [{"type": "command", "command": "'/Applications/Agent Mem/agent-mem' hook session-start"}]}),
+            json!({"hooks": [{"type": "command", "command": "'C:\\Users\\dev\\.cargo\\bin\\agent-mem.exe' hook session-start"}]}),
+            json!({"hooks": [{"type": "command", "command": "/target/debug/deps/agent_mem-8a99b7671c4dac8d hook session-start"}]}),
+        ];
+        assert_eq!(owned_entries(&entries), vec![1, 2, 3]);
+    }
+
+    #[test]
     fn zcode_uninstall_restores_previous_enabled_state() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = temp_home("zcode-enabled");
         let path = home.join(".zcode/cli/config.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
