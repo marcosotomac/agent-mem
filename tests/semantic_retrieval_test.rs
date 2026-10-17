@@ -8,6 +8,125 @@ struct SemanticCase {
     expected_key: &'static str,
 }
 
+fn p95_ms(samples: &mut [f64]) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    samples[(samples.len() * 95 / 100).min(samples.len() - 1)]
+}
+
+#[test]
+#[ignore = "uses the local embedding model to measure ambiguous-query recall and latency"]
+fn ambiguous_strict_matches_use_semantic_retrieval_without_slowing_clear_matches() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_ambiguous_eval_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut store = Store::open(&dir.join("mem.db"), true).unwrap();
+
+    let cases = [
+        (
+            "evitar que una persona pague dos veces por reintentar",
+            "decision/payment-write-safety",
+            "Require an Idempotency-Key on every mutating payment request so retries cannot create duplicate charges",
+            "evitar persona pague dos veces reintentar",
+        ),
+        (
+            "impedir que descubran secretos midiendo cuánto demora la comparación",
+            "gotcha/signature-check",
+            "Compare HMAC signatures and API tokens in constant time to block timing side channels",
+            "impedir descubran secretos midiendo cuánto demora comparación",
+        ),
+        (
+            "recorrer una lista cambiante sin saltar ni repetir filas",
+            "decision/list-navigation",
+            "Use cursor pagination with a stable tiebreaker instead of offsets for mutable datasets",
+            "recorrer lista cambiante sin saltar ni repetir filas",
+        ),
+    ];
+    for (_, key, value, trap_terms) in cases {
+        store.set(key, value).unwrap();
+        store
+            .set(
+                &format!("background/glossary-{key}"),
+                &format!(
+                    "Localization fixture indexes isolated words: {trap_terms}. This entry only tracks dictionary coverage."
+                ),
+            )
+            .unwrap();
+    }
+    for index in 0..60 {
+        store
+            .set(
+                &format!("background/service-{index:04}"),
+                &format!("Service {index} handles routine HTTP cache and database maintenance"),
+            )
+            .unwrap();
+    }
+
+    let mut lexical_hits = 0;
+    for (query, key, _, _) in cases {
+        let results = store.find(query).unwrap();
+        assert!(!results.is_empty(), "fixture needs a strict lexical hit");
+        if results.iter().take(5).any(|rule| rule.key == key) {
+            lexical_hits += 1;
+        }
+    }
+    assert_eq!(lexical_hits, 0, "fixture must reproduce the missed qrels");
+
+    let mut lexical_times = Vec::with_capacity(60);
+    for index in 0..60 {
+        let start = Instant::now();
+        store.find(cases[index % cases.len()].0).unwrap();
+        lexical_times.push(start.elapsed().as_secs_f64() * 1_000.0);
+    }
+    store.semantic_rebuild().unwrap();
+
+    let mut hits = 0;
+    for (query, key, _, _) in cases {
+        let results = store.find(query).unwrap();
+        if results.iter().take(5).any(|rule| rule.key == key) {
+            hits += 1;
+        }
+    }
+    let mut hybrid_times = Vec::with_capacity(60);
+    for index in 0..60 {
+        let start = Instant::now();
+        store.find(cases[index % cases.len()].0).unwrap();
+        hybrid_times.push(start.elapsed().as_secs_f64() * 1_000.0);
+    }
+    println!(
+        "ambiguous retrieval: lexical Recall@5={lexical_hits}/{}, hybrid Recall@5={hits}/{}, lexical warm p95={:.3}ms, hybrid warm p95={:.3}ms",
+        cases.len(),
+        cases.len(),
+        p95_ms(&mut lexical_times),
+        p95_ms(&mut hybrid_times)
+    );
+    assert_eq!(hits, cases.len(), "semantic fusion must recover every qrel");
+
+    store
+        .set(
+            "decision/list-navigation",
+            "Prefer cursor pagination for changing lists",
+        )
+        .unwrap();
+    assert!(store.semantic_status().unwrap().dirty);
+    let clear = store.find("decision list navigation").unwrap();
+    assert_eq!(clear[0].key, "decision/list-navigation");
+    let clear_with_stop_word = store.find("decision for list navigation").unwrap();
+    assert_eq!(clear_with_stop_word[0].key, "decision/list-navigation");
+    assert!(
+        store.semantic_status().unwrap().dirty,
+        "a clear key match must avoid semantic index refresh"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 #[ignore = "downloads the local embedding model and measures real inference"]
 fn semantic_fallback_recovers_paraphrases_and_refreshes_changed_memories() {

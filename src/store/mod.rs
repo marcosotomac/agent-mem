@@ -5,6 +5,8 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from
 use std::cell::RefCell;
 use std::collections::HashSet;
 #[cfg(feature = "semantic-local")]
+use std::collections::VecDeque;
+#[cfg(feature = "semantic-local")]
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -531,6 +533,19 @@ impl Store {
         }
     }
 
+    /// Find an active memory with the same kind and text, without loading the full graph.
+    pub fn active_duplicate(&self, kind: &str, val: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key FROM memories WHERE kind = ?1 AND val = ?2 COLLATE NOCASE
+             AND archived_at IS NULL LIMIT 1;",
+        )?;
+        let mut rows = stmt.query(params![kind, val.trim()])?;
+        rows.next()?
+            .map(|row| row.get(0))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     /// Retrieve a key-value memory rule value.
     pub fn get(&self, key: &str) -> Result<Option<String>> {
         if key.trim().is_empty() {
@@ -655,13 +670,34 @@ impl Store {
         Ok(list)
     }
 
+    #[inline]
+    fn is_stop_word(token: &str) -> bool {
+        const STOP_WORDS: &[&str] = &[
+            "a", "al", "an", "and", "are", "as", "at", "be", "by", "como", "con", "de", "del",
+            "el", "en", "es", "esta", "este", "for", "from", "how", "in", "into", "is", "it",
+            "la", "las", "lo", "los", "mas", "no", "of", "on", "or", "out", "para", "pero",
+            "por", "que", "se", "si", "sobre", "su", "sus", "that", "the", "this", "to", "un",
+            "una", "uno", "was", "when", "where", "with", "without", "y", "ya",
+        ];
+        STOP_WORDS
+            .iter()
+            .any(|word| token.eq_ignore_ascii_case(word))
+    }
+
+    #[cfg(feature = "semantic-local")]
+    #[inline]
+    fn words_eq_ignore_case(a: &str, b: &str) -> bool {
+        if a.is_ascii() && b.is_ascii() {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a.chars()
+                .flat_map(char::to_lowercase)
+                .eq(b.chars().flat_map(char::to_lowercase))
+        }
+    }
+
     /// Build bounded, safe FTS5 terms from user input without breaking Porter stemming.
     fn sanitized_fts_terms(raw: &str) -> Vec<String> {
-        const STOP_WORDS: &[&str] = &[
-            "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "of", "on", "or",
-            "out", "the", "to", "with", "con", "de", "del", "el", "en", "la", "las", "los", "para",
-            "por", "que", "un", "una",
-        ];
         let terms: Vec<(String, bool)> = raw
             .split(|c: char| {
                 c.is_whitespace() || (c.is_ascii_punctuation() && c != '_' && c != '-' && c != '*')
@@ -684,9 +720,7 @@ impl Store {
                 } else if is_prefix {
                     Some((format!("\"{}\"*", sanitized), false))
                 } else {
-                    let stop_word = STOP_WORDS
-                        .iter()
-                        .any(|word| sanitized.eq_ignore_ascii_case(word));
+                    let stop_word = Self::is_stop_word(&sanitized);
                     Some((format!("\"{}\"", sanitized), stop_word))
                 }
             })
@@ -713,6 +747,59 @@ impl Store {
     fn relaxed_fts_query(raw: &str) -> Option<String> {
         let terms = Self::sanitized_fts_terms(raw);
         (terms.len() > 1).then(|| terms.join(" OR "))
+    }
+
+    #[cfg(feature = "semantic-local")]
+    /// A single keyword or a contiguous phrase in the top key is decisive.
+    /// A phrase in the value is decisive only when it is the sole strict hit.
+    fn clear_lexical_match(query: &str, results: &[RuleRecord]) -> bool {
+        let Some(top) = results.first() else {
+            return false;
+        };
+        let raw_terms: Vec<&str> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|term| !term.is_empty())
+            .take(16)
+            .collect();
+        if raw_terms.len() <= 1 {
+            return true;
+        }
+        let content_terms: Vec<&str> = raw_terms
+            .iter()
+            .copied()
+            .filter(|term| !Self::is_stop_word(term))
+            .collect();
+        if content_terms.len() == 1 && raw_terms.len() == 2 {
+            // Two-word query consisting of one stop word + one keyword (e.g. "the argon2id")
+            return true;
+        }
+        let contains_phrase = |text: &str, needle: &[&str]| {
+            if needle.is_empty() {
+                return false;
+            }
+            let mut window = VecDeque::with_capacity(needle.len());
+            for word in text.split(|c: char| !c.is_alphanumeric()) {
+                if word.is_empty() {
+                    continue;
+                }
+                if window.len() == needle.len() {
+                    window.pop_front();
+                }
+                window.push_back(word);
+                if window.len() == needle.len()
+                    && window
+                        .iter()
+                        .zip(needle)
+                        .all(|(word, term)| Self::words_eq_ignore_case(word, term))
+                {
+                    return true;
+                }
+            }
+            false
+        };
+        contains_phrase(&top.key, &raw_terms)
+            || (content_terms.len() >= 2 && contains_phrase(&top.key, &content_terms))
+            || (results.len() == 1 && contains_phrase(&top.val, &raw_terms))
     }
 
     fn find_fts(&self, fts_query: &str) -> Result<Vec<RuleRecord>> {
@@ -750,6 +837,16 @@ impl Store {
         let fts_query = Self::sanitize_fts_query(trimmed);
         let strict_results = self.find_fts(&fts_query)?;
         if !strict_results.is_empty() {
+            #[cfg(feature = "semantic-local")]
+            if !Self::clear_lexical_match(trimmed, &strict_results)
+                && let Ok(semantic_results) = self.find_semantic(trimmed)
+                && !semantic_results.is_empty()
+            {
+                return Ok(Self::merge_semantic_results(
+                    semantic_results,
+                    strict_results,
+                ));
+            }
             return Ok(strict_results);
         }
 
@@ -760,8 +857,7 @@ impl Store {
 
         #[cfg(feature = "semantic-local")]
         {
-            // Run semantic search in parallel with relaxed BM25 when no strict match
-            // RRF fusion combines both signals for better recall
+            // Combine semantic and relaxed BM25 when no strict match exists.
             if let Ok(semantic_results) = self.find_semantic(trimmed)
                 && !semantic_results.is_empty()
             {
@@ -776,31 +872,39 @@ impl Store {
     }
 
     #[cfg(feature = "semantic-local")]
-    fn rrf_fuse(
-        list_a: &[RuleRecord],
-        list_b: &[RuleRecord],
-        k: usize,
-    ) -> Vec<RuleRecord> {
+    fn rrf_fuse(list_a: &[RuleRecord], list_b: &[RuleRecord], k: usize) -> Vec<RuleRecord> {
         const RRF_K: usize = 60;
         use std::collections::HashMap;
-        let mut scores: HashMap<String, (f64, RuleRecord)> = HashMap::new();
+        // Track (rrf_score, semantic_rank, rule) so equal-rank ties prefer list_a
+        // without distorting lower-ranked semantic hits above top-ranked lexical hits.
+        let mut scores: HashMap<String, (f64, usize, RuleRecord)> =
+            HashMap::with_capacity(list_a.len() + list_b.len());
 
         for (rank, rule) in list_a.iter().enumerate() {
+            let contribution = 1.0 / (RRF_K + rank + 1) as f64;
             scores
                 .entry(rule.key.clone())
-                .and_modify(|(s, _)| *s += 1.0 / (RRF_K + rank + 1) as f64)
-                .or_insert((1.0 / (RRF_K + rank + 1) as f64, rule.clone()));
+                .and_modify(|(s, sem_rank, _)| {
+                    *s += contribution;
+                    *sem_rank = (*sem_rank).min(rank);
+                })
+                .or_insert((contribution, rank, rule.clone()));
         }
         for (rank, rule) in list_b.iter().enumerate() {
+            let contribution = 1.0 / (RRF_K + rank + 1) as f64;
             scores
                 .entry(rule.key.clone())
-                .and_modify(|(s, _)| *s += 1.0 / (RRF_K + rank + 1) as f64)
-                .or_insert((1.0 / (RRF_K + rank + 1) as f64, rule.clone()));
+                .and_modify(|(s, _, _)| *s += contribution)
+                .or_insert((contribution, usize::MAX, rule.clone()));
         }
 
         let mut items: Vec<_> = scores.into_values().collect();
-        items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        items.into_iter().take(k).map(|(_, rule)| rule).collect()
+        items.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.key.cmp(&b.2.key))
+        });
+        items.into_iter().take(k).map(|(_, _, rule)| rule).collect()
     }
 
     #[cfg(feature = "semantic-local")]
