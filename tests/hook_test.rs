@@ -472,16 +472,17 @@ fn test_hook_filters_noise_and_archives_explicitly_superseded_decision() {
         obsolete.skip_reason,
         Some("archived memory needs explicit replacement")
     );
+    let reopened = Store::open(&root.join(".agent-mem/mem.db"), false).unwrap();
     assert!(
-        Store::open(&root.join(".agent-mem/mem.db"), false)
-            .unwrap()
+        reopened
             .get_entry("decision/cache/add-redis-lru-backend")
             .unwrap()
             .unwrap()
             .archived_at
             .is_some()
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(reopened);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -509,7 +510,8 @@ fn test_commit_supersedes_requires_existing_target_atomically() {
     assert!(result.is_err());
     assert!(store.get_entry("decision/new").unwrap().is_none());
     assert!(store.session_list(20).unwrap().is_empty());
-    fs::remove_dir_all(root_path).unwrap();
+    drop(store);
+    let _ = fs::remove_dir_all(root_path);
 }
 
 #[test]
