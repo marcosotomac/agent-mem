@@ -81,6 +81,7 @@ pub struct HookReport {
     pub commit_hash: String,
     pub commit_subject: String,
     pub entity_captured: Option<HookEntity>,
+    pub skip_reason: Option<&'static str>,
     pub relations: Vec<(String, String, String)>, // (source, rel_type, target)
     pub session_id: Option<i64>,
     pub rules_synced: bool,
@@ -88,33 +89,105 @@ pub struct HookReport {
     pub zombies: Vec<crate::store::ZombieReport>,
 }
 
+fn transient_summary(summary: &str, has_body: bool) -> bool {
+    let lower = summary.trim().to_ascii_lowercase();
+    let words = lower.split_whitespace().count();
+    let first_word = lower.split(|c: char| !c.is_ascii_alphanumeric()).next();
+    (words < 3 && !has_body)
+        || matches!(
+            first_word,
+            Some("wip" | "tmp" | "temp" | "temporary" | "experiment" | "debug" | "revert" | "try")
+        )
+        || lower.contains("work in progress")
+        || lower.contains("for now")
+}
+
+fn assess_entity(
+    store: Option<&Store>,
+    parsed: &ParsedCommit,
+    body: &str,
+) -> Result<(Option<EntityProposal>, Option<&'static str>)> {
+    let Some(entity) = parsed.entity.as_ref() else {
+        return Ok((None, None));
+    };
+    let trailers = parse_trailers(body);
+    let explicit =
+        trailers.explicit_kind.is_some() || trailers.explicit_key.is_some() || parsed.is_breaking;
+    if !explicit && transient_summary(&parsed.summary, !trailers.non_trailer_body.is_empty()) {
+        return Ok((None, Some("transient commit summary")));
+    }
+    if let Some(store) = store {
+        if let Some(existing) = store.get_entry(&entity.key)? {
+            if existing.archived_at.is_some() && !explicit {
+                return Ok((None, Some("archived memory needs explicit replacement")));
+            }
+            if existing.archived_at.is_none()
+                && existing.val.eq_ignore_ascii_case(&entity.val)
+                && parsed.relations.is_empty()
+            {
+                return Ok((None, Some("duplicate memory")));
+            }
+            if existing.archived_at.is_none()
+                && !explicit
+                && !existing.val.eq_ignore_ascii_case(&entity.val)
+            {
+                return Ok((None, Some("existing key has different content")));
+            }
+        }
+        if let Some(key) = store.active_duplicate(entity.kind.as_str(), &entity.val)?
+            && key != entity.key
+        {
+            return Ok((None, Some("duplicate memory")));
+        }
+    }
+    Ok((Some(entity.clone()), None))
+}
+
 /// Filter out agent-mem internal files, git metadata, and lockfiles from source anchors.
 pub fn is_relevant_source_file(path: &str) -> bool {
-    let p = path.trim();
-    if p.is_empty() {
-        return false;
-    }
-    if p == ".agent-rules"
+    let p = path.trim().trim_start_matches("./");
+    if p.is_empty()
         || p.starts_with(".agent-mem")
-        || p == ".gitignore"
-        || p == ".gitattributes"
         || p.starts_with(".git/")
-        || p == "AGENTS.md"
-        || p == "CLAUDE.md"
-        || p == ".cursorrules"
-        || p == ".windsurfrules"
+        || p.starts_with(".atl/")
     {
         return false;
     }
-    if p == "Cargo.lock"
-        || p == "package-lock.json"
-        || p == "pnpm-lock.yaml"
-        || p == "yarn.lock"
-        || p == "poetry.lock"
-        || p == "Gemfile.lock"
+
+    let base = p.rsplit(['/', '\\']).next().unwrap_or(p);
+    if base.is_empty()
+        || base.starts_with(".agent-mem")
+        || matches!(
+            base,
+            ".agent-rules"
+                | ".gitignore"
+                | ".gitattributes"
+                | ".gitmodules"
+                | "AGENTS.md"
+                | "CLAUDE.md"
+                | ".cursorrules"
+                | ".windsurfrules"
+                | ".clinerules"
+                | "copilot-instructions.md"
+                | "go.sum"
+                | "npm-shrinkwrap.json"
+                | "packages.lock.json"
+        )
     {
         return false;
     }
+
+    let lower = base.as_bytes();
+    if base.ends_with(".lock")
+        || base.ends_with(".lockb")
+        || base.ends_with("-lock.json")
+        || base.ends_with("-lock.yaml")
+        || base.ends_with("-lock.yml")
+        || (lower.len() > 5 && base.to_ascii_lowercase().ends_with(".lock"))
+    {
+        return false;
+    }
+
     true
 }
 
@@ -267,6 +340,21 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
     trailers
 }
 
+#[inline]
+fn fold_latin_diacritic(ch: char) -> Option<char> {
+    match ch {
+        'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' | 'Á' | 'À' | 'Ä' | 'Â' | 'Ã' | 'Å' => Some('a'),
+        'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => Some('e'),
+        'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => Some('i'),
+        'ó' | 'ò' | 'ö' | 'ô' | 'õ' | 'ø' | 'Ó' | 'Ò' | 'Ö' | 'Ô' | 'Õ' | 'Ø' => Some('o'),
+        'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => Some('u'),
+        'ñ' | 'Ñ' => Some('n'),
+        'ç' | 'Ç' => Some('c'),
+        'ý' | 'ÿ' | 'Ý' | 'Ÿ' => Some('y'),
+        _ => None,
+    }
+}
+
 /// Generate a concise, token-efficient slug from a commit summary.
 /// Bounded to at most 4 significant words and 32 characters, using zero intermediate allocations.
 pub fn slugify(s: &str) -> String {
@@ -275,7 +363,8 @@ pub fn slugify(s: &str) -> String {
     let mut in_word = false;
 
     for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() {
+        let normalized = fold_latin_diacritic(ch).unwrap_or(ch);
+        if normalized.is_alphanumeric() {
             if !in_word {
                 if word_count >= 4 || slug.len() >= 26 {
                     break;
@@ -286,7 +375,15 @@ pub fn slugify(s: &str) -> String {
                 word_count += 1;
                 in_word = true;
             }
-            slug.push(ch.to_ascii_lowercase());
+            if normalized.is_ascii() {
+                slug.push(normalized.to_ascii_lowercase());
+            } else {
+                for lower in normalized.to_lowercase() {
+                    if slug.len() + lower.len_utf8() <= 32 {
+                        slug.push(lower);
+                    }
+                }
+            }
         } else {
             in_word = false;
         }
@@ -572,8 +669,18 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
 
     let parsed = parse_conventional_commit(&commit_info.subject, &commit_info.body);
     let anchor = extract_anchors(&commit_info.modified_files);
+    let db_path = root.join(".agent-mem").join("mem.db");
+    let mut store = if dry_run {
+        db_path
+            .exists()
+            .then(|| Store::open(&db_path, false))
+            .transpose()?
+    } else {
+        Some(Store::open(&db_path, true)?)
+    };
+    let (entity, skip_reason) = assess_entity(store.as_ref(), &parsed, &commit_info.body)?;
 
-    let entity_captured = parsed.entity.map(|e| HookEntity {
+    let entity_captured = entity.map(|e| HookEntity {
         key: e.key,
         val: e.val,
         kind: e.kind.as_str().to_string(),
@@ -591,9 +698,10 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     };
 
     if dry_run {
-        let db_path = root.join(".agent-mem").join("mem.db");
-        let zombies = if db_path.exists() && !commit_info.deleted_files.is_empty() {
-            let mut store = Store::open(&db_path, false)?;
+        let zombies = if let Some(store) = store
+            .as_mut()
+            .filter(|_| !commit_info.deleted_files.is_empty())
+        {
             store.clean_deleted_files(&commit_info.deleted_files, true)?
         } else {
             Vec::new()
@@ -603,6 +711,7 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
             commit_hash: commit_info.hash,
             commit_subject: commit_info.subject,
             entity_captured,
+            skip_reason,
             relations,
             session_id: None,
             rules_synced: false,
@@ -611,8 +720,7 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
         }));
     }
 
-    let db_path = root.join(".agent-mem").join("mem.db");
-    let mut store = Store::open(&db_path, true)?;
+    let mut store = store.expect("writable store is open for a live hook");
 
     let entity_tuple = entity_captured.as_ref().map(|e| {
         (
@@ -634,7 +742,19 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     } else {
         commit_info.subject.clone()
     };
-    let session_id = store.capture_commit(entity_tuple, &rel_tuples, &session_summary)?;
+    let already_recorded = store
+        .session_list(20)?
+        .iter()
+        .any(|session| session.1 == session_summary);
+    let session_id = store.capture_commit(
+        entity_tuple,
+        &rel_tuples,
+        if already_recorded {
+            ""
+        } else {
+            &session_summary
+        },
+    )?;
 
     let zombies = if !commit_info.deleted_files.is_empty() {
         store.clean_deleted_files(&commit_info.deleted_files, false)?
@@ -657,6 +777,7 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
         commit_hash: commit_info.hash,
         commit_subject: commit_info.subject,
         entity_captured,
+        skip_reason,
         relations,
         session_id,
         rules_synced,

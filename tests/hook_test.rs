@@ -362,6 +362,157 @@ fn test_post_commit_hook_with_relations_and_sync() {
 }
 
 #[test]
+fn test_hook_filters_noise_and_archives_explicitly_superseded_decision() {
+    let root_path = std::env::temp_dir().join(format!(
+        "agent_mem_hook_quality_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root_path).unwrap();
+    let root = root_path.as_path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "HookTester"]);
+    run_git(root, &["config", "user.email", "hook@agent-mem.dev"]);
+    init_project(root).unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+
+    fs::write(root.join("src/cache.rs"), "// original").unwrap();
+    run_git(root, &["add", "src/cache.rs"]);
+    run_git(
+        root,
+        &["commit", "-m", "feat(cache): add redis lru backend"],
+    );
+    let first = run_post_commit(root, false).unwrap().unwrap();
+    assert!(first.entity_captured.is_some());
+
+    let repeated = run_post_commit(root, true).unwrap().unwrap();
+    assert_eq!(repeated.skip_reason, Some("duplicate memory"));
+    assert!(repeated.entity_captured.is_none());
+    let replay = run_post_commit(root, false).unwrap().unwrap();
+    assert_eq!(replay.skip_reason, Some("duplicate memory"));
+    let store = Store::open(&root.join(".agent-mem/mem.db"), false).unwrap();
+    assert_eq!(store.session_list(20).unwrap().len(), 1);
+
+    fs::write(root.join("src/cache.rs"), "// duplicate").unwrap();
+    run_git(root, &["add", "src/cache.rs"]);
+    run_git(
+        root,
+        &["commit", "-m", "feat(storage): add redis lru backend"],
+    );
+    let duplicate = run_post_commit(root, false).unwrap().unwrap();
+    assert_eq!(duplicate.skip_reason, Some("duplicate memory"));
+    assert!(duplicate.entity_captured.is_none());
+
+    fs::write(root.join("src/cache.rs"), "// temporary").unwrap();
+    run_git(root, &["add", "src/cache.rs"]);
+    run_git(root, &["commit", "-m", "feat(cache): wip try new backend"]);
+    let transient = run_post_commit(root, false).unwrap().unwrap();
+    assert_eq!(transient.skip_reason, Some("transient commit summary"));
+    assert!(transient.entity_captured.is_none());
+
+    fs::write(root.join("src/cache.rs"), "// replacement").unwrap();
+    run_git(root, &["add", "src/cache.rs"]);
+    run_git(
+        root,
+        &[
+            "commit",
+            "-m",
+            "feat(cache): move to durable backend",
+            "-m",
+            "Decision: Use a durable backend for cache persistence.\nKey: decision/cache/durable-backend\nSupersedes: decision/cache/add-redis-lru-backend",
+        ],
+    );
+    let replacement = run_post_commit(root, false).unwrap().unwrap();
+    assert_eq!(
+        replacement.entity_captured.unwrap().key,
+        "decision/cache/durable-backend"
+    );
+    let store = Store::open(&root.join(".agent-mem/mem.db"), false).unwrap();
+    let old = store
+        .get_entry("decision/cache/add-redis-lru-backend")
+        .unwrap()
+        .unwrap();
+    assert!(old.archived_at.is_some());
+    assert_eq!(
+        old.archive_reason.as_deref(),
+        Some("superseded_by: decision/cache/durable-backend")
+    );
+    assert_eq!(
+        store
+            .get_relations("decision/cache/durable-backend")
+            .unwrap(),
+        vec![(
+            "supersedes".to_string(),
+            "decision/cache/add-redis-lru-backend".to_string()
+        )]
+    );
+    assert!(
+        store
+            .get_entry("decision/cache/wip-try-new-backend")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_entry("decision/storage/add-redis-lru-backend")
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+    fs::write(root.join("src/cache.rs"), "// old approach resurfaced").unwrap();
+    run_git(root, &["add", "src/cache.rs"]);
+    run_git(
+        root,
+        &["commit", "-m", "feat(cache): add redis lru backend"],
+    );
+    let obsolete = run_post_commit(root, false).unwrap().unwrap();
+    assert_eq!(
+        obsolete.skip_reason,
+        Some("archived memory needs explicit replacement")
+    );
+    assert!(
+        Store::open(&root.join(".agent-mem/mem.db"), false)
+            .unwrap()
+            .get_entry("decision/cache/add-redis-lru-backend")
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_some()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_commit_supersedes_requires_existing_target_atomically() {
+    let root_path = std::env::temp_dir().join(format!(
+        "agent_mem_hook_atomic_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root_path).unwrap();
+    let db = root_path.join("mem.db");
+    let mut store = Store::open(&db, true).unwrap();
+    let result = store.capture_commit(
+        Some((
+            "decision/new",
+            "Use the new adapter",
+            None,
+            Some("decision"),
+        )),
+        &[("decision/new", "supersedes", "decision/missing")],
+        "[abcdef0] feat: change adapter",
+    );
+    assert!(result.is_err());
+    assert!(store.get_entry("decision/new").unwrap().is_none());
+    assert!(store.session_list(20).unwrap().is_empty());
+    fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
 fn test_dry_run_mode() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_dry_run_test_{}",
@@ -627,4 +778,31 @@ fn test_commit_with_explicit_trailer_without_scope_is_captured() {
     assert_eq!(feat_entity.kind, EntityKind::Decision);
     assert_eq!(feat_entity.key, "decision/infrastructure-update");
     assert_eq!(feat_entity.val, "Use argon2id for all password hashing.");
+}
+
+#[test]
+fn test_slugify_folds_diacritics_and_filters_ecosystem_lockfiles() {
+    use agent_mem::hook::{extract_anchors, slugify};
+
+    assert_eq!(
+        slugify("validación de sesión única"),
+        "validacion-de-sesion-unica"
+    );
+    let parsed = parse_conventional_commit("fix(auth): validación de sesión", "");
+    assert_eq!(
+        parsed.entity.unwrap().key,
+        "gotcha/auth/validacion-de-sesion"
+    );
+
+    let files = vec![
+        "uv.lock".to_string(),
+        "go.sum".to_string(),
+        "bun.lockb".to_string(),
+        "packages/web/package-lock.json".to_string(),
+        "services/api/src/auth.py".to_string(),
+    ];
+    assert_eq!(
+        extract_anchors(&files).as_deref(),
+        Some("services/api/src/auth.py:1")
+    );
 }
