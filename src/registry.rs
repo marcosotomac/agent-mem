@@ -94,6 +94,7 @@ impl ProjectRegistry {
 
     fn save_locked(&self) -> Result<()> {
         let dir = registry_dir();
+        fs::create_dir_all(&dir)?;
         let path = registry_path();
         let tmp_path = dir.join(format!(
             "projects.json.tmp.{}",
