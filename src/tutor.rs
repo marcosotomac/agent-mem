@@ -24,9 +24,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
             We'll use a temporary directory so your real projects stay clean.",
         action: TutorAction::RunCommand,
         command: Some("agent-mem init"),
-        verify: Some(|_| {
-            PathBuf::from(".agent-mem/mem.db").exists()
-        }),
+        verify: Some(|_| PathBuf::from(".agent-mem/mem.db").exists()),
         commands: None,
     },
     TutorStep {
@@ -36,9 +34,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
             The key prefix auto-detects the type (decision/*, gotcha/*, pattern/*, rule/*).",
         action: TutorAction::RunCommand,
         command: Some(r#"agent-mem set decision/auth "Use argon2id for password hashing""#),
-        verify: Some(|_| {
-            PathBuf::from(".agent-mem/mem.db").exists()
-        }),
+        verify: Some(|_| PathBuf::from(".agent-mem/mem.db").exists()),
         commands: None,
     },
     TutorStep {
@@ -51,9 +47,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
             r#"agent-mem set pattern/retry "Exponential backoff with jitter for retries""#,
             r#"agent-mem set pattern/outbox "Persist domain events in transactional outbox""#,
         ]),
-        verify: Some(|_| {
-            PathBuf::from(".agent-mem/mem.db").exists()
-        }),
+        verify: Some(|_| PathBuf::from(".agent-mem/mem.db").exists()),
         command: None,
     },
     TutorStep {
@@ -63,9 +57,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
             Exact matches return instantly. Try searching for 'cursor' or 'argon2id'.",
         action: TutorAction::RunCommand,
         command: Some("agent-mem find argon2id"),
-        verify: Some(|output| {
-            output.contains("decision/auth") && output.contains("argon2id")
-        }),
+        verify: Some(|output| output.contains("decision/auth") && output.contains("argon2id")),
         commands: None,
     },
     TutorStep {
@@ -87,9 +79,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
             The model understands paraphrases and intent.",
         action: TutorAction::RunCommand,
         command: Some("agent-mem find \"cómo hashear contraseñas seguro\""),
-        verify: Some(|output| {
-            output.contains("decision/auth") || output.contains("argon2id")
-        }),
+        verify: Some(|output| output.contains("decision/auth") || output.contains("argon2id")),
         commands: None,
     },
     TutorStep {
@@ -99,9 +89,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
             This creates a navigable graph of engineering knowledge.",
         action: TutorAction::RunCommand,
         command: Some("agent-mem relate decision/auth mitigates gotcha/timing"),
-        verify: Some(|output| {
-            output.contains("related") || output.contains("mitigates")
-        }),
+        verify: Some(|output| output.contains("related") || output.contains("mitigates")),
         commands: None,
     },
     TutorStep {
@@ -110,9 +98,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
         description: "See how memories connect. The graph shows relations and lets you traverse.",
         action: TutorAction::RunCommand,
         command: Some("agent-mem dump"),
-        verify: Some(|output| {
-            output.contains("decision/auth") && output.contains("gotcha/timing")
-        }),
+        verify: Some(|output| output.contains("decision/auth") && output.contains("gotcha/timing")),
         commands: None,
     },
     TutorStep {
@@ -122,9 +108,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
             Export to .agent-rules (human-readable), commit, and teammates sync.",
         action: TutorAction::RunCommand,
         command: Some("agent-mem sync --export"),
-        verify: Some(|_| {
-            PathBuf::from(".agent-rules").exists()
-        }),
+        verify: Some(|_| PathBuf::from(".agent-rules").exists()),
         commands: None,
     },
     TutorStep {
@@ -133,9 +117,7 @@ const TUTOR_STEPS: &[TutorStep] = &[
         description: "The .agent-rules file is plain text — review it in PRs, resolve conflicts manually.",
         action: TutorAction::RunCommand,
         command: Some("cat .agent-rules"),
-        verify: Some(|output| {
-            output.contains("decision/auth") && output.contains("gotcha/timing")
-        }),
+        verify: Some(|output| output.contains("decision/auth") && output.contains("gotcha/timing")),
         commands: None,
     },
     TutorStep {
@@ -237,11 +219,7 @@ enum NextStepAction {
     Quit,
 }
 
-pub fn run_tutor(
-    _root: &Path,
-    start_step: Option<usize>,
-    non_interactive: bool,
-) -> Result<()> {
+pub fn run_tutor(_root: &Path, start_step: Option<usize>, non_interactive: bool) -> Result<()> {
     let temp_dir = env::temp_dir().join(format!("agent-mem-tutor-{}", std::process::id()));
     let global_dir = temp_dir.join(".global");
     fs::create_dir_all(&global_dir)?;
@@ -366,14 +344,25 @@ fn print_banner() {
     println!("╚══════════════════════════════════════════════════════════╝\x1b[0m");
     println!();
     println!("This tutorial runs in a temporary directory:");
-    println!("  \x1b[38;5;240m{}\x1b[0m", env::temp_dir().join(format!("agent-mem-tutor-{}", std::process::id())).display());
+    println!(
+        "  \x1b[38;5;240m{}\x1b[0m",
+        env::temp_dir()
+            .join(format!("agent-mem-tutor-{}", std::process::id()))
+            .display()
+    );
     println!();
-    println!("Press \x1b[1;37mEnter\x1b[0m to continue each step, \x1b[1;37mCtrl+C\x1b[0m to quit.");
+    println!(
+        "Press \x1b[1;37mEnter\x1b[0m to continue each step, \x1b[1;37mCtrl+C\x1b[0m to quit."
+    );
     println!();
 }
 
 fn print_step_header(step: &TutorStep) {
-    println!("\x1b[1;37m┌─ Step {} / {} ────────────────────────────────────────┐\x1b[0m", step.id, TUTOR_STEPS.len());
+    println!(
+        "\x1b[1;37m┌─ Step {} / {} ────────────────────────────────────────┐\x1b[0m",
+        step.id,
+        TUTOR_STEPS.len()
+    );
     println!("\x1b[1;37m│\x1b[0m \x1b[1;37m{}\x1b[0m", step.title);
     println!("\x1b[1;37m└──────────────────────────────────────────────────────┘\x1b[0m");
     println!();
@@ -512,7 +501,9 @@ mod tests {
     #[test]
     fn parse_command_args_preserves_quoted_phrases() {
         assert_eq!(
-            parse_command_args(r#"agent-mem set decision/auth "Use argon2id for password hashing""#),
+            parse_command_args(
+                r#"agent-mem set decision/auth "Use argon2id for password hashing""#
+            ),
             vec![
                 "agent-mem",
                 "set",
