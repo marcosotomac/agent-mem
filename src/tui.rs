@@ -882,19 +882,21 @@ fn render_header(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let inner = header_block.inner(area);
     f.render_widget(header_block, area);
 
+    let version_label = concat!("v", env!("CARGO_PKG_VERSION"), " ");
+    let brand_width = (12 + version_label.len()) as u16;
     let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(20), // Brand
-            Constraint::Min(35),    // Navigation Tabs
-            Constraint::Length(28), // Repo & Engine Status
+            Constraint::Length(brand_width), // Brand
+            Constraint::Min(35),             // Navigation Tabs
+            Constraint::Length(28),          // Repo & Engine Status
         ])
         .split(inner);
 
     // Brand Logo & Version
     let brand = Paragraph::new(Line::from(vec![
         Span::styled(" agent-mem ", Style::default().fg(ACCENT).bold()),
-        Span::styled("v1.2 ", Style::default().fg(EMERALD)),
+        Span::styled(version_label, Style::default().fg(EMERALD)),
         Span::styled("│", Style::default().fg(SUBTLE)),
     ]));
     f.render_widget(brand, header_chunks[0]);
