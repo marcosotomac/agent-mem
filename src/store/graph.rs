@@ -8,6 +8,55 @@ use rusqlite::{TransactionBehavior, params};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextCandidate {
+    pub key: String,
+    pub reason: String,
+}
+
+pub struct TaskContext {
+    pub rules: Vec<RuleRecord>,
+    pub relations: Vec<RelationRecord>,
+    pub sessions: Vec<SessionEntry>,
+    /// Bounded candidate pool in ranking order; callers can compare it with
+    /// emitted rules to explain selection and limit omissions.
+    pub candidates: Vec<ContextCandidate>,
+}
+
+pub struct ContextExplanation {
+    selected: HashSet<String>,
+    candidates: Vec<ContextCandidate>,
+}
+
+impl TaskContext {
+    pub fn clone_explanation(&self) -> ContextExplanation {
+        ContextExplanation {
+            selected: self.rules.iter().map(|rule| rule.key.clone()).collect(),
+            candidates: self.candidates.clone(),
+        }
+    }
+}
+
+impl ContextExplanation {
+    pub fn explanation_lines(
+        &self,
+        emitted: &HashSet<String>,
+        scope: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut included = Vec::new();
+        let mut omitted = Vec::new();
+        for candidate in &self.candidates {
+            let line = format!("[{scope}] {}: {}", candidate.key, candidate.reason);
+            if emitted.contains(&candidate.key) {
+                included.push(line);
+            } else if !self.selected.contains(&candidate.key) {
+                omitted.push(line);
+            }
+        }
+        (included, omitted)
+    }
+}
+
 impl Store {
     fn context_key_is_trusted(&self, key: &str) -> Result<bool> {
         let trust = self.conn.query_row(
@@ -612,6 +661,244 @@ impl Store {
         Ok(rules)
     }
 
+    fn topic_keys(&self, topic: &str, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key FROM memories WHERE archived_at IS NULL
+             AND (key LIKE ?1 OR key = ?2) ORDER BY key LIMIT ?3;",
+        )?;
+        let mut rows = stmt.query(params![format!("{topic}%"), topic, limit as i64])?;
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next()? {
+            keys.push(row.get(0)?);
+        }
+        Ok(keys)
+    }
+
+    /// Combine task search with file routing while retaining bounded graph and
+    /// repository-wide slots. The normal context methods remain the fast path
+    /// when no task query or explanation was requested.
+    pub fn context_for_task(
+        &self,
+        files: &[String],
+        anchor: Option<&str>,
+        topic: Option<&str>,
+        query: Option<&str>,
+        limit: usize,
+        explain: bool,
+    ) -> Result<TaskContext> {
+        let requested_limit = if limit == 0 { 20 } else { limit };
+        let clean_query = query.map(str::trim).filter(|value| !value.is_empty());
+        if clean_query.is_none() && !explain {
+            let (rules, relations, sessions) = if !files.is_empty() {
+                self.context_for_files(files, topic, requested_limit)?
+            } else {
+                self.context_filtered(anchor, topic, requested_limit)?
+            };
+            return Ok(TaskContext {
+                rules,
+                relations,
+                sessions,
+                candidates: Vec::new(),
+            });
+        }
+
+        let max_limit = requested_limit.min(512);
+        let candidate_limit = max_limit.saturating_mul(4).clamp(max_limit, 512);
+        let clean_topic = topic.map(str::trim).filter(|value| !value.is_empty());
+        let active_files = if files.is_empty() {
+            anchor
+                .map(|value| vec![value.to_string()])
+                .unwrap_or_default()
+        } else {
+            files.to_vec()
+        };
+
+        if clean_query.is_none() {
+            let (rules, relations, sessions) = if !files.is_empty() {
+                self.context_for_files(files, clean_topic, max_limit)?
+            } else {
+                self.context_filtered(anchor, clean_topic, max_limit)?
+            };
+            let (wider, _, _) = if !files.is_empty() {
+                self.context_for_files(files, clean_topic, candidate_limit)?
+            } else {
+                self.context_filtered(anchor, clean_topic, candidate_limit)?
+            };
+            let direct: HashSet<String> = self
+                .ranked_anchor_keys(&active_files, clean_topic, candidate_limit)?
+                .into_iter()
+                .collect();
+            let universal: HashSet<String> = self
+                .universal_keys(clean_topic, candidate_limit)?
+                .into_iter()
+                .collect();
+            let mut seen = HashSet::new();
+            let candidates = rules
+                .iter()
+                .chain(&wider)
+                .filter(|rule| seen.insert(rule.key.as_str()))
+                .map(|rule| {
+                    let reason = if direct.contains(&rule.key) {
+                        "file anchor"
+                    } else if universal.contains(&rule.key) {
+                        "repository-wide rule"
+                    } else if !active_files.is_empty() {
+                        "linked memory"
+                    } else if clean_topic.is_some() {
+                        "topic prefix"
+                    } else {
+                        "key order"
+                    };
+                    ContextCandidate {
+                        key: rule.key.clone(),
+                        reason: reason.to_string(),
+                    }
+                })
+                .collect();
+            return Ok(TaskContext {
+                rules,
+                relations,
+                sessions,
+                candidates,
+            });
+        }
+
+        let query = clean_query.expect("query checked above");
+        let task_keys: Vec<String> = self
+            .find(query)?
+            .into_iter()
+            .filter(|rule| {
+                !rule.is_archived() && clean_topic.is_none_or(|prefix| rule.key.starts_with(prefix))
+            })
+            .map(|rule| rule.key)
+            .collect();
+        if task_keys.is_empty() && active_files.is_empty() {
+            return self.context_for_task(files, anchor, topic, None, limit, explain);
+        }
+        let file_keys = self.ranked_anchor_keys(&active_files, clean_topic, candidate_limit)?;
+        let mut direct = Vec::with_capacity(task_keys.len() + file_keys.len());
+        let mut direct_seen = HashSet::new();
+        for index in 0..task_keys.len().max(file_keys.len()) {
+            for key in [task_keys.get(index), file_keys.get(index)]
+                .into_iter()
+                .flatten()
+            {
+                if direct_seen.insert(key.as_str()) {
+                    direct.push(key.clone());
+                }
+            }
+        }
+
+        let mut related_reasons = HashMap::new();
+        let related_candidates: Vec<String> = if direct.is_empty() {
+            Vec::new()
+        } else {
+            let keys: Vec<&str> = direct.iter().map(String::as_str).collect();
+            let mut related = BTreeSet::new();
+            for relation in self.get_relations_touching(&keys, candidate_limit)? {
+                let (other, origin) = if direct_seen.contains(relation.source_key.as_str()) {
+                    (&relation.target_key, &relation.source_key)
+                } else {
+                    (&relation.source_key, &relation.target_key)
+                };
+                if clean_topic.is_none_or(|prefix| other.starts_with(prefix)) {
+                    if explain {
+                        related_reasons.entry(other.clone()).or_insert_with(|| {
+                            format!("linked from {origin} via {}", relation.rel_type)
+                        });
+                    }
+                    related.insert(other.clone());
+                }
+            }
+            related.into_iter().collect()
+        };
+        let mut related = Vec::with_capacity(related_candidates.len());
+        if !related_candidates.is_empty() {
+            let mut is_active = self.conn.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1 AND archived_at IS NULL);",
+            )?;
+            for key in related_candidates {
+                if is_active.query_row(params![&key], |row| row.get::<_, bool>(0))? {
+                    related.push(key);
+                }
+            }
+        }
+        let universal = match clean_topic {
+            Some(prefix) => self.topic_keys(prefix, candidate_limit)?,
+            None => self.universal_keys(None, candidate_limit)?,
+        };
+        let mut selected = Self::select_diverse_context_keys(
+            direct.clone(),
+            related.clone(),
+            universal.clone(),
+            max_limit,
+        );
+        if max_limit >= 2
+            && !task_keys.is_empty()
+            && let Some(file_key) = file_keys.first()
+            && !selected.contains(file_key)
+        {
+            if selected.len() == max_limit {
+                selected.pop();
+            }
+            selected.push(file_key.clone());
+        }
+        let rules = self.materialize_active_rules(&selected)?;
+        let relations = if rules.is_empty() {
+            Vec::new()
+        } else {
+            let keys: Vec<&str> = rules.iter().map(|rule| rule.key.as_str()).collect();
+            self.get_relations_touching(&keys, max_limit.saturating_mul(4))?
+        };
+        let sessions = self.session_list(3)?;
+
+        let mut candidates = Vec::new();
+        if explain {
+            let mut positions = HashMap::new();
+            for (keys, reason) in [
+                (&task_keys, "task query"),
+                (&file_keys, "file anchor"),
+                (&related, "linked memory"),
+                (
+                    &universal,
+                    if clean_topic.is_some() {
+                        "topic prefix"
+                    } else {
+                        "repository-wide rule"
+                    },
+                ),
+            ] {
+                for key in keys {
+                    let reason = if reason == "linked memory" {
+                        related_reasons
+                            .get(key)
+                            .map(String::as_str)
+                            .unwrap_or(reason)
+                    } else {
+                        reason
+                    };
+                    if let Some(&index) = positions.get(key) {
+                        let candidate: &mut ContextCandidate = &mut candidates[index];
+                        candidate.reason.push_str(" + ");
+                        candidate.reason.push_str(reason);
+                    } else {
+                        positions.insert(key.clone(), candidates.len());
+                        candidates.push(ContextCandidate {
+                            key: key.clone(),
+                            reason: reason.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(TaskContext {
+            rules,
+            relations,
+            sessions,
+            candidates,
+        })
+    }
+
     /// Retrieve context filtered by code anchor or topic prefix, expanding connected graph relations.
     pub fn context_filtered(
         &self,
@@ -810,19 +1097,43 @@ fn normalize_query_path(raw: &str) -> Option<String> {
 }
 
 fn is_generic_filename(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "mod.rs"
-            | "lib.rs"
-            | "main.rs"
-            | "index.ts"
-            | "index.js"
-            | "index.tsx"
-            | "index.jsx"
-            | "types.ts"
-            | "utils.ts"
-    )
+    let stem = name.split('.').next().unwrap_or(name).trim_matches('_');
+    const GENERIC_STEMS: &[&str] = &[
+        "mod",
+        "lib",
+        "main",
+        "index",
+        "init",
+        "types",
+        "utils",
+        "helpers",
+        "common",
+        "config",
+        "constants",
+        "error",
+        "errors",
+        "conftest",
+        "package",
+        "build",
+        "makefile",
+        "dockerfile",
+        "cmakelists",
+    ];
+    GENERIC_STEMS
+        .iter()
+        .any(|candidate| stem.eq_ignore_ascii_case(candidate))
+}
+
+#[inline]
+fn has_path_boundary_suffix(path: &str, suffix: &str) -> bool {
+    path.strip_suffix(suffix)
+        .is_some_and(|prefix| prefix.ends_with('/'))
+}
+
+#[inline]
+fn has_path_boundary_prefix(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn score_single_anchor(query: &NormalizedQueryFile<'_>, anchor_clean: &str) -> Option<u32> {
@@ -832,11 +1143,10 @@ fn score_single_anchor(query: &NormalizedQueryFile<'_>, anchor_clean: &str) -> O
     }
 
     // 2. Relative suffix match (e.g. query "api/mod.rs" matches anchor "src/api/mod.rs"
-    //    or query "src/api/mod.rs" matches anchor "api/mod.rs")
-    if query.clean_path.ends_with(&format!("/{}", anchor_clean)) {
-        return Some(800);
-    }
-    if anchor_clean.ends_with(&format!("/{}", query.clean_path)) {
+    //    or query "src/api/mod.rs" matches anchor "api/mod.rs") without heap allocation.
+    if has_path_boundary_suffix(query.clean_path, anchor_clean)
+        || has_path_boundary_suffix(anchor_clean, query.clean_path)
+    {
         return Some(800);
     }
 
@@ -851,13 +1161,11 @@ fn score_single_anchor(query: &NormalizedQueryFile<'_>, anchor_clean: &str) -> O
             return Some(500);
         }
 
-        // Parent/child subdirectory
-        if qd.starts_with(&format!("{}/", ad)) || ad.starts_with(&format!("{}/", qd)) {
-            let q_parts: Vec<&str> = qd.split('/').collect();
-            let a_parts: Vec<&str> = ad.split('/').collect();
-            let shared = q_parts
-                .iter()
-                .zip(a_parts.iter())
+        // Parent/child subdirectory without intermediate Vec or String allocations
+        if has_path_boundary_prefix(qd, ad) || has_path_boundary_prefix(ad, qd) {
+            let shared = qd
+                .split('/')
+                .zip(ad.split('/'))
                 .take_while(|(q, a)| q == a)
                 .count();
             return Some(200 + (shared as u32 * 20));
@@ -872,11 +1180,9 @@ fn score_single_anchor(query: &NormalizedQueryFile<'_>, anchor_clean: &str) -> O
                 return Some(50);
             }
         }
-    } else {
+    } else if query.base.eq_ignore_ascii_case(anchor_base) {
         // Query was unqualified (e.g. query was just "auth.rs" or "user.rs")
-        if query.base.eq_ignore_ascii_case(anchor_base) {
-            return Some(100);
-        }
+        return Some(100);
     }
 
     None

@@ -954,6 +954,86 @@ fn test_mcp_manage_lifecycle_and_file_sync() {
 }
 
 #[test]
+fn test_mcp_context_query_and_explanation_keep_file_and_task_evidence() {
+    let root = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_task_context_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let mut store = Store::open(&root.join(".agent-mem/mem.db"), true).unwrap();
+    store
+        .set("decision/a-default", "General convention")
+        .unwrap();
+    store
+        .set("decision/z-payment", "Payment retries require idempotency")
+        .unwrap();
+    store
+        .set_with_anchor("rule/auth", "Validate session tokens", Some("src/auth.rs"))
+        .unwrap();
+    drop(store);
+
+    let server = McpServer::with_paths(root.clone(), root.join("global.db"));
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_context",
+            "arguments": {
+                "scope": "project",
+                "query": "payment retries",
+                "files": "src/auth.rs",
+                "limit": 2,
+                "explain": true
+            }
+        }),
+    };
+    let result = server.handle_request(&request).unwrap().result.unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("decision/z-payment: Payment retries require idempotency"));
+    assert!(text.contains("rule/auth: Validate session tokens"));
+    assert!(text.contains("== WHY SELECTED =="));
+    assert!(text.contains("decision/z-payment: task query"));
+    assert!(text.contains("rule/auth: file anchor"));
+    assert!(text.contains("== OMITTED BY RESULT LIMIT"));
+    assert!(text.len() <= 16 * 1024);
+
+    let mut global = Store::open(&root.join("global.db"), true).unwrap();
+    global
+        .set(
+            "personal/payment",
+            "Payment retries should show a clear status",
+        )
+        .unwrap();
+    drop(global);
+    let all_scope = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_context",
+            "arguments": {
+                "scope": "all",
+                "query": "payment retries",
+                "files": "src/auth.rs",
+                "limit": 4,
+                "explain": true
+            }
+        }),
+    };
+    let result = server.handle_request(&all_scope).unwrap().result.unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("personal/payment: Payment retries should show a clear status"));
+    assert!(text.contains("[global] personal/payment: task query"));
+    assert!(text.len() <= 16 * 1024);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn test_mcp_context_enforces_rule_and_output_budgets() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_mcp_budget_{}",
