@@ -1,8 +1,8 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TUTOR_STEPS: &[TutorStep] = &[
@@ -219,19 +219,54 @@ enum TutorAction {
     RunCommands,
 }
 
-pub fn run_tutor(_root: &std::path::Path, start_step: Option<usize>, non_interactive: bool) -> Result<()> {
+struct TutorCleanup {
+    original_dir: PathBuf,
+    temp_dir: PathBuf,
+}
+
+impl Drop for TutorCleanup {
+    fn drop(&mut self) {
+        let _ = env::set_current_dir(&self.original_dir);
+        let _ = fs::remove_dir_all(&self.temp_dir);
+    }
+}
+
+enum NextStepAction {
+    Continue,
+    Repeat,
+    Quit,
+}
+
+pub fn run_tutor(
+    _root: &Path,
+    start_step: Option<usize>,
+    non_interactive: bool,
+) -> Result<()> {
     let temp_dir = env::temp_dir().join(format!("agent-mem-tutor-{}", std::process::id()));
-    fs::create_dir_all(&temp_dir)?;
+    let global_dir = temp_dir.join(".global");
+    fs::create_dir_all(&global_dir)?;
+
+    let model_dir = env::var_os("AGENT_MEM_MODEL_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::init::user_home_dir()
+                .map(|home| home.join(".cache").join("agent-mem").join("models"))
+        });
 
     let original_dir = env::current_dir()?;
     env::set_current_dir(&temp_dir)?;
+    let _cleanup = TutorCleanup {
+        original_dir,
+        temp_dir: temp_dir.clone(),
+    };
 
     println!("\x1b[2J\x1b[H"); // Clear screen
     print_banner();
 
-    let start = start_step.unwrap_or(1).max(1).min(TUTOR_STEPS.len());
+    let mut idx = start_step.unwrap_or(1).clamp(1, TUTOR_STEPS.len()) - 1;
 
-    for step in &TUTOR_STEPS[start - 1..] {
+    while idx < TUTOR_STEPS.len() {
+        let step = &TUTOR_STEPS[idx];
         print_step_header(step);
 
         match step.action {
@@ -244,12 +279,14 @@ pub fn run_tutor(_root: &std::path::Path, start_step: Option<usize>, non_interac
                     if !non_interactive {
                         prompt_continue()?;
                     }
-                    let output = run_command(cmd)?;
+                    let output = run_command(cmd, &temp_dir, &global_dir, model_dir.as_deref())?;
                     println!("{}", output.trim_end());
 
                     if let Some(verify) = step.verify {
                         if !verify(&output) {
-                            println!("\x1b[38;5;203m⚠ Verification failed — but continuing...\x1b[0m");
+                            println!(
+                                "\x1b[38;5;203m⚠ Verification failed — but continuing...\x1b[0m"
+                            );
                         } else {
                             println!("\x1b[38;5;150m✓ Verified\x1b[0m");
                         }
@@ -258,22 +295,23 @@ pub fn run_tutor(_root: &std::path::Path, start_step: Option<usize>, non_interac
             }
             TutorAction::RunCommands => {
                 if let Some(cmds) = step.commands {
+                    let mut last_output = String::new();
                     for cmd in cmds {
                         println!("\x1b[38;5;240m$ {}\x1b[0m", cmd);
                         if !non_interactive {
                             prompt_continue()?;
                         }
-                        let output = run_command(cmd)?;
-                        println!("{}", output.trim_end());
+                        last_output =
+                            run_command(cmd, &temp_dir, &global_dir, model_dir.as_deref())?;
+                        println!("{}", last_output.trim_end());
                     }
                     if let Some(verify) = step.verify {
-                        if let Some(last_cmd) = cmds.last() {
-                            let output = run_command(last_cmd)?;
-                            if !verify(&output) {
-                                println!("\x1b[38;5;203m⚠ Verification failed — but continuing...\x1b[0m");
-                            } else {
-                                println!("\x1b[38;5;150m✓ Verified\x1b[0m");
-                            }
+                        if !verify(&last_output) {
+                            println!(
+                                "\x1b[38;5;203m⚠ Verification failed — but continuing...\x1b[0m"
+                            );
+                        } else {
+                            println!("\x1b[38;5;150m✓ Verified\x1b[0m");
                         }
                     }
                 }
@@ -282,12 +320,20 @@ pub fn run_tutor(_root: &std::path::Path, start_step: Option<usize>, non_interac
 
         if !non_interactive && step.id < TUTOR_STEPS.len() {
             println!();
-            prompt_next_step()?;
+            match prompt_next_step()? {
+                NextStepAction::Continue => idx += 1,
+                NextStepAction::Repeat => continue,
+                NextStepAction::Quit => {
+                    println!(
+                        "\n\x1b[38;5;245mTutorial ended. Run 'agent-mem tutor' to restart.\x1b[0m\n"
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            idx += 1;
         }
     }
-
-    env::set_current_dir(&original_dir)?;
-    let _ = fs::remove_dir_all(&temp_dir);
 
     print_completion_summary();
     Ok(())
@@ -340,32 +386,93 @@ fn prompt_continue() -> Result<()> {
     Ok(())
 }
 
-fn prompt_next_step() -> Result<()> {
+fn prompt_next_step() -> Result<NextStepAction> {
     print!("  \x1b[38;5;240m→ Press Enter for next step, 'q' to quit, 'r' to repeat\x1b[0m ");
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     match input.trim().to_lowercase().as_str() {
-        "q" | "quit" => {
-            println!("\n\x1b[38;5;245mTutorial ended. Run 'agent-mem tutor' to restart.\x1b[0m\n");
-            std::process::exit(0);
-        }
-        "r" | "repeat" => {
-            // We can't easily repeat in this structure, just continue
-        }
-        _ => {}
+        "q" | "quit" => Ok(NextStepAction::Quit),
+        "r" | "repeat" => Ok(NextStepAction::Repeat),
+        _ => Ok(NextStepAction::Continue),
     }
-    Ok(())
 }
 
-fn run_command(cmd: &str) -> Result<String> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let program = parts[0];
+/// Tokenize a command string while respecting single and double quotes.
+fn parse_command_args(cmd: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut chars = cmd.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match in_quote {
+            Some(q) if ch == q => {
+                in_quote = None;
+            }
+            Some(_) if ch == '\\' => {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            Some(_) => {
+                current.push(ch);
+            }
+            None if ch == '"' || ch == '\'' => {
+                in_quote = Some(ch);
+            }
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            None => {
+                current.push(ch);
+            }
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
+fn run_command(
+    cmd: &str,
+    work_dir: &Path,
+    global_dir: &Path,
+    model_dir: Option<&Path>,
+) -> Result<String> {
+    let parts = parse_command_args(cmd);
+    let Some(program) = parts.first().map(String::as_str) else {
+        return Ok(String::new());
+    };
     let args = &parts[1..];
 
-    let output = Command::new(program)
+    if program == "cat"
+        && let Some(file_arg) = args.first()
+    {
+        return Ok(fs::read_to_string(work_dir.join(file_arg))?);
+    }
+
+    let resolved_program = if program == "agent-mem" {
+        env::current_exe().unwrap_or_else(|_| PathBuf::from(program))
+    } else {
+        PathBuf::from(program)
+    };
+
+    let mut command = Command::new(resolved_program);
+    command
         .args(args)
-        .output()?;
+        .current_dir(work_dir)
+        .env("HOME", work_dir)
+        .env("USERPROFILE", work_dir)
+        .env("AGENT_MEM_GLOBAL_DIR", global_dir);
+    if let Some(dir) = model_dir {
+        command.env("AGENT_MEM_MODEL_DIR", dir);
+    }
+
+    let output = command.output()?;
 
     let mut result = String::new();
     if !output.stdout.is_empty() {
@@ -379,7 +486,10 @@ fn run_command(cmd: &str) -> Result<String> {
     }
 
     if !output.status.success() && result.is_empty() {
-        result.push_str(&format!("Command failed with exit code: {:?}", output.status.code()));
+        result.push_str(&format!(
+            "Command failed with exit code: {:?}",
+            output.status.code()
+        ));
     }
 
     Ok(result)
@@ -391,11 +501,28 @@ mod tests {
 
     #[test]
     fn tutor_steps_are_valid() {
-        assert!(!TUTOR_STEPS.is_empty());
+        assert_eq!(TUTOR_STEPS.len(), 15);
         for (i, step) in TUTOR_STEPS.iter().enumerate() {
             assert_eq!(step.id, i + 1);
             assert!(!step.title.is_empty());
             assert!(!step.description.is_empty());
         }
+    }
+
+    #[test]
+    fn parse_command_args_preserves_quoted_phrases() {
+        assert_eq!(
+            parse_command_args(r#"agent-mem set decision/auth "Use argon2id for password hashing""#),
+            vec![
+                "agent-mem",
+                "set",
+                "decision/auth",
+                "Use argon2id for password hashing",
+            ]
+        );
+        assert_eq!(
+            parse_command_args("agent-mem find \"cómo hashear contraseñas seguro\""),
+            vec!["agent-mem", "find", "cómo hashear contraseñas seguro"]
+        );
     }
 }
