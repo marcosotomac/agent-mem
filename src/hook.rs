@@ -4,30 +4,43 @@ use crate::store::Store;
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityKind {
     Gotcha,
     Decision,
     Pattern,
     Rule,
+    Custom(String),
 }
 
 impl EntityKind {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             EntityKind::Gotcha => "gotcha",
             EntityKind::Decision => "decision",
             EntityKind::Pattern => "pattern",
             EntityKind::Rule => "rule",
+            EntityKind::Custom(s) => s.as_str(),
         }
     }
 
-    pub fn default_key_prefix(&self) -> &'static str {
+    pub fn default_key_prefix(&self) -> &str {
         match self {
             EntityKind::Gotcha => "gotcha",
             EntityKind::Decision => "decision",
             EntityKind::Pattern => "pattern",
             EntityKind::Rule => "architecture",
+            EntityKind::Custom(s) => s.as_str(),
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "gotcha" => Self::Gotcha,
+            "decision" => Self::Decision,
+            "pattern" => Self::Pattern,
+            "rule" => Self::Rule,
+            other => Self::Custom(other.to_string()),
         }
     }
 }
@@ -307,14 +320,21 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
                     continuation_trailer = None;
                     continue;
                 }
-                _ => {}
+                other => {
+                    if is_valid_custom_trailer_key(other) && !val_trim.is_empty() {
+                        trailers.explicit_kind = Some(EntityKind::parse(other));
+                        trailers.explicit_content = Some(val_trim.to_string());
+                        continuation_trailer = Some("content");
+                        continue;
+                    }
+                }
             }
         }
 
         // Handle continuation lines for multi-line trailer values
         if let Some(trailer_type) = continuation_trailer {
             match trailer_type {
-                "decision" | "gotcha" | "rule" | "pattern" => {
+                "decision" | "gotcha" | "rule" | "pattern" | "content" => {
                     if let Some(existing) = trailers.explicit_content.as_mut() {
                         if !existing.is_empty() {
                             existing.push(' ');
@@ -338,6 +358,151 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
     }
 
     trailers
+}
+
+fn is_valid_custom_trailer_key(s: &str) -> bool {
+    !matches!(
+        s,
+        "signed-off-by"
+            | "co-authored-by"
+            | "reviewed-by"
+            | "tested-by"
+            | "acked-by"
+            | "cc"
+            | "fixes"
+            | "closes"
+            | "see-also"
+    ) && s.len() >= 3
+        && s.len() <= 32
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn trim_comment_prefix(s: &str) -> &str {
+    let trimmed = s.trim_start();
+    for prefix in &[
+        "///", "//! ", "//", "/*", "*", "#", "--", ";;", "\"\"\"", "'''",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim_start();
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("rem ") {
+        return rest.trim_start();
+    }
+    trimmed
+}
+
+fn is_valid_directive_tag(tag: &str) -> bool {
+    tag.len() >= 3
+        && tag.len() <= 20
+        && tag.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+        && tag != "TODO"
+}
+
+/// Dynamically scan diff for developer directives in added comment lines.
+/// Matches any added line with a comment token followed by `[A-Z0-9_]{3,20}: <message>`.
+pub fn scan_diff_for_directives(diff_text: &str) -> Option<(EntityProposal, Option<String>)> {
+    let mut current_file: Option<String> = None;
+    let mut current_line: usize = 0;
+
+    for line in diff_text.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            let file = rest.trim();
+            if is_relevant_source_file(file) {
+                current_file = Some(file.to_string());
+            } else {
+                current_file = None;
+            }
+            continue;
+        }
+
+        if line.starts_with("@@ ") {
+            if let Some(plus_idx) = line.find('+') {
+                let rest = &line[plus_idx + 1..];
+                let num_str = rest
+                    .split(|c: char| c == ',' || c == ' ' || !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("0");
+                current_line = num_str.parse::<usize>().unwrap_or(1);
+            }
+            continue;
+        }
+
+        if let Some(stripped) = line.strip_prefix('+') {
+            if line.starts_with("+++") {
+                continue;
+            }
+            current_line = current_line.saturating_add(1);
+
+            let Some(ref file) = current_file else {
+                continue;
+            };
+
+            let trimmed = stripped.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let comment_body = trim_comment_prefix(trimmed);
+            if comment_body.is_empty() {
+                continue;
+            }
+
+            if let Some((tag, msg)) = comment_body.split_once(':') {
+                let tag_trimmed = tag.trim();
+                let msg_trimmed = msg.trim();
+                if is_valid_directive_tag(tag_trimmed)
+                    && msg_trimmed.split_whitespace().count() >= 3
+                {
+                    let kind = EntityKind::parse(tag_trimmed);
+                    let scope = file
+                        .split(['/', '\\'])
+                        .find(|part| {
+                            !part.is_empty() && *part != "src" && *part != "lib" && *part != "pkg"
+                        })
+                        .unwrap_or("core");
+                    let clean_scope = scope.split('.').next().unwrap_or(scope);
+                    let key = derive_entity_key(
+                        kind.default_key_prefix(),
+                        Some(clean_scope),
+                        msg_trimmed,
+                        None,
+                    );
+                    let anchor = format!("{}:{}", file, current_line.saturating_sub(1).max(1));
+                    return Some((
+                        EntityProposal {
+                            kind,
+                            key,
+                            val: msg_trimmed.to_string(),
+                        },
+                        Some(anchor),
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_diff_directives(
+    root: &Path,
+    hash: &str,
+) -> Result<Option<(EntityProposal, Option<String>)>> {
+    if hash.is_empty() {
+        return Ok(None);
+    }
+    let diff_output = Command::new("git")
+        .args(["show", "-U0", "--no-color", hash])
+        .current_dir(root)
+        .output();
+
+    let diff_str = match diff_output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
+        _ => return Ok(None),
+    };
+
+    Ok(scan_diff_for_directives(&diff_str))
 }
 
 #[inline]
@@ -682,13 +847,39 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     } else {
         Some(Store::open(&db_path, true)?)
     };
-    let (entity, skip_reason) = assess_entity(store.as_ref(), &parsed, &commit_info.body)?;
+    let (mut entity, mut skip_reason) = assess_entity(store.as_ref(), &parsed, &commit_info.body)?;
+    let mut resolved_anchor = anchor;
+
+    if entity.is_none()
+        && !commit_info.hash.is_empty()
+        && let Ok(Some((diff_entity, diff_anchor))) =
+            extract_diff_directives(root, &commit_info.hash)
+    {
+        let diff_parsed = ParsedCommit {
+            commit_type: None,
+            scope: None,
+            is_breaking: false,
+            summary: diff_entity.val.clone(),
+            entity: Some(diff_entity),
+            relations: Vec::new(),
+        };
+        let (approved, reason) = assess_entity(store.as_ref(), &diff_parsed, "")?;
+        if let Some(approved_entity) = approved {
+            entity = Some(approved_entity);
+            skip_reason = None;
+            if diff_anchor.is_some() {
+                resolved_anchor = diff_anchor;
+            }
+        } else if reason.is_some() {
+            skip_reason = reason;
+        }
+    }
 
     let entity_captured = entity.map(|e| HookEntity {
         key: e.key,
         val: e.val,
         kind: e.kind.as_str().to_string(),
-        anchor,
+        anchor: resolved_anchor,
     });
 
     let relations: Vec<(String, String, String)> = if let Some(ent) = &entity_captured {
@@ -767,11 +958,11 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     };
     let zombies_cleaned = !zombies.is_empty();
 
-    let rules_file = root.join(".agent-rules");
+    let rules_file = crate::store::resolve_rules_path(root);
     let rules_synced = if rules_file.exists()
         && (entity_captured.is_some() || !relations.is_empty() || zombies_cleaned)
     {
-        store.export_to_file(&rules_file)?;
+        store.export_to_path(&rules_file)?;
         true
     } else {
         false
