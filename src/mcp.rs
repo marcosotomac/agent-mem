@@ -476,7 +476,15 @@ impl McpServer {
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["archive", "unarchive", "delete", "relate", "unrelate"]
+                                "enum": [
+                                    "archive",
+                                    "unarchive",
+                                    "delete",
+                                    "relate",
+                                    "unrelate",
+                                    "auto-relate",
+                                    "suggest-relations"
+                                ]
                             },
                             "key": { "type": "string" },
                             "reason": { "type": "string" },
@@ -484,7 +492,7 @@ impl McpServer {
                             "project": { "type": "string" },
                             "scope": { "type": "string", "enum": ["project", "global"] }
                         },
-                        "required": ["action", "key"]
+                        "required": ["action"]
                     }
                 }
             ]
@@ -509,6 +517,23 @@ impl McpServer {
         }
 
         result
+    }
+
+    fn sync_rules_to_disk(
+        &self,
+        store: &Store,
+        scope: &str,
+        project_root: Option<&Path>,
+    ) -> Result<()> {
+        if scope == "project"
+            && let Some(root) = project_root
+        {
+            let rules_path = crate::store::resolve_rules_path(root);
+            if rules_path.exists() {
+                store.export_to_path(&rules_path)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn handle_request(&self, req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
@@ -746,15 +771,7 @@ impl McpServer {
                         &provenance,
                         crate::store::TRUST_LOCAL,
                     )?;
-                    if scope == "project" {
-                        let rules_file = project_root
-                            .as_ref()
-                            .expect("project scope was resolved")
-                            .join(".agent-rules");
-                        if rules_file.exists() {
-                            store.export_to_file(&rules_file)?;
-                        }
-                    }
+                    self.sync_rules_to_disk(&store, scope, project_root.as_deref())?;
                     return Ok(format!("saved [{}] {} memories in batch", scope, count));
                 }
 
@@ -782,24 +799,42 @@ impl McpServer {
                     &provenance,
                     crate::store::TRUST_LOCAL,
                 )?;
-                if scope == "project" {
-                    let rules_file = project_root
-                        .as_ref()
-                        .expect("project scope was resolved")
-                        .join(".agent-rules");
-                    if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
-                    }
-                }
+                self.sync_rules_to_disk(&store, scope, project_root.as_deref())?;
                 let effective_kind = kind.unwrap_or_else(|| crate::store::infer_kind(key));
                 let kind_tag = if effective_kind != "rule" {
                     format!("[{}] ", effective_kind)
                 } else {
                     String::new()
                 };
+                let hint = if relation.is_none() {
+                    let suggestions = store
+                        .suggest_relations(key, val, anchor, kind)
+                        .unwrap_or_default();
+                    if let Some(top) = suggestions
+                        .into_iter()
+                        .next()
+                        .filter(|s| s.confidence >= 75)
+                    {
+                        format!(
+                            "\n💡 Graph Hint: Discovered related memory '{} -> {} -> {}' (confidence: {}%, reason: {}). Use mem_manage to link.",
+                            top.source_key,
+                            top.rel_type,
+                            top.target_key,
+                            top.confidence,
+                            top.reason
+                        )
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
                 match anchor {
-                    Some(a) => Ok(format!("saved [{}] {}{} ({})", scope, kind_tag, key, a)),
-                    None => Ok(format!("saved [{}] {}{}", scope, kind_tag, key)),
+                    Some(a) => Ok(format!(
+                        "saved [{}] {}{} ({}){}",
+                        scope, kind_tag, key, a, hint
+                    )),
+                    None => Ok(format!("saved [{}] {}{}{}", scope, kind_tag, key, hint)),
                 }
             }
 
@@ -1155,9 +1190,7 @@ impl McpServer {
                 let action = args.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
                     crate::error::Error::Usage("Missing required argument 'action'".into())
                 })?;
-                let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-                    crate::error::Error::Usage("Missing required argument 'key'".into())
-                })?;
+                let key_opt = args.get("key").and_then(|v| v.as_str());
                 let scope = args
                     .get("scope")
                     .and_then(|v| v.as_str())
@@ -1165,7 +1198,8 @@ impl McpServer {
                 let project_root = self.project_for_scope(args, scope)?;
 
                 let parsed_relation = match action {
-                    "archive" | "unarchive" | "delete" | "del" | "rm" => None,
+                    "archive" | "unarchive" | "delete" | "del" | "rm" | "auto-relate" => None,
+                    "suggest-relations" => None,
                     "relate" | "link" | "unrelate" | "unlink" => {
                         let rel = args.get("rel").and_then(|v| v.as_str()).ok_or_else(|| {
                             crate::error::Error::Usage(
@@ -1177,7 +1211,7 @@ impl McpServer {
                     }
                     unknown => {
                         return Err(crate::error::Error::Usage(format!(
-                            "Unknown manage action '{}'. Supported actions: 'archive', 'unarchive', 'delete', 'relate', 'unrelate'",
+                            "Unknown manage action '{}'. Supported actions: 'archive', 'unarchive', 'delete', 'relate', 'unrelate', 'auto-relate', 'suggest-relations'",
                             unknown
                         )));
                     }
@@ -1185,21 +1219,48 @@ impl McpServer {
 
                 let mut store = self.open_store(scope, project_root.as_deref(), true)?;
 
+                if action == "auto-relate" {
+                    let applied = store.auto_relate_high_confidence(80)?;
+                    if !applied.is_empty() {
+                        self.sync_rules_to_disk(&store, scope, project_root.as_deref())?;
+                    }
+                    let count = applied.len();
+                    return Ok(format!(
+                        "auto-linked [{scope}] {count} high-confidence relations"
+                    ));
+                }
+
+                let key = key_opt.ok_or_else(|| {
+                    crate::error::Error::Usage("Missing required argument 'key'".into())
+                })?;
+
+                if action == "suggest-relations" {
+                    let suggestions = store.suggest_relations(key, "", None, None)?;
+                    if suggestions.is_empty() {
+                        return Ok(format!("No relations suggested for '{}'", key));
+                    }
+                    let lines: Vec<String> = suggestions
+                        .iter()
+                        .map(|s| {
+                            format!(
+                                "• {} -> {} -> {} ({}% confidence): {}",
+                                s.source_key, s.rel_type, s.target_key, s.confidence, s.reason
+                            )
+                        })
+                        .collect();
+                    return Ok(format!(
+                        "Suggested relations for '{}':\n{}",
+                        key,
+                        lines.join("\n")
+                    ));
+                }
+
                 let msg = match action {
                     "archive" => {
                         let reason = args.get("reason").and_then(|v| v.as_str());
                         let archived = store.archive(key, reason)?;
                         if !archived {
                             return Err(crate::error::Error::NotFound(key.to_string()));
-                        }
-                        if scope == "project" {
-                            let rules_file = project_root
-                                .as_ref()
-                                .expect("project scope was resolved")
-                                .join(".agent-rules");
-                            if rules_file.exists() {
-                                store.export_to_file(&rules_file)?;
-                            }
                         }
                         match reason {
                             Some(r) => format!("archived [{}] {} (reason: {})", scope, key, r),
@@ -1211,15 +1272,6 @@ impl McpServer {
                         if !unarchived {
                             return Err(crate::error::Error::NotFound(key.to_string()));
                         }
-                        if scope == "project" {
-                            let rules_file = project_root
-                                .as_ref()
-                                .expect("project scope was resolved")
-                                .join(".agent-rules");
-                            if rules_file.exists() {
-                                store.export_to_file(&rules_file)?;
-                            }
-                        }
                         format!("unarchived [{}] {}", scope, key)
                     }
                     "delete" | "del" | "rm" => {
@@ -1227,29 +1279,11 @@ impl McpServer {
                         if !deleted {
                             return Err(crate::error::Error::NotFound(key.to_string()));
                         }
-                        if scope == "project" {
-                            let rules_file = project_root
-                                .as_ref()
-                                .expect("project scope was resolved")
-                                .join(".agent-rules");
-                            if rules_file.exists() {
-                                store.export_to_file(&rules_file)?;
-                            }
-                        }
                         format!("deleted [{}] {}", scope, key)
                     }
                     "relate" | "link" => {
                         let (rel_type, target) = parsed_relation.expect("relation was validated");
                         store.relate(key, rel_type, target)?;
-                        if scope == "project" {
-                            let rules_file = project_root
-                                .as_ref()
-                                .expect("project scope was resolved")
-                                .join(".agent-rules");
-                            if rules_file.exists() {
-                                store.export_to_file(&rules_file)?;
-                            }
-                        }
                         format!("linked [{}] {} -> {} -> {}", scope, key, rel_type, target)
                     }
                     "unrelate" | "unlink" => {
@@ -1261,19 +1295,11 @@ impl McpServer {
                                 key, rel_type, target
                             )));
                         }
-                        if scope == "project" {
-                            let rules_file = project_root
-                                .as_ref()
-                                .expect("project scope was resolved")
-                                .join(".agent-rules");
-                            if rules_file.exists() {
-                                store.export_to_file(&rules_file)?;
-                            }
-                        }
                         format!("unlinked [{}] {} -> {} -> {}", scope, key, rel_type, target)
                     }
                     _ => unreachable!("action was validated before opening the store"),
                 };
+                self.sync_rules_to_disk(&store, scope, project_root.as_deref())?;
                 Ok(msg)
             }
 

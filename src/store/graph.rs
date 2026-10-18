@@ -14,6 +14,15 @@ pub struct ContextCandidate {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SuggestedRelation {
+    pub source_key: String,
+    pub rel_type: String,
+    pub target_key: String,
+    pub confidence: u8,
+    pub reason: String,
+}
+
 pub struct TaskContext {
     pub rules: Vec<RuleRecord>,
     pub relations: Vec<RelationRecord>,
@@ -54,6 +63,19 @@ impl ContextExplanation {
             }
         }
         (included, omitted)
+    }
+}
+
+fn extract_key_namespace<'a>(key: &'a str, kind: &str) -> Option<&'a str> {
+    let stripped = if let Some(rest) = key.strip_prefix(kind).and_then(|r| r.strip_prefix('/')) {
+        rest
+    } else {
+        key
+    };
+    if stripped.contains('/') {
+        stripped.split('/').next().filter(|s| !s.is_empty())
+    } else {
+        None
     }
 }
 
@@ -309,6 +331,199 @@ impl Store {
             });
         }
         Ok(list)
+    }
+
+    /// Discover suggested relations between a memory and existing memories based on anchor co-location
+    /// and namespace hierarchy topology.
+    pub fn suggest_relations(
+        &self,
+        key: &str,
+        _val: &str,
+        anchor: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<Vec<SuggestedRelation>> {
+        let clean_key = key.trim();
+        let (db_anchor, db_kind) = if anchor.is_none() || kind.is_none() {
+            self.conn
+                .query_row(
+                    "SELECT anchor, kind FROM memories WHERE key = ?1;",
+                    params![clean_key],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+                )
+                .ok()
+                .map(|(a, k)| (a, Some(k)))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+        let resolved_anchor = anchor.or(db_anchor.as_deref());
+        let effective_kind = kind
+            .or(db_kind.as_deref())
+            .unwrap_or_else(|| crate::store::infer_kind(clean_key));
+        let anchor_file = resolved_anchor
+            .map(|a| a.split(':').next().unwrap_or(a).trim())
+            .filter(|a| !a.is_empty());
+
+        let key_namespace = extract_key_namespace(clean_key, effective_kind);
+
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key, val, anchor, kind FROM memories WHERE archived_at IS NULL AND key != ?1 LIMIT 250;",
+        )?;
+        let mut rows = stmt.query(params![clean_key])?;
+
+        let mut existing_relations = HashSet::new();
+        let mut rel_stmt = self.conn.prepare_cached(
+            "SELECT source_key, target_key FROM relations WHERE source_key = ?1 OR target_key = ?1;",
+        )?;
+        let mut rel_rows = rel_stmt.query(params![clean_key])?;
+        while let Some(r) = rel_rows.next()? {
+            let s: String = r.get(0)?;
+            let t: String = r.get(1)?;
+            existing_relations.insert((s, t));
+        }
+
+        let mut suggestions = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            let other_key: String = row.get(0)?;
+            let _other_val: String = row.get(1)?;
+            let other_anchor: Option<String> = row.get(2)?;
+            let other_kind: String = row.get(3)?;
+
+            let other_anchor_file = other_anchor
+                .as_deref()
+                .map(|a| a.split(':').next().unwrap_or(a).trim())
+                .filter(|a| !a.is_empty());
+
+            let other_namespace = extract_key_namespace(&other_key, &other_kind);
+
+            let same_anchor_file = anchor_file.is_some()
+                && other_anchor_file.is_some()
+                && anchor_file == other_anchor_file;
+
+            let same_namespace = key_namespace.is_some()
+                && other_namespace.is_some()
+                && key_namespace == other_namespace;
+
+            if same_anchor_file {
+                let file_name = anchor_file.unwrap();
+                let exact_anchor_match =
+                    anchor.is_some() && other_anchor.is_some() && anchor == other_anchor.as_deref();
+
+                if effective_kind == "decision" && other_kind == "gotcha" {
+                    if !existing_relations.contains(&(clean_key.to_string(), other_key.clone())) {
+                        suggestions.push(SuggestedRelation {
+                            source_key: clean_key.to_string(),
+                            rel_type: "mitigates".to_string(),
+                            target_key: other_key.clone(),
+                            confidence: 85,
+                            reason: format!("Decision and gotcha both anchor to {file_name}"),
+                        });
+                    }
+                } else if effective_kind == "gotcha" && other_kind == "decision" {
+                    if !existing_relations.contains(&(other_key.clone(), clean_key.to_string())) {
+                        suggestions.push(SuggestedRelation {
+                            source_key: other_key.clone(),
+                            rel_type: "mitigates".to_string(),
+                            target_key: clean_key.to_string(),
+                            confidence: 85,
+                            reason: format!("Decision and gotcha both anchor to {file_name}"),
+                        });
+                    }
+                } else if effective_kind == other_kind {
+                    if exact_anchor_match {
+                        if !existing_relations.contains(&(clean_key.to_string(), other_key.clone()))
+                        {
+                            suggestions.push(SuggestedRelation {
+                                source_key: clean_key.to_string(),
+                                rel_type: "supersedes".to_string(),
+                                target_key: other_key.clone(),
+                                confidence: 90,
+                                reason: format!(
+                                    "Both {effective_kind}s anchor to exact same code location"
+                                ),
+                            });
+                        }
+                    } else if !existing_relations
+                        .contains(&(clean_key.to_string(), other_key.clone()))
+                    {
+                        suggestions.push(SuggestedRelation {
+                            source_key: clean_key.to_string(),
+                            rel_type: "relates_to".to_string(),
+                            target_key: other_key.clone(),
+                            confidence: 80,
+                            reason: format!("Both {effective_kind}s anchor to {file_name}"),
+                        });
+                    }
+                }
+            } else if same_namespace {
+                let ns = key_namespace.unwrap();
+                if (effective_kind == "decision" && other_kind == "gotcha")
+                    || (effective_kind == "gotcha" && other_kind == "decision")
+                {
+                    let (decision, gotcha) = if effective_kind == "decision" {
+                        (clean_key.to_string(), other_key.clone())
+                    } else {
+                        (other_key.clone(), clean_key.to_string())
+                    };
+                    if !existing_relations.contains(&(decision.clone(), gotcha.clone())) {
+                        suggestions.push(SuggestedRelation {
+                            source_key: decision,
+                            rel_type: "mitigates".to_string(),
+                            target_key: gotcha,
+                            confidence: 75,
+                            reason: format!("Decision and gotcha share namespace '{ns}'"),
+                        });
+                    }
+                } else if effective_kind == other_kind
+                    && !existing_relations.contains(&(clean_key.to_string(), other_key.clone()))
+                {
+                    suggestions.push(SuggestedRelation {
+                        source_key: clean_key.to_string(),
+                        rel_type: "relates_to".to_string(),
+                        target_key: other_key.clone(),
+                        confidence: 65,
+                        reason: format!("Both {effective_kind}s share namespace '{ns}'"),
+                    });
+                }
+            }
+        }
+
+        suggestions.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        Ok(suggestions)
+    }
+
+    /// Automatically establish high-confidence relations across recent active memories.
+    pub fn auto_relate_high_confidence(
+        &mut self,
+        min_confidence: u8,
+    ) -> Result<Vec<SuggestedRelation>> {
+        let keys: Vec<(String, String, Option<String>, String)> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT key, val, anchor, kind FROM memories WHERE archived_at IS NULL ORDER BY updated_at DESC LIMIT 100;",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut list = Vec::new();
+            while let Some(row) = rows.next()? {
+                list.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
+            }
+            list
+        };
+
+        let mut applied = Vec::new();
+        for (key, val, anchor, kind) in &keys {
+            let suggestions = self.suggest_relations(key, val, anchor.as_deref(), Some(kind))?;
+            for s in suggestions {
+                if s.confidence >= min_confidence
+                    && self
+                        .relate(&s.source_key, &s.rel_type, &s.target_key)
+                        .is_ok()
+                {
+                    applied.push(s);
+                }
+            }
+        }
+        Ok(applied)
     }
 
     pub(crate) fn get_relations_touching(

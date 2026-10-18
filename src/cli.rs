@@ -50,6 +50,10 @@ pub enum Command {
         rel_type: String,
         target: String,
     },
+    RelateAuto,
+    RelateSuggest {
+        key: String,
+    },
     Unrelate {
         source: String,
         rel_type: String,
@@ -152,6 +156,7 @@ impl Command {
             self,
             Command::Set { .. }
                 | Command::Relate { .. }
+                | Command::RelateAuto
                 | Command::Unrelate { .. }
                 | Command::Del { .. }
                 | Command::Archive { .. }
@@ -265,16 +270,23 @@ where
             })
         }
         "relate" | "link" => {
-            if args.len() < 5 {
-                return Err(Error::Usage(
-                    "Usage: agent-mem relate <source_key> <rel_type> <target_key>".to_string(),
-                ));
+            if args.len() >= 3 && (args[2] == "--auto" || args[2] == "-a") {
+                Ok(Command::RelateAuto)
+            } else if args.len() >= 4 && (args[2] == "--suggest" || args[2] == "-s") {
+                Ok(Command::RelateSuggest {
+                    key: args[3].clone(),
+                })
+            } else if args.len() < 5 {
+                Err(Error::Usage(
+                    "Usage: agent-mem relate <source_key> <rel_type> <target_key>\n       agent-mem relate --suggest <key>\n       agent-mem relate --auto".to_string(),
+                ))
+            } else {
+                Ok(Command::Relate {
+                    source: args[2].clone(),
+                    rel_type: args[3].clone(),
+                    target: args[4].clone(),
+                })
             }
-            Ok(Command::Relate {
-                source: args[2].clone(),
-                rel_type: args[3].clone(),
-                target: args[4].clone(),
-            })
         }
         "unrelate" | "unlink" => {
             if args.len() < 5 {
@@ -1005,11 +1017,31 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     scope: MemoryScope::Project,
                 } => {
                     store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())?;
-                    let rules_file = root.join(".agent-rules");
+                    let rules_file = crate::store::resolve_rules_path(root);
                     if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
+                        store.export_to_path(&rules_file)?;
                     }
                     print_set(&key, anchor.as_deref(), kind.as_deref());
+                    let suggestions = store
+                        .suggest_relations(&key, &val, anchor.as_deref(), kind.as_deref())
+                        .unwrap_or_default();
+                    if let Some(top) = suggestions
+                        .into_iter()
+                        .next()
+                        .filter(|s| s.confidence >= 75)
+                    {
+                        println!(
+                            "  💡 Graph Hint: Discovered relation '{} -> {} -> {}' (confidence: {}%, reason: {}). Run 'agent-mem relate {} {} {}' to link.",
+                            top.source_key,
+                            top.rel_type,
+                            top.target_key,
+                            top.confidence,
+                            top.reason,
+                            top.source_key,
+                            top.rel_type,
+                            top.target_key
+                        );
+                    }
                 }
                 Command::Relate {
                     source,
@@ -1017,11 +1049,43 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     target,
                 } => {
                     store.relate(&source, &rel_type, &target)?;
-                    let rules_file = root.join(".agent-rules");
+                    let rules_file = crate::store::resolve_rules_path(root);
                     if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
+                        store.export_to_path(&rules_file)?;
                     }
                     print_relate(&source, &rel_type, &target);
+                }
+                Command::RelateAuto => {
+                    let applied = store.auto_relate_high_confidence(80)?;
+                    let rules_file = crate::store::resolve_rules_path(root);
+                    if rules_file.exists() && !applied.is_empty() {
+                        store.export_to_path(&rules_file)?;
+                    }
+                    if applied.is_empty() {
+                        println!("No high-confidence relations discovered to auto-link.");
+                    } else {
+                        println!("Auto-linked {} high-confidence relations:", applied.len());
+                        for s in &applied {
+                            println!(
+                                "  • {} -> {} -> {} ({}% confidence: {})",
+                                s.source_key, s.rel_type, s.target_key, s.confidence, s.reason
+                            );
+                        }
+                    }
+                }
+                Command::RelateSuggest { key } => {
+                    let suggestions = store.suggest_relations(&key, "", None, None)?;
+                    if suggestions.is_empty() {
+                        println!("No relations suggested for '{key}'.");
+                    } else {
+                        println!("Suggested relations for '{key}':");
+                        for s in &suggestions {
+                            println!(
+                                "  • {} -> {} -> {} ({}% confidence: {})",
+                                s.source_key, s.rel_type, s.target_key, s.confidence, s.reason
+                            );
+                        }
+                    }
                 }
                 Command::Unrelate {
                     source,
@@ -1029,17 +1093,17 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     target,
                 } => {
                     let unlinked = store.unrelate(&source, &rel_type, &target)?;
-                    let rules_file = root.join(".agent-rules");
+                    let rules_file = crate::store::resolve_rules_path(root);
                     if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
+                        store.export_to_path(&rules_file)?;
                     }
                     print_unrelate(&source, &rel_type, &target, unlinked);
                 }
                 Command::Del { key } => {
                     let deleted = store.del(&key)?;
-                    let rules_file = root.join(".agent-rules");
+                    let rules_file = crate::store::resolve_rules_path(root);
                     if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
+                        store.export_to_path(&rules_file)?;
                     }
                     print_del(&key, deleted);
                 }
@@ -1048,9 +1112,9 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     if !archived {
                         return Err(crate::error::Error::NotFound(key));
                     }
-                    let rules_file = root.join(".agent-rules");
+                    let rules_file = crate::store::resolve_rules_path(root);
                     if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
+                        store.export_to_path(&rules_file)?;
                     }
                     print_archive(&key, reason.as_deref());
                 }
@@ -1059,9 +1123,9 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     if !unarchived {
                         return Err(crate::error::Error::NotFound(key));
                     }
-                    let rules_file = root.join(".agent-rules");
+                    let rules_file = crate::store::resolve_rules_path(root);
                     if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
+                        store.export_to_path(&rules_file)?;
                     }
                     print_unarchive(&key);
                 }
@@ -1096,9 +1160,9 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 Command::Clean { dry_run } => {
                     let report = store.clean_zombies(root, dry_run)?;
                     if !dry_run && !report.is_empty() {
-                        let rules_file = root.join(".agent-rules");
+                        let rules_file = crate::store::resolve_rules_path(root);
                         if rules_file.exists() {
-                            store.export_to_file(&rules_file)?;
+                            store.export_to_path(&rules_file)?;
                         }
                     }
                     print_clean(&report, dry_run);
@@ -1165,11 +1229,16 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     }
                 }
                 Command::Sync { file, export } => {
-                    let target_file = file.as_deref().unwrap_or(".agent-rules");
-                    let file_path = if Path::new(target_file).is_absolute() {
-                        Path::new(target_file).to_path_buf()
-                    } else {
-                        root.join(target_file)
+                    let file_path = match file {
+                        Some(f) => {
+                            let p = Path::new(&f);
+                            if p.is_absolute() {
+                                p.to_path_buf()
+                            } else {
+                                root.join(p)
+                            }
+                        }
+                        None => crate::store::resolve_rules_path(root),
                     };
                     let report = if export {
                         store.sync_export(&file_path)?
@@ -1179,11 +1248,16 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     print_sync(&report);
                 }
                 Command::SyncAcceptConflicts { file } => {
-                    let target_file = file.as_deref().unwrap_or(".agent-rules");
-                    let file_path = if Path::new(target_file).is_absolute() {
-                        Path::new(target_file).to_path_buf()
-                    } else {
-                        root.join(target_file)
+                    let file_path = match file {
+                        Some(f) => {
+                            let p = Path::new(&f);
+                            if p.is_absolute() {
+                                p.to_path_buf()
+                            } else {
+                                root.join(p)
+                            }
+                        }
+                        None => crate::store::resolve_rules_path(root),
                     };
                     let report = store.sync_with_file_accept_conflicts(&file_path)?;
                     print_sync(&report);
