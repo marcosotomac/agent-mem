@@ -808,3 +808,123 @@ fn test_slugify_folds_diacritics_and_filters_ecosystem_lockfiles() {
         Some("services/api/src/auth.py:1")
     );
 }
+
+#[test]
+fn test_custom_trailers_dynamic_entity_kind() {
+    let commit = parse_conventional_commit(
+        "chore: update upload handler",
+        "Security: Always sanitize SVG uploads to prevent stored XSS attacks.\nKey: security/sanitize-svg-uploads",
+    );
+    let entity = commit
+        .entity
+        .expect("custom trailer should be parsed as entity");
+    match entity.kind {
+        EntityKind::Custom(ref s) => assert_eq!(s, "security"),
+        _ => panic!(
+            "Expected EntityKind::Custom('security'), got {:?}",
+            entity.kind
+        ),
+    }
+    assert_eq!(entity.key, "security/sanitize-svg-uploads");
+    assert_eq!(
+        entity.val,
+        "Always sanitize SVG uploads to prevent stored XSS attacks."
+    );
+}
+
+#[test]
+fn test_diff_directive_scanning_across_languages() {
+    use agent_mem::hook::scan_diff_for_directives;
+
+    let diff = r#"
+diff --git a/src/auth/jwt.rs b/src/auth/jwt.rs
+index 1234567..89abcdef 100644
+--- a/src/auth/jwt.rs
++++ b/src/auth/jwt.rs
+@@ -10,0 +25,3 @@
++// DECISION: enforce ed25519 signatures for all session tokens
++pub fn verify() {}
+"#;
+    let found = scan_diff_for_directives(diff);
+    assert!(found.is_some());
+    let (entity, anchor) = found.unwrap();
+    assert_eq!(entity.kind, EntityKind::Decision);
+    assert_eq!(
+        entity.val,
+        "enforce ed25519 signatures for all session tokens"
+    );
+    assert_eq!(anchor.as_deref(), Some("src/auth/jwt.rs:25"));
+
+    // Python comment (#)
+    let py_diff = r#"
+diff --git a/backend/tasks/worker.py b/backend/tasks/worker.py
+--- a/backend/tasks/worker.py
++++ b/backend/tasks/worker.py
+@@ -1,0 +50,3 @@
++# GOTCHA: celery gevent pool breaks on threadlocal storage
++def run(): pass
+"#;
+    let found_py = scan_diff_for_directives(py_diff);
+    assert!(found_py.is_some());
+    let (entity, anchor) = found_py.unwrap();
+    assert_eq!(entity.kind, EntityKind::Gotcha);
+    assert_eq!(anchor.as_deref(), Some("backend/tasks/worker.py:50"));
+}
+
+#[test]
+fn test_post_commit_fallback_on_poor_commit_message() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_test_diff_fallback_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let root = &temp_dir;
+
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    init_project(root).unwrap();
+
+    let code_file = root.join("src").join("server.rs");
+    fs::create_dir_all(code_file.parent().unwrap()).unwrap();
+    fs::write(
+        &code_file,
+        "// GOTCHA: macOS AirPlay Receiver occupies port 5000 by default\npub fn run() {}\n",
+    )
+    .unwrap();
+
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "wip"]);
+
+    let report = run_post_commit(root, false)
+        .expect("hook execution succeeds")
+        .expect("directive extracted from diff fallback");
+
+    let entity = report.entity_captured.expect("entity was captured");
+    assert_eq!(entity.kind, "gotcha");
+    assert!(entity.key.contains("macos-airplay"));
+    assert!(
+        entity
+            .anchor
+            .as_deref()
+            .unwrap()
+            .starts_with("src/server.rs:")
+    );
+
+    let db_path = root.join(".agent-mem").join("mem.db");
+    let store = Store::open(&db_path, true).unwrap();
+    let record = store
+        .get_entry(&entity.key)
+        .unwrap()
+        .expect("rule in store");
+    assert_eq!(
+        record.val,
+        "macOS AirPlay Receiver occupies port 5000 by default"
+    );
+    drop(store);
+    let _ = fs::remove_dir_all(&temp_dir);
+}

@@ -448,3 +448,89 @@ fn test_context_budget_reserves_graph_and_universal_qrels() {
         .unwrap();
     assert_eq!(unbounded.len(), 47);
 }
+
+#[test]
+fn test_suggest_relations_and_auto_relate() {
+    let mut store = Store::open_in_memory().unwrap();
+
+    // 1. Co-located gotcha and decision on same anchor file
+    store
+        .set_entry(
+            "gotcha/scanner/scan-timeout",
+            "Starship default 30ms timeout aborts scan on large directories",
+            Some("src/scanner.rs:42"),
+            Some("gotcha"),
+        )
+        .unwrap();
+
+    let suggestions = store
+        .suggest_relations(
+            "architecture/scanner/increase-timeout",
+            "Increase scan timeout to 150ms to prevent aborts",
+            Some("src/scanner.rs:42"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    assert!(!suggestions.is_empty());
+    let top = &suggestions[0];
+    assert_eq!(top.source_key, "architecture/scanner/increase-timeout");
+    assert_eq!(top.rel_type, "mitigates");
+    assert_eq!(top.target_key, "gotcha/scanner/scan-timeout");
+    assert_eq!(top.confidence, 85);
+
+    // 2. Exact anchor match for two decisions -> supersedes (90% confidence)
+    store
+        .set_entry(
+            "decision/auth/v1-hasher",
+            "Use sha256 for passwords",
+            Some("src/auth/hash.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let suggestions_exact = store
+        .suggest_relations(
+            "decision/auth/v2-argon2",
+            "Use argon2id for passwords",
+            Some("src/auth/hash.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let supersedes_cand = suggestions_exact
+        .iter()
+        .find(|s| s.rel_type == "supersedes")
+        .expect("supersedes suggestion found");
+    assert_eq!(supersedes_cand.confidence, 90);
+    assert_eq!(supersedes_cand.target_key, "decision/auth/v1-hasher");
+
+    // 3. Test auto_relate_high_confidence
+    store
+        .set_entry(
+            "decision/auth/v2-argon2",
+            "Use argon2id for passwords",
+            Some("src/auth/hash.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "architecture/scanner/increase-timeout",
+            "Increase scan timeout to 150ms",
+            Some("src/scanner.rs:42"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let linked = store.auto_relate_high_confidence(80).unwrap();
+    assert!(!linked.is_empty());
+
+    let rels = store
+        .get_relations("architecture/scanner/increase-timeout")
+        .unwrap();
+    assert!(
+        rels.iter()
+            .any(|(rel, target)| rel == "mitigates" && target == "gotcha/scanner/scan-timeout")
+    );
+}

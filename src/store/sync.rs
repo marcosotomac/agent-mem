@@ -2,11 +2,11 @@ use super::{Store, insert_memory_routes, mark_semantic_dirty, now_epoch};
 use crate::error::{Error, Result};
 use crate::store::models::{ParsedRules, RuleRecord, SyncReport, infer_kind};
 use rusqlite::{Row, TransactionBehavior, params, types::Type, types::ValueRef};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static EXPORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -101,6 +101,73 @@ fn append_json(out: &mut String, prefix: &str, record: &impl serde::Serialize) -
     out.push_str(&json);
     out.push('\n');
     Ok(())
+}
+
+fn atomic_write_file(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path.file_name().ok_or_else(|| {
+        crate::error::Error::Usage(format!("Export path '{}' has no file name", path.display()))
+    })?;
+
+    let (mut temp, temp_path) = loop {
+        let mut temp_name = OsString::from(".");
+        temp_name.push(file_name);
+        temp_name.push(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            EXPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let candidate = parent.join(temp_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (file, candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    };
+
+    let result = (|| -> Result<()> {
+        temp.write_all(content.as_bytes())?;
+        drop(temp);
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn extract_export_namespace(key: &str) -> &str {
+    let clean = key.trim();
+    if let Some((ns, _)) = clean.split_once('/') {
+        let trimmed_ns = ns.trim();
+        if !trimmed_ns.is_empty() {
+            return trimmed_ns;
+        }
+    }
+    "default"
+}
+
+/// Resolve the project rules target: `.agent-rules.d` if it is an existing directory,
+/// otherwise `.agent-rules`.
+pub fn resolve_rules_path(root: &Path) -> PathBuf {
+    let dir_target = root.join(".agent-rules.d");
+    if dir_target.is_dir() {
+        dir_target
+    } else {
+        root.join(".agent-rules")
+    }
 }
 
 impl Store {
@@ -346,50 +413,186 @@ impl Store {
 
     /// Export current rules to a file on disk.
     pub fn export_to_file(&self, path: &Path) -> Result<()> {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
         let content = self.export_rules_text()?;
-        let file_name = path.file_name().ok_or_else(|| {
-            crate::error::Error::Usage(format!("Export path '{}' has no file name", path.display()))
-        })?;
+        atomic_write_file(path, &content)?;
+        self.record_sync_state(path, &content)?;
+        Ok(())
+    }
 
-        let (mut temp, temp_path) = loop {
-            let mut temp_name = OsString::from(".");
-            temp_name.push(file_name);
-            temp_name.push(format!(
-                ".tmp-{}-{}",
-                std::process::id(),
-                EXPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-            ));
-            let candidate = parent.join(temp_name);
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(file) => break (file, candidate),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error.into()),
-            }
-        };
-
-        let result = (|| -> Result<()> {
-            temp.write_all(content.as_bytes())?;
-            drop(temp);
-            fs::rename(&temp_path, path)?;
-            let _ = self.record_sync_state(path, &content);
-            Ok(())
-        })();
-
-        if result.is_err() {
-            let _ = fs::remove_file(&temp_path);
+    /// Export rules partitioned by namespace into a directory of *.rules files.
+    pub fn export_to_dir(&self, dir: &Path) -> Result<()> {
+        if !dir.exists() {
+            fs::create_dir_all(dir)?;
         }
-        result
+
+        let snapshot = self.conn.unchecked_transaction()?;
+
+        let mut active_by_ns: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        {
+            let mut stmt = snapshot.prepare_cached(
+                "SELECT key, val, anchor, archive_reason, kind FROM memories WHERE archived_at IS NULL ORDER BY key;",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let key = row_text(row, 0)?;
+                let ns = extract_export_namespace(key);
+                let mut rule_str = String::new();
+                append_rule(
+                    &mut rule_str,
+                    &ExportRule {
+                        key,
+                        val: row_text(row, 1)?,
+                        anchor: optional_row_text(row, 2)?,
+                        archived_at: None,
+                        archive_reason: optional_row_text(row, 3)?,
+                        kind: row_text(row, 4)?,
+                    },
+                )?;
+                active_by_ns
+                    .entry(ns.to_string())
+                    .or_default()
+                    .push(rule_str);
+            }
+        }
+
+        let mut archived_by_ns: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        {
+            let mut stmt = snapshot.prepare_cached(
+                "SELECT key, val, anchor, archive_reason, kind FROM memories WHERE archived_at IS NOT NULL ORDER BY key;",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let key = row_text(row, 0)?;
+                let ns = extract_export_namespace(key);
+                let mut rule_str = String::new();
+                append_rule(
+                    &mut rule_str,
+                    &ExportRule {
+                        key,
+                        val: row_text(row, 1)?,
+                        anchor: optional_row_text(row, 2)?,
+                        archived_at: Some(1),
+                        archive_reason: optional_row_text(row, 3)?,
+                        kind: row_text(row, 4)?,
+                    },
+                )?;
+                archived_by_ns
+                    .entry(ns.to_string())
+                    .or_default()
+                    .push(rule_str);
+            }
+        }
+
+        let mut relations_content = String::new();
+        {
+            let mut stmt = snapshot.prepare_cached(
+                "SELECT source_key, rel_type, target_key FROM relations ORDER BY source_key, rel_type, target_key;",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut header_written = false;
+            while let Some(row) = rows.next()? {
+                if !header_written {
+                    relations_content.push_str("# Relations\n");
+                    header_written = true;
+                }
+                let fields = (row_text(row, 0)?, row_text(row, 1)?, row_text(row, 2)?);
+                if [fields.0, fields.1, fields.2].iter().any(|s| {
+                    s.trim() != *s || s.contains("->") || s.bytes().any(|b| b.is_ascii_control())
+                }) {
+                    append_json(&mut relations_content, JSON_RELATION, &fields)?;
+                } else {
+                    relations_content.push_str("[rel] ");
+                    relations_content.push_str(fields.0);
+                    relations_content.push_str(" -> ");
+                    relations_content.push_str(fields.1);
+                    relations_content.push_str(" -> ");
+                    relations_content.push_str(fields.2);
+                    relations_content.push('\n');
+                }
+            }
+        }
+
+        snapshot.commit()?;
+
+        let mut all_ns: BTreeSet<String> = active_by_ns.keys().cloned().collect();
+        all_ns.extend(archived_by_ns.keys().cloned());
+
+        let mut written_files = HashSet::new();
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut aggregate_hasher = DefaultHasher::new();
+
+        if all_ns.is_empty() {
+            let file_name = "default.rules".to_string();
+            let file_path = dir.join(&file_name);
+            let out =
+                "# .agent-rules.d/default.rules - agent-mem shared team memory\n\n".to_string();
+            atomic_write_file(&file_path, &out)?;
+            file_name.hash(&mut aggregate_hasher);
+            out.hash(&mut aggregate_hasher);
+            written_files.insert(file_name);
+        } else {
+            for ns in &all_ns {
+                let mut out = String::with_capacity(2048);
+                out.push_str(&format!(
+                    "# .agent-rules.d/{ns}.rules - agent-mem shared team memory\n\n"
+                ));
+                if let Some(actives) = active_by_ns.get(ns) {
+                    for r in actives {
+                        out.push_str(r);
+                    }
+                }
+                if let Some(archives) = archived_by_ns.get(ns) {
+                    out.push_str("\n# Archived Rules\n");
+                    for r in archives {
+                        out.push_str(r);
+                    }
+                }
+                let file_name = format!("{ns}.rules");
+                let file_path = dir.join(&file_name);
+                atomic_write_file(&file_path, &out)?;
+                file_name.hash(&mut aggregate_hasher);
+                out.hash(&mut aggregate_hasher);
+                written_files.insert(file_name);
+            }
+        }
+
+        if !relations_content.is_empty() {
+            let rel_file = "relations.rules";
+            let rel_path = dir.join(rel_file);
+            let rel_header =
+                format!("# .agent-rules.d/{rel_file} - relations graph\n\n{relations_content}");
+            atomic_write_file(&rel_path, &rel_header)?;
+            rel_file.hash(&mut aggregate_hasher);
+            rel_header.hash(&mut aggregate_hasher);
+            written_files.insert(rel_file.to_string());
+        }
+
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().is_some_and(|e| e == "rules")
+                    && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && !written_files.contains(name)
+                {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+
+        let combined_hash = aggregate_hasher.finish() as i64;
+        self.record_sync_state_mode(dir, combined_hash, false)?;
+        Ok(())
+    }
+
+    /// Export to a rules path (either a single file like `.agent-rules` or a modular directory like `.agent-rules.d`).
+    pub fn export_to_path(&self, path: &Path) -> Result<()> {
+        if path.is_dir() || path.extension().is_some_and(|ext| ext == "d") {
+            self.export_to_dir(path)
+        } else {
+            self.export_to_file(path)
+        }
     }
 
     fn compute_content_hash(content: &str) -> u64 {
@@ -409,16 +612,16 @@ impl Store {
     }
 
     pub(crate) fn record_sync_state(&self, path: &Path, content: &str) -> Result<()> {
-        self.record_sync_state_mode(path, content, false)
+        let content_hash = Self::compute_content_hash(content) as i64;
+        self.record_sync_state_mode(path, content_hash, false)
     }
 
     fn record_sync_state_mode(
         &self,
         path: &Path,
-        content: &str,
+        content_hash: i64,
         accepted_conflicts: bool,
     ) -> Result<()> {
-        let content_hash = Self::compute_content_hash(content) as i64;
         let generation = self.get_db_fingerprint()?;
         let db_state = if accepted_conflicts {
             format!("accepted:{generation}")
@@ -437,14 +640,150 @@ impl Store {
         Ok(())
     }
 
-    /// Reconcile SQLite database with a plain-text rules file (.agent-rules).
-    pub fn sync_with_file(&mut self, path: &Path) -> Result<SyncReport> {
-        self.sync_with_file_mode(path, false)
+    /// Sync with a rules path (either a single file like `.agent-rules` or a modular directory like `.agent-rules.d`).
+    pub fn sync_with_path(&mut self, path: &Path, accept_conflicts: bool) -> Result<SyncReport> {
+        if path.is_dir() || path.extension().is_some_and(|ext| ext == "d") {
+            self.sync_with_dir(path, accept_conflicts)
+        } else {
+            self.sync_with_file_mode(path, accept_conflicts)
+        }
     }
 
-    /// Explicitly accept the last definition of a duplicate key in a team file.
+    /// Reconcile SQLite database with a plain-text rules file (.agent-rules) or directory (.agent-rules.d).
+    pub fn sync_with_file(&mut self, path: &Path) -> Result<SyncReport> {
+        self.sync_with_path(path, false)
+    }
+
+    /// Explicitly accept the last definition of a duplicate key in a team file or directory.
     pub fn sync_with_file_accept_conflicts(&mut self, path: &Path) -> Result<SyncReport> {
-        self.sync_with_file_mode(path, true)
+        self.sync_with_path(path, true)
+    }
+
+    /// Reconcile SQLite database with a directory of plain-text rules files (*.rules).
+    pub fn sync_with_dir(&mut self, dir: &Path, accept_conflicts: bool) -> Result<SyncReport> {
+        if !dir.exists() {
+            self.export_to_dir(dir)?;
+            let total = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
+            return Ok(SyncReport {
+                path: dir.to_path_buf(),
+                imported: 0,
+                total,
+                file_created: true,
+                file_updated: false,
+                conflicts_resolved: 0,
+            });
+        }
+
+        let mut entries = Vec::new();
+        if let Ok(dir_entries) = fs::read_dir(dir) {
+            for entry in dir_entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|e| e == "rules") {
+                    entries.push(path);
+                }
+            }
+        }
+        entries.sort();
+
+        if entries.is_empty() {
+            self.export_to_dir(dir)?;
+            let total = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
+            return Ok(SyncReport {
+                path: dir.to_path_buf(),
+                imported: 0,
+                total,
+                file_created: false,
+                file_updated: true,
+                conflicts_resolved: 0,
+            });
+        }
+
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut aggregate_hasher = DefaultHasher::new();
+        let mut files_content = Vec::with_capacity(entries.len());
+
+        const MAX_RULES_FILE_BYTES: u64 = 32 * 1024 * 1024;
+        for path in &entries {
+            let file_size = fs::metadata(path)?.len();
+            if file_size > MAX_RULES_FILE_BYTES {
+                return Err(crate::error::Error::Usage(format!(
+                    "Rules file '{}' exceeds the {}-byte import limit",
+                    path.display(),
+                    MAX_RULES_FILE_BYTES
+                )));
+            }
+            let content = fs::read_to_string(path)?;
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                name.hash(&mut aggregate_hasher);
+            }
+            content.hash(&mut aggregate_hasher);
+            files_content.push((path, content));
+        }
+
+        let combined_hash = aggregate_hasher.finish() as i64;
+        let generation = self.get_db_fingerprint()?;
+        let db_state = if accept_conflicts {
+            format!("accepted:{generation}")
+        } else {
+            generation
+        };
+
+        let is_noop: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sync_state');",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false)
+            && self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _sync_state WHERE path = ?1 AND content_hash = ?2 AND db_state = ?3);",
+                    rusqlite::params![dir.to_string_lossy(), combined_hash, db_state],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+
+        if is_noop {
+            let total: usize = self
+                .conn
+                .query_row("SELECT count(*) FROM memories;", [], |r| r.get(0))?;
+            return Ok(SyncReport {
+                path: dir.to_path_buf(),
+                imported: total,
+                total,
+                file_created: false,
+                file_updated: false,
+                conflicts_resolved: 0,
+            });
+        }
+
+        let mut all_rules = Vec::new();
+        let mut all_relations = Vec::new();
+        for (path, content) in &files_content {
+            let (parsed, parse_error) = Self::parse_rules_with_error(content);
+            if let Some(error) = parse_error {
+                return Err(crate::error::Error::Usage(format!(
+                    "Error parsing '{}': {error}",
+                    path.display()
+                )));
+            }
+            all_rules.extend(parsed.rules);
+            all_relations.extend(parsed.relations);
+        }
+
+        let parsed = ParsedRules {
+            rules: all_rules,
+            relations: all_relations,
+        };
+
+        self.reconcile_parsed_rules(dir, combined_hash, parsed, accept_conflicts)
     }
 
     fn sync_with_file_mode(&mut self, path: &Path, accept_conflicts: bool) -> Result<SyncReport> {
@@ -518,6 +857,16 @@ impl Store {
             return Err(error);
         }
 
+        self.reconcile_parsed_rules(path, content_hash, parsed, accept_conflicts)
+    }
+
+    fn reconcile_parsed_rules(
+        &mut self,
+        path: &Path,
+        content_hash: i64,
+        parsed: ParsedRules,
+        accept_conflicts: bool,
+    ) -> Result<SyncReport> {
         for rule in &parsed.rules {
             super::validate_batch_rule(&super::BatchRule {
                 key: &rule.key,
@@ -888,7 +1237,7 @@ impl Store {
         mark_semantic_dirty(&tx)?;
 
         tx.commit()?;
-        let _ = self.record_sync_state_mode(path, &content, !conflicts.is_empty());
+        let _ = self.record_sync_state_mode(path, content_hash, !conflicts.is_empty());
 
         let total: usize = self
             .conn
@@ -904,10 +1253,10 @@ impl Store {
         })
     }
 
-    /// Explicitly export SQLite memories to a file.
+    /// Explicitly export SQLite memories to a file or directory.
     pub fn sync_export(&self, path: &Path) -> Result<SyncReport> {
         let exists = path.exists();
-        self.export_to_file(path)?;
+        self.export_to_path(path)?;
         let total = self
             .conn
             .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;

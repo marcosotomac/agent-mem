@@ -26,6 +26,7 @@ pub mod schema;
 pub mod semantic;
 pub mod session;
 pub mod sync;
+pub use sync::resolve_rules_path;
 
 pub const MAX_KEY_BYTES: usize = 512;
 pub const MAX_VALUE_BYTES: usize = 64 * 1024;
