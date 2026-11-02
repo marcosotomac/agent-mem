@@ -8,6 +8,7 @@ const SUBTLE: &str = "\x1b[38;5;240m"; // Zinc-700 (dots, borders, numbers)
 const BODY: &str = "\x1b[38;5;252m"; // Zinc-200 (readable body text)
 const EMERALD: &str = "\x1b[38;5;150m"; // Soft emerald green (checks, success)
 const AMBER: &str = "\x1b[38;5;216m"; // Soft amber (warnings, deletions)
+const RED: &str = "\x1b[38;5;203m"; // Soft red (errors, corrupt)
 const RESET: &str = "\x1b[0m";
 
 pub fn print_get(val: &str) {
@@ -631,12 +632,12 @@ pub fn print_sync(report: &crate::store::SyncReport) {
             );
         } else if report.conflicts_resolved > 0 {
             println!(
-                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active ({} conflict(s) resolved){RESET}",
+                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules ({} conflict(s) resolved){RESET}",
                 report.total, report.conflicts_resolved
             );
         } else {
             println!(
-                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active{RESET}",
+                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules{RESET}",
                 report.total
             );
         }
@@ -825,6 +826,7 @@ pub fn print_doctor(
     store_stats: Option<&crate::store::StoreStats>,
     git_stats: &crate::init::GitDoctorReport,
     clients: &[crate::installer::ClientStatus],
+    db_corrupt: bool,
 ) {
     let is_tty = io::stdout().is_terminal();
 
@@ -855,6 +857,10 @@ pub fn print_doctor(
             );
             println!(
                 "    {EMERALD}✓{RESET}  {MUTED}full-text{RESET} {ACCENT}FTS5 BM25{RESET}  {SUBTLE}·{RESET}  {MUTED}porter unicode61 tokenizer active{RESET}"
+            );
+        } else if db_corrupt {
+            println!(
+                "    {RED}✗{RESET}  {MUTED}database{RESET}  {RED}corrupt{RESET}  {SUBTLE}·{RESET}  {MUTED}run 'agent-mem doctor --fix' to rebuild{RESET}"
             );
         } else {
             println!(
@@ -961,6 +967,8 @@ pub fn print_doctor(
                 stats.archived_rules_count,
                 stats.sessions_count
             );
+        } else if db_corrupt {
+            println!("Storage: corrupt (run 'agent-mem doctor --fix' to rebuild)");
         } else {
             println!("Storage: not initialized");
         }

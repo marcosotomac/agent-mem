@@ -206,6 +206,14 @@ impl Store {
                 "Relation source, type, and target cannot be empty".into(),
             ));
         }
+        if !matches!(r, "mitigates" | "supersedes" | "depends_on" | "relates_to") {
+            return Err(crate::error::Error::Usage(format!(
+                "Invalid relation type '{r}'. Allowed: mitigates, supersedes, depends_on, relates_to"
+            )));
+        }
+        super::reject_oversized("relation type", r, super::MAX_RELATION_TYPE_BYTES)?;
+        crate::security::reject_secret(r)?;
+
         let now = now_epoch();
         let tx = self
             .conn

@@ -14,10 +14,12 @@ pub fn detected_secret_kind(value: &str) -> Option<&'static str> {
         return Some("private key");
     }
 
-    for token in
-        value.split(|c: char| c.is_ascii_whitespace() || matches!(c, '"' | '\'' | ',' | ';'))
-    {
-        let trimmed = token.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | '{' | '}'));
+    for token in value.split(|c: char| {
+        c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';' | '=' | ':')
+    }) {
+        let trimmed = token.trim_matches(|c: char| {
+            matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '`' | '"' | '\'')
+        });
         if is_github_token(trimmed) {
             return Some("GitHub token");
         }
@@ -31,30 +33,70 @@ pub fn detected_secret_kind(value: &str) -> Option<&'static str> {
 
     for line in value.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed
-            .strip_prefix("Authorization: Bearer ")
-            .or_else(|| trimmed.strip_prefix("authorization: bearer "))
-            && credential_value(rest)
+        if let Some((header, rest)) = trimmed.split_once(':')
+            && header.trim().eq_ignore_ascii_case("authorization")
         {
-            return Some("bearer token");
+            let rest_trimmed = rest.trim();
+            if let Some(token) = rest_trimmed
+                .strip_prefix("Bearer ")
+                .or_else(|| rest_trimmed.strip_prefix("bearer "))
+                .or_else(|| rest_trimmed.strip_prefix("BEARER "))
+                && credential_value(token)
+            {
+                return Some("bearer token");
+            }
         }
 
-        let Some((name, raw_value)) = trimmed.split_once(['=', ':']) else {
-            continue;
+        let (has_export, line_content) = if let Some(stripped) = trimmed.strip_prefix("export ") {
+            (true, stripped.trim_start())
+        } else {
+            (false, trimmed)
         };
-        let normalized_name = name.trim().to_ascii_lowercase().replace(['-', ' '], "_");
-        if matches!(
-            normalized_name.as_str(),
-            "api_key"
-                | "apikey"
-                | "access_token"
-                | "auth_token"
-                | "client_secret"
-                | "password"
-                | "private_key"
-        ) && credential_value(raw_value)
-        {
-            return Some("credential assignment");
+
+        for part in line_content.split_whitespace() {
+            if let Some((name, raw_value)) = part.split_once(['=', ':']) {
+                let normalized_name = name.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+                if (matches!(
+                    normalized_name.as_str(),
+                    "api_key"
+                        | "apikey"
+                        | "access_token"
+                        | "auth_token"
+                        | "client_secret"
+                        | "password"
+                        | "private_key"
+                        | "token"
+                        | "secret"
+                ) || has_export)
+                    && credential_value(raw_value)
+                {
+                    return Some("credential assignment");
+                }
+            }
+        }
+
+        if let Some((name, raw_value)) = line_content.split_once(['=', ':']) {
+            let var_name = name.split_whitespace().last().unwrap_or(name);
+            let normalized_name = var_name
+                .trim()
+                .to_ascii_lowercase()
+                .replace(['-', ' '], "_");
+            if (matches!(
+                normalized_name.as_str(),
+                "api_key"
+                    | "apikey"
+                    | "access_token"
+                    | "auth_token"
+                    | "client_secret"
+                    | "password"
+                    | "private_key"
+                    | "token"
+                    | "secret"
+            ) || has_export)
+                && credential_value(raw_value)
+            {
+                return Some("credential assignment");
+            }
         }
     }
 
@@ -137,5 +179,21 @@ mod tests {
         );
         assert!(detected_secret_kind("Redact API keys and Bearer tokens before logging").is_none());
         assert!(detected_secret_kind("password=<redacted>").is_none());
+    }
+
+    #[test]
+    fn test_secret_detection_patterns() {
+        assert_eq!(
+            detected_secret_kind("GITHUB_TOKEN=ghp_123456789012345678901234567890"),
+            Some("GitHub token")
+        );
+        assert_eq!(
+            detected_secret_kind("export api_key=abcdefghijklmnopqrstuvwxyz123456"),
+            Some("credential assignment")
+        );
+        assert_eq!(
+            detected_secret_kind("See `ghp_123456789012345678901234567890` in markdown"),
+            Some("GitHub token")
+        );
     }
 }

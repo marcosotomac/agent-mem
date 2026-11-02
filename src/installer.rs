@@ -503,6 +503,23 @@ pub(crate) fn write_config_safely(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn escape_toml_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
 pub fn install_to_path(
     config_path: &std::path::Path,
     client: TargetClient,
@@ -510,6 +527,7 @@ pub fn install_to_path(
     let binary_cmd = resolve_binary_command();
 
     if client == TargetClient::Codex {
+        let escaped_cmd = escape_toml_string(&binary_cmd);
         let (already_configured, updated_content) = if config_path.exists() {
             let raw = fs::read_to_string(config_path)?;
             let has_header = raw.contains("[mcp_servers.agent-mem]")
@@ -522,15 +540,15 @@ pub fn install_to_path(
                     c.push('\n');
                 }
                 c.push_str(&format!(
-                    "\n[mcp_servers.agent-mem]\ncommand = \"{}\"\nargs = [\"mcp\"]\n",
-                    binary_cmd
+                    "\n[mcp_servers.agent-mem]\ncommand = {}\nargs = [\"mcp\"]\n",
+                    escaped_cmd
                 ));
                 (false, c)
             }
         } else {
             let c = format!(
-                "[mcp_servers.agent-mem]\ncommand = \"{}\"\nargs = [\"mcp\"]\n",
-                binary_cmd
+                "[mcp_servers.agent-mem]\ncommand = {}\nargs = [\"mcp\"]\n",
+                escaped_cmd
             );
             (false, c)
         };

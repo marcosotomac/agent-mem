@@ -760,3 +760,18 @@ fn test_p2_6_context_and_relations_filter_archived_neighbors_and_budget() {
         "relate with nonexistent target must fail"
     );
 }
+
+#[test]
+fn test_store_relate_validates_rel_type() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.set("rule1", "First rule").unwrap();
+    store.set("rule2", "Second rule").unwrap();
+
+    let err = store.relate("rule1", "invalid_relation", "rule2");
+    assert!(err.is_err(), "relate with invalid rel_type must fail");
+    let err_msg = err.unwrap_err().to_string();
+    assert!(err_msg.contains("Invalid relation type"), "got: {err_msg}");
+
+    let ok = store.relate("rule1", "mitigates", "rule2");
+    assert!(ok.is_ok(), "relate with valid rel_type must succeed");
+}

@@ -738,6 +738,77 @@ fn test_mcp_exceptions_and_errors() {
         "Must not hide corruption as 'No memories found'"
     );
 
+    // 10. mem_set with invalid kind returns isError: true
+    let clean_dir = temp_dir.join("clean_mcp_test");
+    fs::create_dir_all(&clean_dir).unwrap();
+    agent_mem::init::init_project(&clean_dir).unwrap();
+    let clean_server = McpServer::with_paths(clean_dir.clone(), global_dir.join("global.db"));
+
+    let invalid_kind_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(107)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "k", "val": "v", "kind": "unsupported_kind" }
+        }),
+    };
+    let resp = clean_server.handle_request(&invalid_kind_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid kind")
+    );
+
+    // 11. mem_set with invalid relation type returns isError: true
+    let invalid_rel_type_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(108)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "k", "val": "v", "rel": "invalid_rel:target" }
+        }),
+    };
+    let resp = clean_server.handle_request(&invalid_rel_type_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid relation type")
+    );
+
+    // 12. mem_set batch with invalid kind returns isError: true
+    let invalid_batch_kind_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(109)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {
+                "batch": [
+                    { "key": "k", "val": "v", "kind": "unsupported_kind" }
+                ]
+            }
+        }),
+    };
+    let resp = clean_server
+        .handle_request(&invalid_batch_kind_req)
+        .unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid kind")
+    );
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 

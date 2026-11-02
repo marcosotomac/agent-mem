@@ -695,9 +695,12 @@ fn test_init_git_worktree_hook_resolution_and_commondir() {
     let worktree_meta = main_git.join("worktrees").join("feature_wt");
     fs::create_dir_all(&main_hooks).unwrap();
     fs::create_dir_all(&worktree_meta).unwrap();
+    fs::create_dir_all(main_git.join("objects")).unwrap();
+    fs::write(main_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(worktree_meta.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
 
     // Create commondir pointing to ../..
-    fs::write(worktree_meta.join("commondir"), "../..\n").unwrap();
+    fs::write(worktree_meta.join("commondir"), "../../\n").unwrap();
 
     // Create the worktree checkout
     let worktree_dir = base_temp.join("feature_wt");
@@ -754,6 +757,8 @@ fn test_init_git_submodule_hook_resolution() {
     let main_repo = base_temp.join("main_repo");
     let submodule_git = main_repo.join(".git").join("modules").join("nested_sub");
     fs::create_dir_all(&submodule_git).unwrap();
+    fs::create_dir_all(submodule_git.join("objects")).unwrap();
+    fs::write(submodule_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     let submodule_dir = main_repo.join("nested_sub");
     fs::create_dir_all(&submodule_dir).unwrap();
@@ -943,4 +948,284 @@ fn test_execute_command_guides_when_uninitialized() {
     );
     assert!(err.contains("agent-mem init"), "got: {err}");
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_doctor_corrupt_db_exits_err_and_fix_rebuilds_from_agent_rules() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_doctor_corrupt_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(temp_dir.join(".agent-mem")).unwrap();
+    let db_path = temp_dir.join(".agent-mem").join("mem.db");
+    fs::write(&db_path, b"corrupted sqlite database junk").unwrap();
+
+    // 1. doctor without --fix should return Err (!= 0)
+    let doctor_res = agent_mem::cli::execute_command(Command::Doctor { fix: false }, &temp_dir);
+    assert!(
+        doctor_res.is_err(),
+        "doctor on corrupt db must return Err, got {:?}",
+        doctor_res
+    );
+
+    // Write .agent-rules with a rule
+    let rules_file = temp_dir.join(".agent-rules");
+    fs::write(&rules_file, "preserved_key = preserved_value\n").unwrap();
+
+    // 2. doctor --fix should repair and rebuild from .agent-rules
+    let fix_res = agent_mem::cli::execute_command(Command::Doctor { fix: true }, &temp_dir);
+    assert!(
+        fix_res.is_ok(),
+        "doctor --fix must succeed, got {:?}",
+        fix_res
+    );
+
+    // Verify database was reconstructed and contains the rule
+    let store = agent_mem::store::Store::open(&db_path, false).unwrap();
+    let entry = store.get_entry("preserved_key").unwrap();
+    assert_eq!(entry.map(|r| r.val), Some("preserved_value".to_string()));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_archive_reason_secret_cli() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_archive_sec_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    agent_mem::init::init_project(&temp_dir).unwrap();
+
+    let set_cmd = Command::Set {
+        key: "test_key".into(),
+        val: "some value".into(),
+        anchor: None,
+        kind: None,
+        scope: agent_mem::cli::MemoryScope::Project,
+    };
+    agent_mem::cli::execute_command(set_cmd, &temp_dir).unwrap();
+
+    let archive_cmd = Command::Archive {
+        key: "test_key".into(),
+        reason: Some("api_key=abcdefghijklmnopqrstuvwxyz123456".into()),
+    };
+    let res = agent_mem::cli::execute_command(archive_cmd, &temp_dir);
+    assert!(
+        res.is_err(),
+        "archive with secret in reason must be rejected via CLI"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_init_rejects_manipulated_gitdir_escape() {
+    let base_temp = std::env::temp_dir().join(format!(
+        "agent_mem_gitdir_escape_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&base_temp).unwrap();
+
+    let target_dir = base_temp.join("victim_dir");
+    fs::create_dir_all(&target_dir).unwrap();
+
+    let repo_dir = base_temp.join("repo");
+    fs::create_dir_all(&repo_dir).unwrap();
+
+    // Write a .git file pointing to victim_dir (which has no HEAD / objects)
+    fs::write(
+        repo_dir.join(".git"),
+        format!("gitdir: {}\n", target_dir.display()),
+    )
+    .unwrap();
+
+    // init_project should fail or refuse to write hooks into victim_dir
+    let _report = agent_mem::init::init_project(&repo_dir);
+    // If it succeeds with git hooks disabled, or returns Err, victim_dir/hooks must NOT be written
+    assert!(
+        !target_dir.join("hooks").exists(),
+        "Manipulated gitdir must not escape and create hooks in victim_dir"
+    );
+    assert!(
+        agent_mem::init::resolve_git_dir(&repo_dir).is_none(),
+        "Manipulated gitdir outside repo without HEAD+objects must not resolve"
+    );
+
+    let _ = fs::remove_dir_all(&base_temp);
+}
+
+#[test]
+fn test_cli_kind_and_rel_type_validation() {
+    let err_kind = parse_args(vec![
+        "agent-mem".into(),
+        "set".into(),
+        "k".into(),
+        "v".into(),
+        "--kind".into(),
+        "invalid_kind".into(),
+    ]);
+    assert!(
+        err_kind.is_err(),
+        "set with invalid --kind must be rejected"
+    );
+
+    let valid_kind = parse_args(vec![
+        "agent-mem".into(),
+        "set".into(),
+        "k".into(),
+        "v".into(),
+        "--kind".into(),
+        "decision".into(),
+    ]);
+    assert!(valid_kind.is_ok(), "set with valid --kind must succeed");
+
+    let err_rel = parse_args(vec![
+        "agent-mem".into(),
+        "relate".into(),
+        "src".into(),
+        "invalid_rel".into(),
+        "tgt".into(),
+    ]);
+    assert!(
+        err_rel.is_err(),
+        "relate with invalid rel_type must be rejected"
+    );
+
+    let valid_rel = parse_args(vec![
+        "agent-mem".into(),
+        "relate".into(),
+        "src".into(),
+        "mitigates".into(),
+        "tgt".into(),
+    ]);
+    assert!(valid_rel.is_ok(), "relate with valid rel_type must succeed");
+
+    let err_unrel = parse_args(vec![
+        "agent-mem".into(),
+        "unrelate".into(),
+        "src".into(),
+        "invalid_rel".into(),
+        "tgt".into(),
+    ]);
+    assert!(
+        err_unrel.is_err(),
+        "unrelate with invalid rel_type must be rejected"
+    );
+}
+
+#[test]
+fn test_inspect_git_health_counts_only_active_rules() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_health_active_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    let rules_file = dir.join(".agent-rules");
+    let content = "rule1 = First active rule\nrule2 = Second active rule\n[archived] rule3 = Archived rule --reason: deprecated\n";
+    fs::write(&rules_file, content).unwrap();
+
+    let health = agent_mem::init::inspect_git_health(&dir);
+    assert_eq!(
+        health.rules_count, 2,
+        "inspect_git_health must only count active rules"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_stats_refreshes_registry() {
+    let lock = std::sync::Mutex::new(());
+    let _guard = lock.lock().unwrap();
+    let global_dir =
+        std::env::temp_dir().join(format!("agent_mem_stats_reg_{}", std::process::id()));
+    fs::create_dir_all(&global_dir).unwrap();
+    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
+
+    let dir = std::env::temp_dir().join(format!("agent_mem_stats_refresh_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    agent_mem::init::init_project(&dir).unwrap();
+
+    // Add a rule directly to db
+    let db = dir.join(".agent-mem/mem.db");
+    {
+        let mut store = agent_mem::store::Store::open(&db, true).unwrap();
+        store.set("rule/active", "Active rule").unwrap();
+    }
+
+    // Running stats should register/refresh the project
+    agent_mem::cli::execute_command(Command::Stats, &dir).unwrap();
+
+    let reg = agent_mem::registry::ProjectRegistry::load().unwrap();
+    let canonical = agent_mem::registry::ProjectRegistry::canonicalize_path(&dir);
+    let canonical_str = canonical.to_string_lossy().to_string();
+    let project = reg
+        .projects
+        .iter()
+        .find(|p| p.canonical_path == canonical_str);
+    assert!(
+        project.is_some(),
+        "stats must refresh and register the current project"
+    );
+    let p = project.unwrap();
+    assert_eq!(p.rules_count, 1, "active rules count must match");
+
+    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
+    let _ = fs::remove_dir_all(global_dir);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_hook_session_start_format_json_parsing() {
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "hook".into(),
+            "session-start".into(),
+            "--format".into(),
+            "json".into(),
+        ])
+        .unwrap(),
+        Command::HookSessionStart { json: true }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "hook".into(),
+            "session-start".into(),
+            "--format=json".into(),
+        ])
+        .unwrap(),
+        Command::HookSessionStart { json: true }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "hook".into(),
+            "session-start".into(),
+            "--json".into(),
+        ])
+        .unwrap(),
+        Command::HookSessionStart { json: true }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "hook".into(),
+            "session-start".into(),
+        ])
+        .unwrap(),
+        Command::HookSessionStart { json: false }
+    );
 }
