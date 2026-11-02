@@ -296,9 +296,11 @@ impl Store {
             return Ok(Vec::new());
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT target_key FROM relations
-             WHERE source_key = ?1
-             ORDER BY rel_type, target_key
+            "SELECT r.target_key FROM relations r
+             JOIN memories s ON s.key = r.source_key AND s.archived_at IS NULL
+             JOIN memories t ON t.key = r.target_key AND t.archived_at IS NULL
+             WHERE r.source_key = ?1
+             ORDER BY r.rel_type, r.target_key
              LIMIT ?2;",
         )?;
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -473,8 +475,7 @@ impl Store {
                         } else {
                             (other_key.clone(), clean_key.to_string())
                         };
-                        if !existing_relations
-                            .contains(&(clean_key.to_string(), other_key.clone()))
+                        if !existing_relations.contains(&(clean_key.to_string(), other_key.clone()))
                             && !existing_relates_to_pairs.contains(&relates_pair)
                         {
                             suggestions.push(SuggestedRelation {
@@ -625,10 +626,12 @@ impl Store {
 
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare_cached(
-            "SELECT source_key, rel_type, target_key, created_at
-             FROM relations
-             WHERE source_key = ?1 OR target_key = ?1
-             ORDER BY source_key, rel_type, target_key
+            "SELECT r.source_key, r.rel_type, r.target_key, r.created_at
+             FROM relations r
+             JOIN memories s ON s.key = r.source_key AND s.archived_at IS NULL
+             JOIN memories t ON t.key = r.target_key AND t.archived_at IS NULL
+             WHERE r.source_key = ?1 OR r.target_key = ?1
+             ORDER BY r.source_key, r.rel_type, r.target_key
              LIMIT ?2;",
         )?;
         let mut relations = Vec::with_capacity(limit.min(64));

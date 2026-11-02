@@ -661,3 +661,102 @@ fn test_p2_5_auto_relate_does_not_iterate_archived_rules_or_duplicate_symmetric_
         }
     }
 }
+
+#[test]
+fn test_p2_6_context_and_relations_filter_archived_neighbors_and_budget() {
+    let mut store = Store::open_in_memory().unwrap();
+    // 1. Direct active rule
+    store
+        .set_entry(
+            "rule/active1",
+            "active direct rule",
+            Some("src/foo.rs:1"),
+            Some("rule"),
+        )
+        .unwrap();
+    // 2. Target rule that gets archived
+    store
+        .set_entry(
+            "rule/archived_neighbor",
+            "obsolete rule",
+            Some("src/other.rs:10"),
+            Some("rule"),
+        )
+        .unwrap();
+    store
+        .relate("rule/active1", "relates_to", "rule/archived_neighbor")
+        .unwrap();
+    store
+        .archive("rule/archived_neighbor", Some("deprecated"))
+        .unwrap();
+
+    // 3. Universal active rule to fill budget
+    store
+        .set_entry(
+            "rule/universal_active",
+            "universal rule always relevant",
+            None,
+            Some("rule"),
+        )
+        .unwrap();
+
+    // In context_filtered:
+    let (rules, rels, _) = store
+        .context_filtered(Some("src/foo.rs:1"), None, 2)
+        .unwrap();
+
+    // rels must NOT contain the archived neighbor
+    assert!(
+        rels.iter().all(|r| r.target_key != "rule/archived_neighbor"
+            && r.source_key != "rule/archived_neighbor"),
+        "RELATIONS section must not include archived neighbors: {:?}",
+        rels
+    );
+
+    // rules must contain 2 active rules (archived neighbor must not eat the budget of 2)
+    assert_eq!(
+        rules.len(),
+        2,
+        "Budget of 2 must only count active rules, got: {:?}",
+        rules.iter().map(|r| &r.key).collect::<Vec<_>>()
+    );
+
+    // In context_for_files:
+    let (files_rules, files_rels, _) = store
+        .context_for_files(&["src/foo.rs".to_string()], None, 2)
+        .unwrap();
+
+    assert!(
+        files_rels
+            .iter()
+            .all(|r| r.target_key != "rule/archived_neighbor"
+                && r.source_key != "rule/archived_neighbor"),
+        "context_for_files RELATIONS must not include archived neighbors: {:?}",
+        files_rels
+    );
+    assert_eq!(
+        files_rules.len(),
+        2,
+        "context_for_files budget of 2 must only count active rules, got: {:?}",
+        files_rules.iter().map(|r| &r.key).collect::<Vec<_>>()
+    );
+
+    // 4. Validate existence before inserting relations in batch or relate
+    let bad_batch = [agent_mem::store::BatchRule {
+        key: "rule/new_batch",
+        val: "desc",
+        anchor: None,
+        kind: None,
+        relation: Some(("depends_on", "rule/does_not_exist")),
+    }];
+    assert!(
+        store.set_batch(&bad_batch).is_err(),
+        "set_batch with nonexistent target relation must fail"
+    );
+    assert!(
+        store
+            .relate("rule/active1", "relates_to", "rule/does_not_exist")
+            .is_err(),
+        "relate with nonexistent target must fail"
+    );
+}

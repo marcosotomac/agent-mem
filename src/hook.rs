@@ -376,18 +376,18 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
         }
     }
 
-    if let Some(content) = &trailers.explicit_content {
-        if content.trim().is_empty() {
-            eprintln!("warning: trailer has empty value, ignoring");
-            trailers.explicit_content = None;
-            trailers.explicit_kind = None;
-        }
+    if let Some(content) = &trailers.explicit_content
+        && content.trim().is_empty()
+    {
+        eprintln!("warning: trailer has empty value, ignoring");
+        trailers.explicit_content = None;
+        trailers.explicit_kind = None;
     }
-    if let Some(breaking) = &trailers.breaking_change {
-        if breaking.trim().is_empty() {
-            eprintln!("warning: trailer 'breaking change' has empty value, ignoring");
-            trailers.breaking_change = None;
-        }
+    if let Some(breaking) = &trailers.breaking_change
+        && breaking.trim().is_empty()
+    {
+        eprintln!("warning: trailer 'breaking change' has empty value, ignoring");
+        trailers.breaking_change = None;
     }
 
     trailers
@@ -904,16 +904,16 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     let relations: Vec<(String, String, String)> = if let Some(ent) = &entity_captured {
         let mut rels = Vec::new();
         for (rel_type, target) in parsed.relations {
-            if rel_type == "supersedes" {
-                if let Some(store_ref) = store.as_ref() {
-                    let exists = store_ref.get_entry(&target)?.is_some();
-                    if !exists {
-                        eprintln!(
-                            "warning: supersedes target '{}' does not exist, ignoring relation",
-                            target
-                        );
-                        continue;
-                    }
+            if rel_type == "supersedes"
+                && let Some(store_ref) = store.as_ref()
+            {
+                let exists = store_ref.get_entry(&target)?.is_some();
+                if !exists {
+                    eprintln!(
+                        "warning: supersedes target '{}' does not exist, ignoring relation",
+                        target
+                    );
+                    continue;
                 }
             }
             rels.push((ent.key.clone(), rel_type, target));
