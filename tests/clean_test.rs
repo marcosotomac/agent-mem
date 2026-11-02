@@ -32,6 +32,9 @@ fn test_extract_anchor_paths_normalization() {
     let paths = extract_anchor_paths("@ src/auth/jwt.rs:42, src/models/user.rs:10");
     assert_eq!(paths, vec!["src/auth/jwt.rs", "src/models/user.rs"]);
 
+    let paths = extract_anchor_paths("@ src/auth/jwt.rs:42, @ src/models/user.rs:10");
+    assert_eq!(paths, vec!["src/auth/jwt.rs", "src/models/user.rs"]);
+
     let paths = extract_anchor_paths("@ src\\win\\path.rs:1");
     assert_eq!(paths, vec!["src/win/path.rs"]);
 
@@ -138,7 +141,7 @@ fn test_clean_repairs_partial_anchors_instead_of_archiving_rule() {
 
     let dry = store.clean_zombies(&temp_dir, true).unwrap();
     assert_eq!(dry[0].missing_paths, vec!["src/dead.rs"]);
-    assert_eq!(dry[0].remaining_paths, vec!["src/live.rs"]);
+    assert_eq!(dry[0].remaining_paths, vec!["src/live.rs:9"]);
     assert!(!dry[0].archived);
 
     let repaired = store.clean_zombies(&temp_dir, false).unwrap();
@@ -148,7 +151,7 @@ fn test_clean_repairs_partial_anchors_instead_of_archiving_rule() {
         .unwrap()
         .unwrap();
     assert!(entry.archived_at.is_none());
-    assert_eq!(entry.anchor.as_deref(), Some("src/live.rs"));
+    assert_eq!(entry.anchor.as_deref(), Some("src/live.rs:9"));
     assert!(store.clean_zombies(&temp_dir, true).unwrap().is_empty());
 
     let _ = fs::remove_dir_all(temp_dir);

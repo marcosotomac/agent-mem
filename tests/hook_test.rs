@@ -869,6 +869,21 @@ diff --git a/backend/tasks/worker.py b/backend/tasks/worker.py
     let (entity, anchor) = found_py.unwrap();
     assert_eq!(entity.kind, EntityKind::Gotcha);
     assert_eq!(anchor.as_deref(), Some("backend/tasks/worker.py:50"));
+
+    // Quoted path in git diff: +++ "b/..."
+    let quoted_diff = r#"
+diff --git "a/src/auth/jwt.rs" "b/src/auth/jwt.rs"
+--- "a/src/auth/jwt.rs"
++++ "b/src/auth/jwt.rs"
+@@ -1,0 +15,3 @@
++// PATTERN: token refresh rotation pattern
++pub fn rotate() {}
++"#;
+    let found_quoted = scan_diff_for_directives(quoted_diff);
+    assert!(found_quoted.is_some());
+    let (entity, anchor) = found_quoted.unwrap();
+    assert_eq!(entity.kind, EntityKind::Pattern);
+    assert_eq!(anchor.as_deref(), Some("src/auth/jwt.rs:15"));
 }
 
 #[test]

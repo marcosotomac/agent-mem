@@ -2,7 +2,7 @@ use super::{Store, mark_semantic_dirty, now_epoch};
 use crate::error::Result;
 use crate::store::models::{
     ROUTE_PATH_SUFFIX, RelationRecord, RuleEntry, RuleRecord, SessionEntry, ZombieReport,
-    extract_anchor_paths, route_hash, routing_entries_for_path,
+    extract_anchor_paths, parse_anchor_elements, route_hash, routing_entries_for_path,
 };
 use rusqlite::{TransactionBehavior, params};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -723,21 +723,24 @@ impl Store {
 
         for m in active {
             if let Some(anchor_raw) = m.anchor {
-                let paths = extract_anchor_paths(&anchor_raw);
-                if paths.is_empty() {
+                let elements = parse_anchor_elements(&anchor_raw);
+                if elements.is_empty() {
                     continue;
                 }
 
-                let missing: Vec<String> = paths
+                let missing: Vec<String> = elements
                     .iter()
+                    .map(|(path, _)| path.clone())
                     .filter(|p| !project_root.join(p).exists())
-                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .collect();
 
                 if !missing.is_empty() {
-                    let remaining = paths
+                    let remaining = elements
                         .into_iter()
-                        .filter(|p| !missing.contains(p))
+                        .filter(|(path, _)| !missing.contains(path))
+                        .map(|(_, formatted)| formatted)
                         .collect::<Vec<_>>();
                     zombies.push(ZombieReport {
                         key: m.key.clone(),
@@ -771,21 +774,24 @@ impl Store {
 
         for m in active {
             if let Some(anchor_raw) = m.anchor {
-                let paths = extract_anchor_paths(&anchor_raw);
-                if paths.is_empty() {
+                let elements = parse_anchor_elements(&anchor_raw);
+                if elements.is_empty() {
                     continue;
                 }
 
-                let missing: Vec<String> = paths
+                let missing: Vec<String> = elements
                     .iter()
-                    .filter(|p| deleted_files.iter().any(|d| d == *p))
-                    .cloned()
+                    .map(|(path, _)| path.clone())
+                    .filter(|p| deleted_files.iter().any(|d| d == p))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .collect();
 
                 if !missing.is_empty() {
-                    let remaining = paths
+                    let remaining = elements
                         .into_iter()
-                        .filter(|p| !missing.contains(p))
+                        .filter(|(path, _)| !missing.contains(path))
+                        .map(|(_, formatted)| formatted)
                         .collect::<Vec<_>>();
                     zombies.push(ZombieReport {
                         key: m.key.clone(),

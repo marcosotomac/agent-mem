@@ -422,8 +422,13 @@ pub fn scan_diff_for_directives(diff_text: &str) -> Option<(EntityProposal, Opti
     let mut current_line: usize = 0;
 
     for line in diff_text.lines() {
-        if let Some(rest) = line.strip_prefix("+++ b/") {
-            let file = rest.trim();
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            let trimmed = rest.trim().trim_matches('"');
+            let file = trimmed
+                .strip_prefix("b/")
+                .unwrap_or(trimmed)
+                .trim_matches('"')
+                .trim();
             if is_relevant_source_file(file) {
                 current_file = Some(file.to_string());
             } else {
@@ -786,7 +791,10 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
 
     let deleted_output = Command::new("git")
         .args([
+            "-c",
+            "core.quotePath=false",
             "diff-tree",
+            "-z",
             "--root",
             "--no-commit-id",
             "--name-only",
@@ -801,8 +809,8 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
         Ok(out) if out.status.success() => {
             let diff_str = String::from_utf8_lossy(&out.stdout);
             diff_str
-                .lines()
-                .map(|l| l.trim().to_string())
+                .split('\0')
+                .map(|l| l.trim().trim_matches('"').to_string())
                 .filter(|l| !l.is_empty())
                 .collect()
         }
@@ -811,7 +819,10 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
 
     let diff_output = Command::new("git")
         .args([
+            "-c",
+            "core.quotePath=false",
             "diff-tree",
+            "-z",
             "--root",
             "--no-commit-id",
             "--name-only",
@@ -825,8 +836,8 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
         Ok(out) if out.status.success() => {
             let diff_str = String::from_utf8_lossy(&out.stdout);
             diff_str
-                .lines()
-                .map(|l| l.trim().to_string())
+                .split('\0')
+                .map(|l| l.trim().trim_matches('"').to_string())
                 .filter(|l| !l.is_empty() && !deleted_files.contains(l))
                 .collect()
         }
@@ -1048,7 +1059,10 @@ pub fn get_diff_files(root: &Path) -> Vec<String> {
     if files.is_empty()
         && let Ok(out) = Command::new("git")
             .args([
+                "-c",
+                "core.quotePath=false",
                 "diff-tree",
+                "-z",
                 "--root",
                 "--no-commit-id",
                 "--name-only",
@@ -1059,7 +1073,7 @@ pub fn get_diff_files(root: &Path) -> Vec<String> {
             .output()
         && out.status.success()
     {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
+        for line in String::from_utf8_lossy(&out.stdout).split('\0') {
             let trimmed = line.trim().trim_matches('"');
             if !trimmed.is_empty() && !files.iter().any(|f| f == trimmed) {
                 files.push(trimmed.to_string());

@@ -80,20 +80,38 @@ pub struct ZombieReport {
     pub archived: bool,
 }
 
-/// Extract file paths from an anchor string (e.g. "@ src/auth/jwt.rs:42, src/models/user.rs:10").
-pub fn extract_anchor_paths(raw: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let cleaned = raw.trim().trim_start_matches('@').trim();
-    for part in cleaned.split(',') {
-        let trimmed = part.trim();
+/// Parse individual anchor elements into (normalized_file_path, formatted_anchor_element).
+/// Trims '@' on each element and retains line numbers for formatted elements.
+pub fn parse_anchor_elements(raw: &str) -> Vec<(String, String)> {
+    let mut elements = Vec::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim().trim_start_matches('@').trim();
         if trimmed.is_empty() {
             continue;
         }
-        let file_part = trimmed.split(':').next().unwrap_or("").trim();
+        let (file_part, line_part) = match trimmed.split_once(':') {
+            Some((f, l)) => (f.trim(), Some(l.trim())),
+            None => (trimmed, None),
+        };
         let normalized = file_part.replace('\\', "/");
         let without_prefix = normalized.trim_start_matches("./");
-        if !without_prefix.is_empty() && !paths.iter().any(|p| p == without_prefix) {
-            paths.push(without_prefix.to_string());
+        if !without_prefix.is_empty() {
+            let formatted = match line_part {
+                Some(l) if !l.is_empty() => format!("{without_prefix}:{l}"),
+                _ => without_prefix.to_string(),
+            };
+            elements.push((without_prefix.to_string(), formatted));
+        }
+    }
+    elements
+}
+
+/// Extract file paths from an anchor string (e.g. "@ src/auth/jwt.rs:42, src/models/user.rs:10").
+pub fn extract_anchor_paths(raw: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for (path, _) in parse_anchor_elements(raw) {
+        if !paths.iter().any(|p| p == &path) {
+            paths.push(path);
         }
     }
     paths
