@@ -282,6 +282,14 @@ impl McpServer {
                 "Relation type and target cannot be empty".into(),
             ));
         }
+        if !matches!(
+            rel_type,
+            "mitigates" | "supersedes" | "depends_on" | "relates_to"
+        ) {
+            return Err(crate::error::Error::Usage(format!(
+                "Invalid relation type '{rel_type}'. Allowed: mitigates, supersedes, depends_on, relates_to"
+            )));
+        }
         Ok((rel_type, target))
     }
 
@@ -737,6 +745,16 @@ impl McpServer {
                             .and_then(|v| v.as_str())
                             .map(String::from);
                         let kind = item.get("kind").and_then(|v| v.as_str()).map(String::from);
+                        if let Some(ref k) = kind
+                            && !matches!(
+                                k.to_ascii_lowercase().as_str(),
+                                "rule" | "decision" | "gotcha" | "pattern"
+                            )
+                        {
+                            return Err(crate::error::Error::Usage(format!(
+                                "Invalid kind '{k}'. Allowed kinds: rule, decision, gotcha, pattern"
+                            )));
+                        }
                         let rel = item
                             .get("rel")
                             .and_then(|v| v.as_str())
@@ -783,6 +801,16 @@ impl McpServer {
                 })?;
                 let anchor = args.get("anchor").and_then(|v| v.as_str());
                 let kind = args.get("kind").and_then(|v| v.as_str());
+                if let Some(k) = kind
+                    && !matches!(
+                        k.to_ascii_lowercase().as_str(),
+                        "rule" | "decision" | "gotcha" | "pattern"
+                    )
+                {
+                    return Err(crate::error::Error::Usage(format!(
+                        "Invalid kind '{k}'. Allowed kinds: rule, decision, gotcha, pattern"
+                    )));
+                }
                 let rel = args.get("rel").and_then(|v| v.as_str());
 
                 let relation = rel.map(Self::parse_relation).transpose()?;

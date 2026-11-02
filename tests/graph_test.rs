@@ -534,3 +534,18 @@ fn test_suggest_relations_and_auto_relate() {
             .any(|(rel, target)| rel == "mitigates" && target == "gotcha/scanner/scan-timeout")
     );
 }
+
+#[test]
+fn test_store_relate_validates_rel_type() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.set("rule1", "First rule").unwrap();
+    store.set("rule2", "Second rule").unwrap();
+
+    let err = store.relate("rule1", "invalid_relation", "rule2");
+    assert!(err.is_err(), "relate with invalid rel_type must fail");
+    let err_msg = err.unwrap_err().to_string();
+    assert!(err_msg.contains("Invalid relation type"), "got: {err_msg}");
+
+    let ok = store.relate("rule1", "mitigates", "rule2");
+    assert!(ok.is_ok(), "relate with valid rel_type must succeed");
+}

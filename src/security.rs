@@ -33,18 +33,17 @@ pub fn detected_secret_kind(value: &str) -> Option<&'static str> {
 
     for line in value.lines() {
         let trimmed = line.trim();
-        if let Some((header, rest)) = trimmed.split_once(':') {
-            if header.trim().eq_ignore_ascii_case("authorization") {
-                let rest_trimmed = rest.trim();
-                if let Some(token) = rest_trimmed
-                    .strip_prefix("Bearer ")
-                    .or_else(|| rest_trimmed.strip_prefix("bearer "))
-                    .or_else(|| rest_trimmed.strip_prefix("BEARER "))
-                {
-                    if credential_value(token) {
-                        return Some("bearer token");
-                    }
-                }
+        if let Some((header, rest)) = trimmed.split_once(':')
+            && header.trim().eq_ignore_ascii_case("authorization")
+        {
+            let rest_trimmed = rest.trim();
+            if let Some(token) = rest_trimmed
+                .strip_prefix("Bearer ")
+                .or_else(|| rest_trimmed.strip_prefix("bearer "))
+                .or_else(|| rest_trimmed.strip_prefix("BEARER "))
+                && credential_value(token)
+            {
+                return Some("bearer token");
             }
         }
 
@@ -78,7 +77,10 @@ pub fn detected_secret_kind(value: &str) -> Option<&'static str> {
 
         if let Some((name, raw_value)) = line_content.split_once(['=', ':']) {
             let var_name = name.split_whitespace().last().unwrap_or(name);
-            let normalized_name = var_name.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+            let normalized_name = var_name
+                .trim()
+                .to_ascii_lowercase()
+                .replace(['-', ' '], "_");
             if (matches!(
                 normalized_name.as_str(),
                 "api_key"

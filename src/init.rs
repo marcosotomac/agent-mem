@@ -79,18 +79,19 @@ fn is_real_git_dir(dir: &Path) -> bool {
         return true;
     }
     // A worktree gitdir contains HEAD and commondir, pointing to a common gitdir with objects/
-    if dir.join("HEAD").exists() && dir.join("commondir").is_file() {
-        if let Ok(commondir_content) = fs::read_to_string(dir.join("commondir")) {
-            let common_path = PathBuf::from(commondir_content.trim());
-            let resolved = if common_path.is_absolute() {
-                common_path
-            } else {
-                dir.join(common_path)
-            };
-            let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
-            if canonical.join("objects").is_dir() {
-                return true;
-            }
+    if dir.join("HEAD").exists()
+        && dir.join("commondir").is_file()
+        && let Ok(commondir_content) = fs::read_to_string(dir.join("commondir"))
+    {
+        let common_path = PathBuf::from(commondir_content.trim());
+        let resolved = if common_path.is_absolute() {
+            common_path
+        } else {
+            dir.join(common_path)
+        };
+        let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
+        if canonical.join("objects").is_dir() {
+            return true;
         }
     }
     false

@@ -134,12 +134,36 @@ pub(crate) fn validate_batch_rule(rule: &BatchRule<'_>) -> Result<()> {
     if let Some(kind) = rule.kind {
         reject_oversized("kind", kind, MAX_KIND_BYTES)?;
         reject_secret(kind)?;
+        let trimmed_kind = kind.trim();
+        if trimmed_kind.is_empty() {
+            return Err(crate::error::Error::Usage(
+                "Memory kind cannot be empty".into(),
+            ));
+        }
+        let lower = trimmed_kind.to_ascii_lowercase();
+        let is_standard = matches!(lower.as_str(), "rule" | "decision" | "gotcha" | "pattern");
+        let is_valid_custom = trimmed_kind.len() >= 3
+            && trimmed_kind.len() <= 32
+            && trimmed_kind
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !is_standard && !is_valid_custom {
+            return Err(crate::error::Error::Usage(format!(
+                "Invalid memory kind '{trimmed_kind}'. Allowed kinds: rule, decision, gotcha, pattern, or valid identifier"
+            )));
+        }
     }
     if let Some((rel_type, target)) = rule.relation {
         if rel_type.trim().is_empty() || target.trim().is_empty() {
             return Err(crate::error::Error::Usage(
                 "Relation type and target cannot be empty".into(),
             ));
+        }
+        let r = rel_type.trim();
+        if !matches!(r, "mitigates" | "supersedes" | "depends_on" | "relates_to") {
+            return Err(crate::error::Error::Usage(format!(
+                "Invalid relation type '{r}'. Allowed: mitigates, supersedes, depends_on, relates_to"
+            )));
         }
         reject_oversized("relation type", rel_type, MAX_RELATION_TYPE_BYTES)?;
         reject_oversized("relation target", target, MAX_KEY_BYTES)?;

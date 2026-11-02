@@ -822,7 +822,10 @@ fn test_archive_and_relate_reject_secrets_and_oversized() {
         "ghp_123456789012345678901234567890",
         "rule/target",
     );
-    assert!(err_rel_sec.is_err(), "relate with secret in rel_type must fail");
+    assert!(
+        err_rel_sec.is_err(),
+        "relate with secret in rel_type must fail"
+    );
 }
 
 #[test]

@@ -250,7 +250,17 @@ where
                     anchor = Some(args[i + 1].clone());
                     i += 2;
                 } else if (args[i] == "--kind" || args[i] == "-k") && i + 1 < args.len() {
-                    kind = Some(args[i + 1].clone());
+                    let k = args[i + 1].clone();
+                    if !matches!(
+                        k.to_ascii_lowercase().as_str(),
+                        "rule" | "decision" | "gotcha" | "pattern"
+                    ) {
+                        return Err(Error::Usage(format!(
+                            "Invalid kind '{}'. Allowed kinds: rule, decision, gotcha, pattern",
+                            k
+                        )));
+                    }
+                    kind = Some(k.to_ascii_lowercase());
                     i += 2;
                 } else if args[i] == "--scope" && i + 1 < args.len() {
                     scope = MemoryScope::parse(&args[i + 1], false)?;
@@ -281,9 +291,19 @@ where
                     "Usage: agent-mem relate <source_key> <rel_type> <target_key>\n       agent-mem relate --suggest <key>\n       agent-mem relate --auto".to_string(),
                 ))
             } else {
+                let rel_type = args[3].clone();
+                if !matches!(
+                    rel_type.as_str(),
+                    "mitigates" | "supersedes" | "depends_on" | "relates_to"
+                ) {
+                    return Err(Error::Usage(format!(
+                        "Invalid relation type '{}'. Allowed: mitigates, supersedes, depends_on, relates_to",
+                        rel_type
+                    )));
+                }
                 Ok(Command::Relate {
                     source: args[2].clone(),
-                    rel_type: args[3].clone(),
+                    rel_type,
                     target: args[4].clone(),
                 })
             }
@@ -294,9 +314,19 @@ where
                     "Usage: agent-mem unrelate <source_key> <rel_type> <target_key>".to_string(),
                 ));
             }
+            let rel_type = args[3].clone();
+            if !matches!(
+                rel_type.as_str(),
+                "mitigates" | "supersedes" | "depends_on" | "relates_to"
+            ) {
+                return Err(Error::Usage(format!(
+                    "Invalid relation type '{}'. Allowed: mitigates, supersedes, depends_on, relates_to",
+                    rel_type
+                )));
+            }
             Ok(Command::Unrelate {
                 source: args[2].clone(),
-                rel_type: args[3].clone(),
+                rel_type,
                 target: args[4].clone(),
             })
         }

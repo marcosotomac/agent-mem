@@ -59,6 +59,12 @@ impl Store {
                     "Relation source, type, and target cannot be empty".into(),
                 ));
             }
+            let r = rel_type.trim();
+            if !matches!(r, "mitigates" | "supersedes" | "depends_on" | "relates_to") {
+                return Err(crate::error::Error::Usage(format!(
+                    "Invalid relation type '{r}'. Allowed: mitigates, supersedes, depends_on, relates_to"
+                )));
+            }
             reject_oversized("relation source", source, MAX_KEY_BYTES)?;
             reject_oversized("relation type", rel_type, MAX_RELATION_TYPE_BYTES)?;
             reject_oversized("relation target", target, MAX_KEY_BYTES)?;

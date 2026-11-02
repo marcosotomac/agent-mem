@@ -965,7 +965,11 @@ fn test_doctor_corrupt_db_exits_err_and_fix_rebuilds_from_agent_rules() {
 
     // 1. doctor without --fix should return Err (!= 0)
     let doctor_res = agent_mem::cli::execute_command(Command::Doctor { fix: false }, &temp_dir);
-    assert!(doctor_res.is_err(), "doctor on corrupt db must return Err, got {:?}", doctor_res);
+    assert!(
+        doctor_res.is_err(),
+        "doctor on corrupt db must return Err, got {:?}",
+        doctor_res
+    );
 
     // Write .agent-rules with a rule
     let rules_file = temp_dir.join(".agent-rules");
@@ -973,7 +977,11 @@ fn test_doctor_corrupt_db_exits_err_and_fix_rebuilds_from_agent_rules() {
 
     // 2. doctor --fix should repair and rebuild from .agent-rules
     let fix_res = agent_mem::cli::execute_command(Command::Doctor { fix: true }, &temp_dir);
-    assert!(fix_res.is_ok(), "doctor --fix must succeed, got {:?}", fix_res);
+    assert!(
+        fix_res.is_ok(),
+        "doctor --fix must succeed, got {:?}",
+        fix_res
+    );
 
     // Verify database was reconstructed and contains the rule
     let store = agent_mem::store::Store::open(&db_path, false).unwrap();
@@ -1009,7 +1017,10 @@ fn test_archive_reason_secret_cli() {
         reason: Some("api_key=abcdefghijklmnopqrstuvwxyz123456".into()),
     };
     let res = agent_mem::cli::execute_command(archive_cmd, &temp_dir);
-    assert!(res.is_err(), "archive with secret in reason must be rejected via CLI");
+    assert!(
+        res.is_err(),
+        "archive with secret in reason must be rejected via CLI"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -1041,8 +1052,73 @@ fn test_init_rejects_manipulated_gitdir_escape() {
     // init_project should fail or refuse to write hooks into victim_dir
     let _report = agent_mem::init::init_project(&repo_dir);
     // If it succeeds with git hooks disabled, or returns Err, victim_dir/hooks must NOT be written
-    assert!(!target_dir.join("hooks").exists(), "Manipulated gitdir must not escape and create hooks in victim_dir");
-    assert!(agent_mem::init::resolve_git_dir(&repo_dir).is_none(), "Manipulated gitdir outside repo without HEAD+objects must not resolve");
+    assert!(
+        !target_dir.join("hooks").exists(),
+        "Manipulated gitdir must not escape and create hooks in victim_dir"
+    );
+    assert!(
+        agent_mem::init::resolve_git_dir(&repo_dir).is_none(),
+        "Manipulated gitdir outside repo without HEAD+objects must not resolve"
+    );
 
     let _ = fs::remove_dir_all(&base_temp);
+}
+
+#[test]
+fn test_cli_kind_and_rel_type_validation() {
+    let err_kind = parse_args(vec![
+        "agent-mem".into(),
+        "set".into(),
+        "k".into(),
+        "v".into(),
+        "--kind".into(),
+        "invalid_kind".into(),
+    ]);
+    assert!(
+        err_kind.is_err(),
+        "set with invalid --kind must be rejected"
+    );
+
+    let valid_kind = parse_args(vec![
+        "agent-mem".into(),
+        "set".into(),
+        "k".into(),
+        "v".into(),
+        "--kind".into(),
+        "decision".into(),
+    ]);
+    assert!(valid_kind.is_ok(), "set with valid --kind must succeed");
+
+    let err_rel = parse_args(vec![
+        "agent-mem".into(),
+        "relate".into(),
+        "src".into(),
+        "invalid_rel".into(),
+        "tgt".into(),
+    ]);
+    assert!(
+        err_rel.is_err(),
+        "relate with invalid rel_type must be rejected"
+    );
+
+    let valid_rel = parse_args(vec![
+        "agent-mem".into(),
+        "relate".into(),
+        "src".into(),
+        "mitigates".into(),
+        "tgt".into(),
+    ]);
+    assert!(valid_rel.is_ok(), "relate with valid rel_type must succeed");
+
+    let err_unrel = parse_args(vec![
+        "agent-mem".into(),
+        "unrelate".into(),
+        "src".into(),
+        "invalid_rel".into(),
+        "tgt".into(),
+    ]);
+    assert!(
+        err_unrel.is_err(),
+        "unrelate with invalid rel_type must be rejected"
+    );
 }
