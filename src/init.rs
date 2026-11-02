@@ -73,6 +73,29 @@ pub(crate) fn secure_private_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn is_real_git_dir(dir: &Path) -> bool {
+    // A standard gitdir or submodule gitdir contains HEAD and objects/
+    if dir.join("HEAD").exists() && dir.join("objects").is_dir() {
+        return true;
+    }
+    // A worktree gitdir contains HEAD and commondir, pointing to a common gitdir with objects/
+    if dir.join("HEAD").exists() && dir.join("commondir").is_file() {
+        if let Ok(commondir_content) = fs::read_to_string(dir.join("commondir")) {
+            let common_path = PathBuf::from(commondir_content.trim());
+            let resolved = if common_path.is_absolute() {
+                common_path
+            } else {
+                dir.join(common_path)
+            };
+            let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
+            if canonical.join("objects").is_dir() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Resolves the actual git directory for standard repositories, git worktrees, or submodules.
 pub fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
     let dot_git = root.join(".git");
@@ -82,6 +105,7 @@ pub fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
     if dot_git.is_file()
         && let Ok(content) = fs::read_to_string(&dot_git)
     {
+        let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         for line in content.lines() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("gitdir:") {
@@ -94,7 +118,11 @@ pub fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
                 };
                 let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
                 if canonical.exists() {
-                    return Some(canonical);
+                    // Path must either be within the repository root or be a valid gitdir (with HEAD and objects/)
+                    let inside_root = canonical.starts_with(&canonical_root);
+                    if inside_root || is_real_git_dir(&canonical) {
+                        return Some(canonical);
+                    }
                 }
             }
         }

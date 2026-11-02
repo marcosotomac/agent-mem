@@ -695,9 +695,12 @@ fn test_init_git_worktree_hook_resolution_and_commondir() {
     let worktree_meta = main_git.join("worktrees").join("feature_wt");
     fs::create_dir_all(&main_hooks).unwrap();
     fs::create_dir_all(&worktree_meta).unwrap();
+    fs::create_dir_all(main_git.join("objects")).unwrap();
+    fs::write(main_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(worktree_meta.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
 
     // Create commondir pointing to ../..
-    fs::write(worktree_meta.join("commondir"), "../..\n").unwrap();
+    fs::write(worktree_meta.join("commondir"), "../../\n").unwrap();
 
     // Create the worktree checkout
     let worktree_dir = base_temp.join("feature_wt");
@@ -754,6 +757,8 @@ fn test_init_git_submodule_hook_resolution() {
     let main_repo = base_temp.join("main_repo");
     let submodule_git = main_repo.join(".git").join("modules").join("nested_sub");
     fs::create_dir_all(&submodule_git).unwrap();
+    fs::create_dir_all(submodule_git.join("objects")).unwrap();
+    fs::write(submodule_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     let submodule_dir = main_repo.join("nested_sub");
     fs::create_dir_all(&submodule_dir).unwrap();
@@ -1007,4 +1012,37 @@ fn test_archive_reason_secret_cli() {
     assert!(res.is_err(), "archive with secret in reason must be rejected via CLI");
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_init_rejects_manipulated_gitdir_escape() {
+    let base_temp = std::env::temp_dir().join(format!(
+        "agent_mem_gitdir_escape_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&base_temp).unwrap();
+
+    let target_dir = base_temp.join("victim_dir");
+    fs::create_dir_all(&target_dir).unwrap();
+
+    let repo_dir = base_temp.join("repo");
+    fs::create_dir_all(&repo_dir).unwrap();
+
+    // Write a .git file pointing to victim_dir (which has no HEAD / objects)
+    fs::write(
+        repo_dir.join(".git"),
+        format!("gitdir: {}\n", target_dir.display()),
+    )
+    .unwrap();
+
+    // init_project should fail or refuse to write hooks into victim_dir
+    let _report = agent_mem::init::init_project(&repo_dir);
+    // If it succeeds with git hooks disabled, or returns Err, victim_dir/hooks must NOT be written
+    assert!(!target_dir.join("hooks").exists(), "Manipulated gitdir must not escape and create hooks in victim_dir");
+    assert!(agent_mem::init::resolve_git_dir(&repo_dir).is_none(), "Manipulated gitdir outside repo without HEAD+objects must not resolve");
+
+    let _ = fs::remove_dir_all(&base_temp);
 }
