@@ -1182,3 +1182,50 @@ fn test_stats_refreshes_registry() {
     let _ = fs::remove_dir_all(global_dir);
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn test_hook_session_start_format_json_parsing() {
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "hook".into(),
+            "session-start".into(),
+            "--format".into(),
+            "json".into(),
+        ])
+        .unwrap(),
+        Command::HookSessionStart { json: true }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "hook".into(),
+            "session-start".into(),
+            "--format=json".into(),
+        ])
+        .unwrap(),
+        Command::HookSessionStart { json: true }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "hook".into(),
+            "session-start".into(),
+            "--json".into(),
+        ])
+        .unwrap(),
+        Command::HookSessionStart { json: true }
+    );
+
+    assert_eq!(
+        parse_args(vec![
+            "agent-mem".into(),
+            "hook".into(),
+            "session-start".into(),
+        ])
+        .unwrap(),
+        Command::HookSessionStart { json: false }
+    );
+}

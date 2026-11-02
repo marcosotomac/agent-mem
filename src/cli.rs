@@ -621,12 +621,25 @@ where
                     let dry_run = args.iter().skip(3).any(|a| a == "--dry-run" || a == "-n");
                     Ok(Command::HookPostCommit { dry_run })
                 }
-                "session-start" => Ok(Command::HookSessionStart {
-                    json: args
-                        .iter()
-                        .skip(3)
-                        .any(|a| a == "--json" || a == "--format=json"),
-                }),
+                "session-start" => {
+                    let mut json = false;
+                    let mut i = 3;
+                    while i < args.len() {
+                        if args[i] == "--json" || args[i] == "--format=json" {
+                            json = true;
+                            i += 1;
+                        } else if args[i] == "--format"
+                            && i + 1 < args.len()
+                            && args[i + 1] == "json"
+                        {
+                            json = true;
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    Ok(Command::HookSessionStart { json })
+                }
                 other => Err(Error::Usage(format!(
                     "Unknown hook subcommand '{}'. Usage: agent-mem hook [post-commit|session-start]",
                     other
