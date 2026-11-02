@@ -198,7 +198,7 @@ fn test_modular_rules_directory_export_and_sync() {
     assert!(rules_d.join("billing.rules").exists());
     assert!(rules_d.join("architecture.rules").exists());
     assert!(rules_d.join("default.rules").exists());
-    assert!(rules_d.join("relations.rules").exists());
+    assert!(rules_d.join("_relations.rules").exists());
 
     let auth_content = fs::read_to_string(rules_d.join("auth.rules")).unwrap();
     assert!(auth_content.contains("auth/jwt-expiry"));
@@ -212,7 +212,7 @@ fn test_modular_rules_directory_export_and_sync() {
     let default_content = fs::read_to_string(rules_d.join("default.rules")).unwrap();
     assert!(default_content.contains("code-review-policy"));
 
-    let rel_content = fs::read_to_string(rules_d.join("relations.rules")).unwrap();
+    let rel_content = fs::read_to_string(rules_d.join("_relations.rules")).unwrap();
     assert!(rel_content.contains("[rel] auth/jwt-expiry -> mitigates -> auth/refresh-token"));
 
     // Verify resolve_rules_path automatically picks up .agent-rules.d
@@ -232,6 +232,98 @@ fn test_modular_rules_directory_export_and_sync() {
     let noop_rep = store.sync_with_dir(&rules_d, false).unwrap();
     assert_eq!(noop_rep.total, 5);
 
+    drop(store);
+    let _ = fs::remove_dir_all(&base_dir);
+}
+
+#[test]
+fn test_export_to_dir_preserves_relations_namespace_and_hash_order() {
+    let base_dir = std::env::temp_dir().join(format!(
+        "agent_mem_p0_1_relations_ns_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&base_dir).unwrap();
+
+    let db_path = base_dir.join("mem.db");
+    let mut store = agent_mem::store::Store::open(&db_path, true).unwrap();
+
+    store
+        .set_entry(
+            "auth/jwt",
+            "Validate JWT audience",
+            Some("src/auth.rs:1"),
+            Some("rule"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "relations/ownership",
+            "Every graph relation must have a documented owner",
+            Some("src/graph.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "zeta/ordering",
+            "Namespace after relations alphabetically",
+            None,
+            Some("rule"),
+        )
+        .unwrap();
+    store
+        .relate("auth/jwt", "depends_on", "relations/ownership")
+        .unwrap();
+
+    let rules_d = base_dir.join(".agent-rules.d");
+    store.export_to_dir(&rules_d).unwrap();
+
+    // Namespace file `relations.rules` must preserve the `relations/*` rule
+    let ns_content = fs::read_to_string(rules_d.join("relations.rules")).unwrap();
+    assert!(
+        ns_content
+            .contains("relations/ownership = Every graph relation must have a documented owner"),
+        "relations.rules must retain rules in the relations/* namespace, got:\n{ns_content}"
+    );
+    let graph_content = fs::read_to_string(rules_d.join("_relations.rules")).unwrap();
+    assert!(
+        graph_content.contains("[rel] auth/jwt -> depends_on -> relations/ownership"),
+        "_relations.rules must contain the relations graph, got:\n{graph_content}"
+    );
+
+    // Syncing into a fresh replica must recover all 3 rules and the relation
+    let replica_db = base_dir.join("replica.db");
+    let mut replica = agent_mem::store::Store::open(&replica_db, true).unwrap();
+    let rep = replica.sync_with_dir(&rules_d, false).unwrap();
+    assert_eq!(rep.total, 3);
+    assert_eq!(
+        replica.get("relations/ownership").unwrap().as_deref(),
+        Some("Every graph relation must have a documented owner")
+    );
+    assert_eq!(replica.get_all_relations().unwrap().len(), 1);
+
+    // The content_hash recorded by export_to_dir must match the hash computed by sync_with_dir
+    let conn_export = rusqlite::Connection::open(&db_path).unwrap();
+    let export_hash: i64 = conn_export
+        .query_row("SELECT content_hash FROM _sync_state LIMIT 1;", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let conn_sync = rusqlite::Connection::open(&replica_db).unwrap();
+    let sync_hash: i64 = conn_sync
+        .query_row("SELECT content_hash FROM _sync_state LIMIT 1;", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        export_hash, sync_hash,
+        "export_to_dir and sync_with_dir must compute identical aggregate content_hash"
+    );
+
+    drop(replica);
     drop(store);
     let _ = fs::remove_dir_all(&base_dir);
 }
