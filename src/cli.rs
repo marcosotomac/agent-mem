@@ -825,7 +825,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             } else {
                 (None, None, 0)
             };
-            let registry = crate::registry::ProjectRegistry::load()?;
+            let mut registry = crate::registry::ProjectRegistry::load()?;
+            if db_path.exists() {
+                let _ = registry.register(root);
+            }
             print_stats(
                 root,
                 store_stats.as_ref(),

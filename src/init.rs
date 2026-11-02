@@ -421,14 +421,22 @@ pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
                     && p.extension().is_some_and(|e| e == "rules")
                     && let Ok(c) = fs::read_to_string(&p)
                 {
-                    total += Store::parse_rules_text(&c).len();
+                    total += Store::parse_rules_text(&c)
+                        .iter()
+                        .filter(|r| !r.is_archived())
+                        .count();
                 }
             }
         }
         total
     } else if rules_file_exists {
         fs::read_to_string(&rules_path)
-            .map(|c| Store::parse_rules_text(&c).len())
+            .map(|c| {
+                Store::parse_rules_text(&c)
+                    .iter()
+                    .filter(|r| !r.is_archived())
+                    .count()
+            })
             .unwrap_or(0)
     } else {
         0

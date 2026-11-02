@@ -1122,3 +1122,63 @@ fn test_cli_kind_and_rel_type_validation() {
         "unrelate with invalid rel_type must be rejected"
     );
 }
+
+#[test]
+fn test_inspect_git_health_counts_only_active_rules() {
+    let dir = std::env::temp_dir().join(format!("agent_mem_health_active_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    let rules_file = dir.join(".agent-rules");
+    let content = "rule1 = First active rule\nrule2 = Second active rule\n[archived] rule3 = Archived rule --reason: deprecated\n";
+    fs::write(&rules_file, content).unwrap();
+
+    let health = agent_mem::init::inspect_git_health(&dir);
+    assert_eq!(
+        health.rules_count, 2,
+        "inspect_git_health must only count active rules"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_stats_refreshes_registry() {
+    let lock = std::sync::Mutex::new(());
+    let _guard = lock.lock().unwrap();
+    let global_dir =
+        std::env::temp_dir().join(format!("agent_mem_stats_reg_{}", std::process::id()));
+    fs::create_dir_all(&global_dir).unwrap();
+    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
+
+    let dir = std::env::temp_dir().join(format!("agent_mem_stats_refresh_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    agent_mem::init::init_project(&dir).unwrap();
+
+    // Add a rule directly to db
+    let db = dir.join(".agent-mem/mem.db");
+    {
+        let mut store = agent_mem::store::Store::open(&db, true).unwrap();
+        store.set("rule/active", "Active rule").unwrap();
+    }
+
+    // Running stats should register/refresh the project
+    agent_mem::cli::execute_command(Command::Stats, &dir).unwrap();
+
+    let reg = agent_mem::registry::ProjectRegistry::load().unwrap();
+    let canonical = agent_mem::registry::ProjectRegistry::canonicalize_path(&dir);
+    let canonical_str = canonical.to_string_lossy().to_string();
+    let project = reg
+        .projects
+        .iter()
+        .find(|p| p.canonical_path == canonical_str);
+    assert!(
+        project.is_some(),
+        "stats must refresh and register the current project"
+    );
+    let p = project.unwrap();
+    assert_eq!(p.rules_count, 1, "active rules count must match");
+
+    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
+    let _ = fs::remove_dir_all(global_dir);
+    let _ = fs::remove_dir_all(dir);
+}

@@ -632,12 +632,12 @@ pub fn print_sync(report: &crate::store::SyncReport) {
             );
         } else if report.conflicts_resolved > 0 {
             println!(
-                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active ({} conflict(s) resolved){RESET}",
+                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules ({} conflict(s) resolved){RESET}",
                 report.total, report.conflicts_resolved
             );
         } else {
             println!(
-                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules active{RESET}",
+                "  {EMERALD}✓{RESET}  {MUTED}synchronized{RESET}  {ACCENT}{file_name}{RESET}  {SUBTLE}·{RESET}  {MUTED}{} rules{RESET}",
                 report.total
             );
         }
