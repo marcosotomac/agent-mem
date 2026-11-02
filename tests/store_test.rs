@@ -800,6 +800,32 @@ fn test_sync_roundtrip_preserves_ambiguous_content_and_metadata() {
 }
 
 #[test]
+fn test_archive_and_relate_reject_secrets_and_oversized() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.set("rule/active", "Normal content").unwrap();
+    store.set("rule/target", "Target content").unwrap();
+
+    // 1. archive with secret in reason must fail
+    let err_sec = store.archive(
+        "rule/active",
+        Some("Deprecated due to api_key=abcdefghijklmnopqrstuvwxyz123456"),
+    );
+    assert!(err_sec.is_err(), "archive with secret in reason must fail");
+
+    // 2. archive with oversized reason must fail
+    let err_over = store.archive("rule/active", Some(&"a".repeat(70_000)));
+    assert!(err_over.is_err(), "archive with oversized reason must fail");
+
+    // 3. relate with secret in rel_type must fail
+    let err_rel_sec = store.relate(
+        "rule/active",
+        "ghp_123456789012345678901234567890",
+        "rule/target",
+    );
+    assert!(err_rel_sec.is_err(), "relate with secret in rel_type must fail");
+}
+
+#[test]
 fn test_sync_rejects_malformed_encoded_records_without_mutation() {
     let dir = std::env::temp_dir().join(format!("agent_mem_bad_encoding_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

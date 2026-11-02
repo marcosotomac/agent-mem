@@ -977,3 +977,34 @@ fn test_doctor_corrupt_db_exits_err_and_fix_rebuilds_from_agent_rules() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_archive_reason_secret_cli() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_archive_sec_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    agent_mem::init::init_project(&temp_dir).unwrap();
+
+    let set_cmd = Command::Set {
+        key: "test_key".into(),
+        val: "some value".into(),
+        anchor: None,
+        kind: None,
+        scope: agent_mem::cli::MemoryScope::Project,
+    };
+    agent_mem::cli::execute_command(set_cmd, &temp_dir).unwrap();
+
+    let archive_cmd = Command::Archive {
+        key: "test_key".into(),
+        reason: Some("api_key=abcdefghijklmnopqrstuvwxyz123456".into()),
+    };
+    let res = agent_mem::cli::execute_command(archive_cmd, &temp_dir);
+    assert!(res.is_err(), "archive with secret in reason must be rejected via CLI");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

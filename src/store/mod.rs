@@ -426,6 +426,10 @@ impl Store {
 
         let now = now_epoch();
         let trimmed_reason = reason.map(|r| r.trim()).filter(|r| !r.is_empty());
+        if let Some(r) = trimmed_reason {
+            reject_oversized("archive reason", r, MAX_VALUE_BYTES)?;
+            reject_secret(r)?;
+        }
 
         let tx = self
             .conn
