@@ -534,3 +534,130 @@ fn test_suggest_relations_and_auto_relate() {
             .any(|(rel, target)| rel == "mitigates" && target == "gotcha/scanner/scan-timeout")
     );
 }
+
+#[test]
+fn test_p2_5_suggest_relations_resolved_anchor_exact_match() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_entry(
+            "decision/auth/v1",
+            "Use basic auth",
+            Some("src/auth.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "decision/auth/v2",
+            "Use oauth2",
+            Some("src/auth.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    // Calling suggest_relations with anchor: None must resolve anchor from DB and suggest supersedes
+    let suggestions = store
+        .suggest_relations("decision/auth/v2", "Use oauth2", None, None)
+        .unwrap();
+    let supersedes = suggestions.iter().find(|s| s.rel_type == "supersedes");
+    assert!(
+        supersedes.is_some(),
+        "Resolved anchor from DB should detect exact match and suggest supersedes: {:?}",
+        suggestions
+    );
+}
+
+#[test]
+fn test_p2_5_shared_file_without_exact_line_does_not_suggest_supersedes() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_entry(
+            "decision/auth/part1",
+            "Handle login flow",
+            Some("src/auth.rs"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "decision/auth/part2",
+            "Handle logout flow",
+            Some("src/auth.rs"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let suggestions = store
+        .suggest_relations(
+            "decision/auth/part2",
+            "Handle logout flow",
+            Some("src/auth.rs"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let supersedes = suggestions.iter().find(|s| s.rel_type == "supersedes");
+    assert!(
+        supersedes.is_none(),
+        "Rules sharing only file without path:line must NOT suggest supersedes: {:?}",
+        supersedes
+    );
+    let relates = suggestions.iter().find(|s| s.rel_type == "relates_to");
+    assert!(relates.is_some(), "Should suggest relates_to instead");
+}
+
+#[test]
+fn test_p2_5_auto_relate_does_not_iterate_archived_rules_or_duplicate_symmetric_relates_to() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Rule 1 and Rule 2: exact same line -> Rule 2 supersedes Rule 1 (Rule 1 gets archived)
+    store
+        .set_entry(
+            "decision/cache/v1",
+            "Use redis cache",
+            Some("src/cache.rs:5"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "decision/cache/v2",
+            "Use memcached",
+            Some("src/cache.rs:5"),
+            Some("decision"),
+        )
+        .unwrap();
+    // Rule 3: related to cache by namespace/file (line 20)
+    store
+        .set_entry(
+            "decision/cache/v3",
+            "Use local in-memory lru",
+            Some("src/cache.rs:20"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let _applied = store.auto_relate_high_confidence(80).unwrap();
+    // One of v1 or v2 supersedes the other and the target is archived
+    let r1 = store.get_entry("decision/cache/v1").unwrap().unwrap();
+    let r2 = store.get_entry("decision/cache/v2").unwrap().unwrap();
+    assert!(r1.is_archived() || r2.is_archived());
+    assert!(!(r1.is_archived() && r2.is_archived()));
+
+    // Verify relations for relates_to: there should be NO duplicate symmetric edges
+    let all_rels = store.get_all_relations().unwrap();
+    let mut relates_to_pairs = std::collections::HashSet::new();
+    for r in all_rels {
+        if r.rel_type == "relates_to" {
+            let pair = if r.source_key < r.target_key {
+                (r.source_key.clone(), r.target_key.clone())
+            } else {
+                (r.target_key.clone(), r.source_key.clone())
+            };
+            assert!(
+                relates_to_pairs.insert(pair.clone()),
+                "Duplicate symmetric relates_to found for pair {:?}",
+                pair
+            );
+        }
+    }
+}
