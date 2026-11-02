@@ -953,3 +953,113 @@ fn test_render_session_context_multibyte_truncate_no_panic() {
     assert!(output2.contains("[session]"));
     assert!(output2.contains("..."));
 }
+
+#[test]
+fn test_url_in_body_does_not_become_https_rule() {
+    let commit = parse_conventional_commit(
+        "chore: update references and documentation",
+        "See the following link for details:\nhttps://github.com/example/repo/issues/42\nAnd also:\nhttp://example.org/docs",
+    );
+    // chore commit with body URLs should NOT produce an entity with kind "https" or key "https/*"
+    assert!(
+        commit.entity.is_none(),
+        "URL lines must not be parsed as custom trailers creating rules: {:?}",
+        commit.entity
+    );
+}
+
+#[test]
+fn test_empty_trailer_value_does_not_abort_post_commit_capture() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_test_empty_trailer_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let root = &temp_dir;
+
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    init_project(root).unwrap();
+
+    let code_file = root.join("src").join("lib.rs");
+    fs::create_dir_all(code_file.parent().unwrap()).unwrap();
+    fs::write(
+        &code_file,
+        "// DECISION: database connection timeout is 30s\npub fn init() {}\n",
+    )
+    .unwrap();
+
+    run_git(root, &["add", "."]);
+    // Commit message has empty trailers: Decision: \nKey: \n
+    run_git(
+        root,
+        &["commit", "-m", "chore: setup lib\n\nDecision:\nKey:\n"],
+    );
+
+    let report_res = run_post_commit(root, false);
+    assert!(
+        report_res.is_ok(),
+        "Post commit hook should not fail on empty trailer: {:?}",
+        report_res.err()
+    );
+    let report = report_res.unwrap().expect("hook report returned");
+    // Session should be recorded even though trailer had empty value
+    assert!(report.session_id.is_some());
+    // Diff directive should be captured
+    assert!(report.entity_captured.is_some());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_supersedes_nonexistent_key_does_not_abort_post_commit_capture() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_test_supersedes_missing_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let root = &temp_dir;
+
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    init_project(root).unwrap();
+
+    let code_file = root.join("src").join("auth.rs");
+    fs::create_dir_all(code_file.parent().unwrap()).unwrap();
+    fs::write(&code_file, "pub fn auth() {}\n").unwrap();
+
+    run_git(root, &["add", "."]);
+    // Commit defines a decision but supersedes a non-existent key
+    run_git(
+        root,
+        &[
+            "commit",
+            "-m",
+            "feat(auth): add bearer auth\n\nSupersedes: decision/auth/old-nonexistent-key\n",
+        ],
+    );
+
+    let report_res = run_post_commit(root, false);
+    assert!(
+        report_res.is_ok(),
+        "Post commit should not abort when supersedes references nonexistent key: {:?}",
+        report_res.err()
+    );
+    let report = report_res.unwrap().expect("hook report returned");
+    // Session should be recorded
+    assert!(report.session_id.is_some());
+    // Entity should be captured
+    assert!(report.entity_captured.is_some());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

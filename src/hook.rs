@@ -262,8 +262,18 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
                     continuation_trailer = Some("pattern");
                     continue;
                 }
+                "security" => {
+                    trailers.explicit_kind = Some(EntityKind::Custom("security".to_string()));
+                    trailers.explicit_content = Some(val_trim.to_string());
+                    continuation_trailer = Some("content");
+                    continue;
+                }
                 "key" | "memory-key" | "memory_key" => {
-                    trailers.explicit_key = Some(val_trim.to_string());
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        trailers.explicit_key = Some(val_trim.to_string());
+                    }
                     continuation_trailer = None;
                     continue;
                 }
@@ -273,61 +283,70 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
                     continue;
                 }
                 "relates-to" | "relates_to" => {
-                    for target in val_trim.split(',') {
-                        let t = target.trim();
-                        if !t.is_empty() {
-                            trailers
-                                .relations
-                                .push(("relates_to".to_string(), t.to_string()));
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        for target in val_trim.split(',') {
+                            let t = target.trim();
+                            if !t.is_empty() {
+                                trailers
+                                    .relations
+                                    .push(("relates_to".to_string(), t.to_string()));
+                            }
                         }
                     }
                     continuation_trailer = None;
                     continue;
                 }
                 "mitigates" => {
-                    for target in val_trim.split(',') {
-                        let t = target.trim();
-                        if !t.is_empty() {
-                            trailers
-                                .relations
-                                .push(("mitigates".to_string(), t.to_string()));
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        for target in val_trim.split(',') {
+                            let t = target.trim();
+                            if !t.is_empty() {
+                                trailers
+                                    .relations
+                                    .push(("mitigates".to_string(), t.to_string()));
+                            }
                         }
                     }
                     continuation_trailer = None;
                     continue;
                 }
                 "depends-on" | "depends_on" => {
-                    for target in val_trim.split(',') {
-                        let t = target.trim();
-                        if !t.is_empty() {
-                            trailers
-                                .relations
-                                .push(("depends_on".to_string(), t.to_string()));
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        for target in val_trim.split(',') {
+                            let t = target.trim();
+                            if !t.is_empty() {
+                                trailers
+                                    .relations
+                                    .push(("depends_on".to_string(), t.to_string()));
+                            }
                         }
                     }
                     continuation_trailer = None;
                     continue;
                 }
                 "supersedes" => {
-                    for target in val_trim.split(',') {
-                        let t = target.trim();
-                        if !t.is_empty() {
-                            trailers
-                                .relations
-                                .push(("supersedes".to_string(), t.to_string()));
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        for target in val_trim.split(',') {
+                            let t = target.trim();
+                            if !t.is_empty() {
+                                trailers
+                                    .relations
+                                    .push(("supersedes".to_string(), t.to_string()));
+                            }
                         }
                     }
                     continuation_trailer = None;
                     continue;
                 }
-                other => {
-                    if is_valid_custom_trailer_key(other) && !val_trim.is_empty() {
-                        trailers.explicit_kind = Some(EntityKind::parse(other));
-                        trailers.explicit_content = Some(val_trim.to_string());
-                        continuation_trailer = Some("content");
-                        continue;
-                    }
-                }
+                _ => {}
             }
         }
 
@@ -357,25 +376,21 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
         }
     }
 
-    trailers
-}
+    if let Some(content) = &trailers.explicit_content {
+        if content.trim().is_empty() {
+            eprintln!("warning: trailer has empty value, ignoring");
+            trailers.explicit_content = None;
+            trailers.explicit_kind = None;
+        }
+    }
+    if let Some(breaking) = &trailers.breaking_change {
+        if breaking.trim().is_empty() {
+            eprintln!("warning: trailer 'breaking change' has empty value, ignoring");
+            trailers.breaking_change = None;
+        }
+    }
 
-fn is_valid_custom_trailer_key(s: &str) -> bool {
-    !matches!(
-        s,
-        "signed-off-by"
-            | "co-authored-by"
-            | "reviewed-by"
-            | "tested-by"
-            | "acked-by"
-            | "cc"
-            | "fixes"
-            | "closes"
-            | "see-also"
-    ) && s.len() >= 3
-        && s.len() <= 32
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    trailers
 }
 
 fn trim_comment_prefix(s: &str) -> &str {
@@ -646,11 +661,15 @@ pub fn parse_conventional_commit(subject: &str, body: &str) -> ParsedCommit {
             trailers.explicit_key.as_deref(),
         );
         let val = trailers.explicit_content.unwrap_or_else(|| summary.clone());
-        Some(EntityProposal {
-            kind: explicit_kind,
-            key,
-            val,
-        })
+        if val.trim().is_empty() || key.trim().is_empty() {
+            None
+        } else {
+            Some(EntityProposal {
+                kind: explicit_kind,
+                key,
+                val,
+            })
+        }
     } else if is_breaking {
         let key = derive_entity_key(
             "architecture",
@@ -883,11 +902,23 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     });
 
     let relations: Vec<(String, String, String)> = if let Some(ent) = &entity_captured {
-        parsed
-            .relations
-            .into_iter()
-            .map(|(rel_type, target)| (ent.key.clone(), rel_type, target))
-            .collect()
+        let mut rels = Vec::new();
+        for (rel_type, target) in parsed.relations {
+            if rel_type == "supersedes" {
+                if let Some(store_ref) = store.as_ref() {
+                    let exists = store_ref.get_entry(&target)?.is_some();
+                    if !exists {
+                        eprintln!(
+                            "warning: supersedes target '{}' does not exist, ignoring relation",
+                            target
+                        );
+                        continue;
+                    }
+                }
+            }
+            rels.push((ent.key.clone(), rel_type, target));
+        }
+        rels
     } else {
         Vec::new()
     };
