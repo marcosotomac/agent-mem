@@ -928,3 +928,28 @@ fn test_post_commit_fallback_on_poor_commit_message() {
     drop(store);
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_render_session_context_multibyte_truncate_no_panic() {
+    use agent_mem::output::render_session_context;
+
+    // Test 1: Spanish tilde right across byte boundary 197
+    // 196 ASCII characters ('a') + 'á' (2 bytes, 196..198) + more text
+    let mut s1 = "a".repeat(196);
+    s1.push('á');
+    s1.push_str(" extra text to exceed 200 bytes limit");
+    let sessions1 = vec![(1i64, s1)];
+    let output1 = render_session_context(&[], &[], &sessions1);
+    assert!(output1.contains("[session]"));
+    assert!(output1.contains("..."));
+
+    // Test 2: Emoji right across byte boundary 197
+    // 195 ASCII characters ('a') + '🚀' (4 bytes, 195..199) + more text
+    let mut s2 = "a".repeat(195);
+    s2.push('🚀');
+    s2.push_str(" extra text to exceed 200 bytes limit");
+    let sessions2 = vec![(2i64, s2)];
+    let output2 = render_session_context(&[], &[], &sessions2);
+    assert!(output2.contains("[session]"));
+    assert!(output2.contains("..."));
+}

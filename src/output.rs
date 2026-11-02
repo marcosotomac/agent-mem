@@ -1224,8 +1224,8 @@ pub fn render_session_context(
     // Only the most recent checkpoints matter at session start.
     for (_id, summary) in sessions.iter().take(3) {
         let mut line = summary.clone();
-        if line.len() > 200 {
-            line.truncate(197);
+        if line.chars().count() > 200 {
+            line = line.chars().take(197).collect();
             line.push_str("...");
         }
         push_line(&mut out, format!("[session] {line}"));
