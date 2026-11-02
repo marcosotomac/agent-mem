@@ -944,3 +944,36 @@ fn test_execute_command_guides_when_uninitialized() {
     assert!(err.contains("agent-mem init"), "got: {err}");
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn test_doctor_corrupt_db_exits_err_and_fix_rebuilds_from_agent_rules() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_doctor_corrupt_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(temp_dir.join(".agent-mem")).unwrap();
+    let db_path = temp_dir.join(".agent-mem").join("mem.db");
+    fs::write(&db_path, b"corrupted sqlite database junk").unwrap();
+
+    // 1. doctor without --fix should return Err (!= 0)
+    let doctor_res = agent_mem::cli::execute_command(Command::Doctor { fix: false }, &temp_dir);
+    assert!(doctor_res.is_err(), "doctor on corrupt db must return Err, got {:?}", doctor_res);
+
+    // Write .agent-rules with a rule
+    let rules_file = temp_dir.join(".agent-rules");
+    fs::write(&rules_file, "preserved_key = preserved_value\n").unwrap();
+
+    // 2. doctor --fix should repair and rebuild from .agent-rules
+    let fix_res = agent_mem::cli::execute_command(Command::Doctor { fix: true }, &temp_dir);
+    assert!(fix_res.is_ok(), "doctor --fix must succeed, got {:?}", fix_res);
+
+    // Verify database was reconstructed and contains the rule
+    let store = agent_mem::store::Store::open(&db_path, false).unwrap();
+    let entry = store.get_entry("preserved_key").unwrap();
+    assert_eq!(entry.map(|r| r.val), Some("preserved_value".to_string()));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

@@ -703,7 +703,46 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             non_interactive,
         } => crate::tutor::run_tutor(root, step, non_interactive),
         Command::Doctor { fix } => {
+            let db_path = root.join(".agent-mem").join("mem.db");
+            let mut db_corrupted = false;
+
+            if db_path.exists() {
+                match Store::open(&db_path, false) {
+                    Ok(s) => {
+                        if s.stats(&db_path).is_err() {
+                            db_corrupted = true;
+                        }
+                    }
+                    Err(_) => {
+                        db_corrupted = true;
+                    }
+                }
+            }
+
             if fix {
+                if db_corrupted {
+                    let _ = std::fs::remove_file(&db_path);
+                    let _ = std::fs::remove_file(root.join(".agent-mem").join("mem.db-wal"));
+                    let _ = std::fs::remove_file(root.join(".agent-mem").join("mem.db-shm"));
+
+                    let mut store = Store::open(&db_path, true)?;
+                    let rules_path = crate::store::resolve_rules_path(root);
+                    if rules_path.exists() {
+                        let report = store.sync_with_file(&rules_path)?;
+                        println!(
+                            "doctor fix: rebuilt mem.db from {} ({} rules)",
+                            rules_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(".agent-rules"),
+                            report.total
+                        );
+                    } else {
+                        println!("doctor fix: initialized fresh mem.db");
+                    }
+                    db_corrupted = false;
+                }
+
                 if crate::init::resolve_git_dir(root).is_some()
                     || root.join(".agent-mem").join("mem.db").exists()
                 {
@@ -715,17 +754,27 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     "doctor fix: repaired project integration; pruned {pruned} stale project(s)"
                 );
             }
-            let db_path = root.join(".agent-mem").join("mem.db");
-            let store_stats = if db_path.exists() {
-                Store::open(&db_path, false)
-                    .ok()
-                    .and_then(|s| s.stats(&db_path).ok())
+
+            let store_stats = if db_path.exists() && !db_corrupted {
+                match Store::open(&db_path, false) {
+                    Ok(s) => s.stats(&db_path).ok(),
+                    Err(_) => {
+                        db_corrupted = true;
+                        None
+                    }
+                }
             } else {
                 None
             };
             let git_stats = crate::init::inspect_git_health(root);
             let clients = crate::installer::check_all_clients();
-            print_doctor(store_stats.as_ref(), &git_stats, &clients);
+            print_doctor(store_stats.as_ref(), &git_stats, &clients, db_corrupted);
+
+            if db_corrupted {
+                return Err(Error::Usage(
+                    "Database is corrupted. Run 'agent-mem doctor --fix' to rebuild.".into(),
+                ));
+            }
             Ok(())
         }
         Command::Stats => {
