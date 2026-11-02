@@ -869,6 +869,21 @@ diff --git a/backend/tasks/worker.py b/backend/tasks/worker.py
     let (entity, anchor) = found_py.unwrap();
     assert_eq!(entity.kind, EntityKind::Gotcha);
     assert_eq!(anchor.as_deref(), Some("backend/tasks/worker.py:50"));
+
+    // Quoted path in git diff: +++ "b/..."
+    let quoted_diff = r#"
+diff --git "a/src/auth/jwt.rs" "b/src/auth/jwt.rs"
+--- "a/src/auth/jwt.rs"
++++ "b/src/auth/jwt.rs"
+@@ -1,0 +15,3 @@
++// PATTERN: token refresh rotation pattern
++pub fn rotate() {}
++"#;
+    let found_quoted = scan_diff_for_directives(quoted_diff);
+    assert!(found_quoted.is_some());
+    let (entity, anchor) = found_quoted.unwrap();
+    assert_eq!(entity.kind, EntityKind::Pattern);
+    assert_eq!(anchor.as_deref(), Some("src/auth/jwt.rs:15"));
 }
 
 #[test]
@@ -926,5 +941,140 @@ fn test_post_commit_fallback_on_poor_commit_message() {
         "macOS AirPlay Receiver occupies port 5000 by default"
     );
     drop(store);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_render_session_context_multibyte_truncate_no_panic() {
+    use agent_mem::output::render_session_context;
+
+    // Test 1: Spanish tilde right across byte boundary 197
+    // 196 ASCII characters ('a') + 'á' (2 bytes, 196..198) + more text
+    let mut s1 = "a".repeat(196);
+    s1.push('á');
+    s1.push_str(" extra text to exceed 200 bytes limit");
+    let sessions1 = vec![(1i64, s1)];
+    let output1 = render_session_context(&[], &[], &sessions1);
+    assert!(output1.contains("[session]"));
+    assert!(output1.contains("..."));
+
+    // Test 2: Emoji right across byte boundary 197
+    // 195 ASCII characters ('a') + '🚀' (4 bytes, 195..199) + more text
+    let mut s2 = "a".repeat(195);
+    s2.push('🚀');
+    s2.push_str(" extra text to exceed 200 bytes limit");
+    let sessions2 = vec![(2i64, s2)];
+    let output2 = render_session_context(&[], &[], &sessions2);
+    assert!(output2.contains("[session]"));
+    assert!(output2.contains("..."));
+}
+
+#[test]
+fn test_url_in_body_does_not_become_https_rule() {
+    let commit = parse_conventional_commit(
+        "chore: update references and documentation",
+        "See the following link for details:\nhttps://github.com/example/repo/issues/42\nAnd also:\nhttp://example.org/docs",
+    );
+    // chore commit with body URLs should NOT produce an entity with kind "https" or key "https/*"
+    assert!(
+        commit.entity.is_none(),
+        "URL lines must not be parsed as custom trailers creating rules: {:?}",
+        commit.entity
+    );
+}
+
+#[test]
+fn test_empty_trailer_value_does_not_abort_post_commit_capture() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_test_empty_trailer_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let root = &temp_dir;
+
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    init_project(root).unwrap();
+
+    let code_file = root.join("src").join("lib.rs");
+    fs::create_dir_all(code_file.parent().unwrap()).unwrap();
+    fs::write(
+        &code_file,
+        "// DECISION: database connection timeout is 30s\npub fn init() {}\n",
+    )
+    .unwrap();
+
+    run_git(root, &["add", "."]);
+    // Commit message has empty trailers: Decision: \nKey: \n
+    run_git(
+        root,
+        &["commit", "-m", "chore: setup lib\n\nDecision:\nKey:\n"],
+    );
+
+    let report_res = run_post_commit(root, false);
+    assert!(
+        report_res.is_ok(),
+        "Post commit hook should not fail on empty trailer: {:?}",
+        report_res.err()
+    );
+    let report = report_res.unwrap().expect("hook report returned");
+    // Session should be recorded even though trailer had empty value
+    assert!(report.session_id.is_some());
+    // Diff directive should be captured
+    assert!(report.entity_captured.is_some());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_supersedes_nonexistent_key_does_not_abort_post_commit_capture() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_test_supersedes_missing_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let root = &temp_dir;
+
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    init_project(root).unwrap();
+
+    let code_file = root.join("src").join("auth.rs");
+    fs::create_dir_all(code_file.parent().unwrap()).unwrap();
+    fs::write(&code_file, "pub fn auth() {}\n").unwrap();
+
+    run_git(root, &["add", "."]);
+    // Commit defines a decision but supersedes a non-existent key
+    run_git(
+        root,
+        &[
+            "commit",
+            "-m",
+            "feat(auth): add bearer auth\n\nSupersedes: decision/auth/old-nonexistent-key\n",
+        ],
+    );
+
+    let report_res = run_post_commit(root, false);
+    assert!(
+        report_res.is_ok(),
+        "Post commit should not abort when supersedes references nonexistent key: {:?}",
+        report_res.err()
+    );
+    let report = report_res.unwrap().expect("hook report returned");
+    // Session should be recorded
+    assert!(report.session_id.is_some());
+    // Entity should be captured
+    assert!(report.entity_captured.is_some());
+
     let _ = fs::remove_dir_all(&temp_dir);
 }

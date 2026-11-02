@@ -273,12 +273,24 @@ impl Store {
                 ])?;
                 insert_memory_routes(&tx, trimmed_key, trimmed_anchor)?;
                 upsert_metadata.execute(params![trimmed_key, provenance, trust, now])?;
+            }
 
+            for r in rules {
                 if let Some((rel_type, target)) = r.relation {
+                    let trimmed_key = r.key.trim();
+                    let trimmed_target = target.trim();
+                    let target_exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1);",
+                        params![trimmed_target],
+                        |row| row.get(0),
+                    )?;
+                    if !target_exists {
+                        return Err(crate::error::Error::NotFound(trimmed_target.to_string()));
+                    }
                     insert_rel.execute(params![
                         trimmed_key,
                         rel_type.trim(),
-                        target.trim(),
+                        trimmed_target,
                         now
                     ])?;
                 }
