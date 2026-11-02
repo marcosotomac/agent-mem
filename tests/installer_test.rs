@@ -340,6 +340,20 @@ args = ["serve", "--mcp"]
 }
 
 #[test]
+fn test_escape_toml_string() {
+    use agent_mem::installer::escape_toml_string;
+    assert_eq!(escape_toml_string(r#"simple"#), r#""simple""#);
+    assert_eq!(
+        escape_toml_string(r#"C:\Users\test "name"\bin\agent-mem"#),
+        r#""C:\\Users\\test \"name\"\\bin\\agent-mem""#
+    );
+    assert_eq!(
+        escape_toml_string("line1\nline2\ttab"),
+        "\"line1\\nline2\\ttab\""
+    );
+}
+
+#[test]
 fn test_installer_claude_code_format() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agent_mem_claude_code_test_{}",
