@@ -1142,6 +1142,8 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 return Err(not_initialized_error(root));
             }
             let mut store = Store::open(&db_path, cmd.is_write())?;
+            let rules_file = crate::store::resolve_rules_path(root);
+            let export_path = rules_file.exists().then_some(rules_file.as_path());
 
             match cmd {
                 Command::Get { key } => {
@@ -1158,11 +1160,9 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     kind,
                     scope: MemoryScope::Project,
                 } => {
-                    store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())?;
-                    let rules_file = crate::store::resolve_rules_path(root);
-                    if rules_file.exists() {
-                        store.export_to_path(&rules_file)?;
-                    }
+                    store.with_rules_export(export_path, |store| {
+                        store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())
+                    })?;
                     print_set(&key, anchor.as_deref(), kind.as_deref());
                     let suggestions = store
                         .suggest_relations(&key, &val, anchor.as_deref(), kind.as_deref())
@@ -1190,19 +1190,15 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     rel_type,
                     target,
                 } => {
-                    store.relate(&source, &rel_type, &target)?;
-                    let rules_file = crate::store::resolve_rules_path(root);
-                    if rules_file.exists() {
-                        store.export_to_path(&rules_file)?;
-                    }
+                    store.with_rules_export(export_path, |store| {
+                        store.relate(&source, &rel_type, &target)
+                    })?;
                     print_relate(&source, &rel_type, &target);
                 }
                 Command::RelateAuto => {
-                    let applied = store.auto_relate_high_confidence(80)?;
-                    let rules_file = crate::store::resolve_rules_path(root);
-                    if rules_file.exists() && !applied.is_empty() {
-                        store.export_to_path(&rules_file)?;
-                    }
+                    let applied = store.with_rules_export(export_path, |store| {
+                        store.auto_relate_high_confidence(80)
+                    })?;
                     if applied.is_empty() {
                         println!("No high-confidence relations discovered to auto-link.");
                     } else {
@@ -1234,40 +1230,29 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     rel_type,
                     target,
                 } => {
-                    let unlinked = store.unrelate(&source, &rel_type, &target)?;
-                    let rules_file = crate::store::resolve_rules_path(root);
-                    if rules_file.exists() {
-                        store.export_to_path(&rules_file)?;
-                    }
+                    let unlinked = store.with_rules_export(export_path, |store| {
+                        store.unrelate(&source, &rel_type, &target)
+                    })?;
                     print_unrelate(&source, &rel_type, &target, unlinked);
                 }
                 Command::Del { key } => {
-                    let deleted = store.del(&key)?;
-                    let rules_file = crate::store::resolve_rules_path(root);
-                    if rules_file.exists() {
-                        store.export_to_path(&rules_file)?;
-                    }
+                    let deleted = store.with_rules_export(export_path, |store| store.del(&key))?;
                     print_del(&key, deleted);
                 }
                 Command::Archive { key, reason } => {
-                    let archived = store.archive(&key, reason.as_deref())?;
+                    let archived = store.with_rules_export(export_path, |store| {
+                        store.archive(&key, reason.as_deref())
+                    })?;
                     if !archived {
                         return Err(crate::error::Error::NotFound(key));
-                    }
-                    let rules_file = crate::store::resolve_rules_path(root);
-                    if rules_file.exists() {
-                        store.export_to_path(&rules_file)?;
                     }
                     print_archive(&key, reason.as_deref());
                 }
                 Command::Unarchive { key } => {
-                    let unarchived = store.unarchive(&key)?;
+                    let unarchived =
+                        store.with_rules_export(export_path, |store| store.unarchive(&key))?;
                     if !unarchived {
                         return Err(crate::error::Error::NotFound(key));
-                    }
-                    let rules_file = crate::store::resolve_rules_path(root);
-                    if rules_file.exists() {
-                        store.export_to_path(&rules_file)?;
                     }
                     print_unarchive(&key);
                 }
@@ -1300,13 +1285,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     print_dump(&entries);
                 }
                 Command::Clean { dry_run } => {
-                    let report = store.clean_zombies(root, dry_run)?;
-                    if !dry_run && !report.is_empty() {
-                        let rules_file = crate::store::resolve_rules_path(root);
-                        if rules_file.exists() {
-                            store.export_to_path(&rules_file)?;
-                        }
-                    }
+                    let report = store
+                        .with_rules_export(if dry_run { None } else { export_path }, |store| {
+                            store.clean_zombies(root, dry_run)
+                        })?;
                     print_clean(&report, dry_run);
                 }
                 Command::Find {

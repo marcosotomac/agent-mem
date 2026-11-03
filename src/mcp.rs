@@ -527,21 +527,18 @@ impl McpServer {
         result
     }
 
-    fn sync_rules_to_disk(
+    fn write_with_rules<T>(
         &self,
-        store: &Store,
+        store: &mut Store,
         scope: &str,
         project_root: Option<&Path>,
-    ) -> Result<()> {
-        if scope == "project"
-            && let Some(root) = project_root
-        {
-            let rules_path = crate::store::resolve_rules_path(root);
-            if rules_path.exists() {
-                store.export_to_path(&rules_path)?;
-            }
-        }
-        Ok(())
+        write: impl FnOnce(&mut Store) -> Result<T>,
+    ) -> Result<T> {
+        let rules_path = project_root
+            .filter(|_| scope == "project")
+            .map(crate::store::resolve_rules_path)
+            .filter(|path| path.exists());
+        store.with_rules_export(rules_path.as_deref(), write)
     }
 
     pub fn handle_request(&self, req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
@@ -784,12 +781,18 @@ impl McpServer {
 
                     let mut store = self.open_store(scope, project_root.as_deref(), true)?;
                     let provenance = format!("mcp:{scope}");
-                    let count = store.set_batch_with_metadata(
-                        &batch_rules,
-                        &provenance,
-                        crate::store::TRUST_LOCAL,
+                    let count = self.write_with_rules(
+                        &mut store,
+                        scope,
+                        project_root.as_deref(),
+                        |store| {
+                            store.set_batch_with_metadata(
+                                &batch_rules,
+                                &provenance,
+                                crate::store::TRUST_LOCAL,
+                            )
+                        },
                     )?;
-                    self.sync_rules_to_disk(&store, scope, project_root.as_deref())?;
                     return Ok(format!("saved [{}] {} memories in batch", scope, count));
                 }
 
@@ -816,18 +819,19 @@ impl McpServer {
                 let relation = rel.map(Self::parse_relation).transpose()?;
                 let mut store = self.open_store(scope, project_root.as_deref(), true)?;
                 let provenance = format!("mcp:{scope}");
-                store.set_batch_with_metadata(
-                    &[crate::store::BatchRule {
-                        key,
-                        val,
-                        anchor,
-                        kind,
-                        relation,
-                    }],
-                    &provenance,
-                    crate::store::TRUST_LOCAL,
-                )?;
-                self.sync_rules_to_disk(&store, scope, project_root.as_deref())?;
+                self.write_with_rules(&mut store, scope, project_root.as_deref(), |store| {
+                    store.set_batch_with_metadata(
+                        &[crate::store::BatchRule {
+                            key,
+                            val,
+                            anchor,
+                            kind,
+                            relation,
+                        }],
+                        &provenance,
+                        crate::store::TRUST_LOCAL,
+                    )
+                })?;
                 let effective_kind = kind.unwrap_or_else(|| crate::store::infer_kind(key));
                 let kind_tag = if effective_kind != "rule" {
                     format!("[{}] ", effective_kind)
@@ -1248,10 +1252,12 @@ impl McpServer {
                 let mut store = self.open_store(scope, project_root.as_deref(), true)?;
 
                 if action == "auto-relate" {
-                    let applied = store.auto_relate_high_confidence(80)?;
-                    if !applied.is_empty() {
-                        self.sync_rules_to_disk(&store, scope, project_root.as_deref())?;
-                    }
+                    let applied = self.write_with_rules(
+                        &mut store,
+                        scope,
+                        project_root.as_deref(),
+                        |store| store.auto_relate_high_confidence(80),
+                    )?;
                     let count = applied.len();
                     return Ok(format!(
                         "auto-linked [{scope}] {count} high-confidence relations"
@@ -1283,52 +1289,55 @@ impl McpServer {
                     ));
                 }
 
-                let msg = match action {
-                    "archive" => {
-                        let reason = args.get("reason").and_then(|v| v.as_str());
-                        let archived = store.archive(key, reason)?;
-                        if !archived {
-                            return Err(crate::error::Error::NotFound(key.to_string()));
+                self.write_with_rules(&mut store, scope, project_root.as_deref(), |store| {
+                    let msg = match action {
+                        "archive" => {
+                            let reason = args.get("reason").and_then(|v| v.as_str());
+                            let archived = store.archive(key, reason)?;
+                            if !archived {
+                                return Err(crate::error::Error::NotFound(key.to_string()));
+                            }
+                            match reason {
+                                Some(r) => format!("archived [{}] {} (reason: {})", scope, key, r),
+                                None => format!("archived [{}] {}", scope, key),
+                            }
                         }
-                        match reason {
-                            Some(r) => format!("archived [{}] {} (reason: {})", scope, key, r),
-                            None => format!("archived [{}] {}", scope, key),
+                        "unarchive" => {
+                            let unarchived = store.unarchive(key)?;
+                            if !unarchived {
+                                return Err(crate::error::Error::NotFound(key.to_string()));
+                            }
+                            format!("unarchived [{}] {}", scope, key)
                         }
-                    }
-                    "unarchive" => {
-                        let unarchived = store.unarchive(key)?;
-                        if !unarchived {
-                            return Err(crate::error::Error::NotFound(key.to_string()));
+                        "delete" | "del" | "rm" => {
+                            let deleted = store.del(key)?;
+                            if !deleted {
+                                return Err(crate::error::Error::NotFound(key.to_string()));
+                            }
+                            format!("deleted [{}] {}", scope, key)
                         }
-                        format!("unarchived [{}] {}", scope, key)
-                    }
-                    "delete" | "del" | "rm" => {
-                        let deleted = store.del(key)?;
-                        if !deleted {
-                            return Err(crate::error::Error::NotFound(key.to_string()));
+                        "relate" | "link" => {
+                            let (rel_type, target) =
+                                parsed_relation.expect("relation was validated");
+                            store.relate(key, rel_type, target)?;
+                            format!("linked [{}] {} -> {} -> {}", scope, key, rel_type, target)
                         }
-                        format!("deleted [{}] {}", scope, key)
-                    }
-                    "relate" | "link" => {
-                        let (rel_type, target) = parsed_relation.expect("relation was validated");
-                        store.relate(key, rel_type, target)?;
-                        format!("linked [{}] {} -> {} -> {}", scope, key, rel_type, target)
-                    }
-                    "unrelate" | "unlink" => {
-                        let (rel_type, target) = parsed_relation.expect("relation was validated");
-                        let unlinked = store.unrelate(key, rel_type, target)?;
-                        if !unlinked {
-                            return Err(crate::error::Error::NotFound(format!(
-                                "relation {} -> {} -> {}",
-                                key, rel_type, target
-                            )));
+                        "unrelate" | "unlink" => {
+                            let (rel_type, target) =
+                                parsed_relation.expect("relation was validated");
+                            let unlinked = store.unrelate(key, rel_type, target)?;
+                            if !unlinked {
+                                return Err(crate::error::Error::NotFound(format!(
+                                    "relation {} -> {} -> {}",
+                                    key, rel_type, target
+                                )));
+                            }
+                            format!("unlinked [{}] {} -> {} -> {}", scope, key, rel_type, target)
                         }
-                        format!("unlinked [{}] {} -> {} -> {}", scope, key, rel_type, target)
-                    }
-                    _ => unreachable!("action was validated before opening the store"),
-                };
-                self.sync_rules_to_disk(&store, scope, project_root.as_deref())?;
-                Ok(msg)
+                        _ => unreachable!("action was validated before opening the store"),
+                    };
+                    Ok(msg)
+                })
             }
 
             unknown => Err(crate::error::Error::Usage(format!(

@@ -983,32 +983,32 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
         .session_list(20)?
         .iter()
         .any(|session| session.1 == session_summary);
-    let session_id = store.capture_commit(
-        entity_tuple,
-        &rel_tuples,
-        if already_recorded {
-            ""
-        } else {
-            &session_summary
-        },
-    )?;
-
-    let zombies = if !commit_info.deleted_files.is_empty() {
-        store.clean_deleted_files(&commit_info.deleted_files, false)?
-    } else {
-        Vec::new()
-    };
-    let zombies_cleaned = !zombies.is_empty();
-
     let rules_file = crate::store::resolve_rules_path(root);
-    let rules_synced = if rules_file.exists()
-        && (entity_captured.is_some() || !relations.is_empty() || zombies_cleaned)
-    {
-        store.export_to_path(&rules_file)?;
-        true
-    } else {
-        false
-    };
+    let export_path = (rules_file.exists()
+        && (entity_captured.is_some()
+            || !relations.is_empty()
+            || !commit_info.deleted_files.is_empty()))
+    .then_some(rules_file.as_path());
+    let (session_id, zombies) = store.with_rules_export(export_path, |store| {
+        let session_id = store.capture_commit(
+            entity_tuple,
+            &rel_tuples,
+            if already_recorded {
+                ""
+            } else {
+                &session_summary
+            },
+        )?;
+        let zombies = if !commit_info.deleted_files.is_empty() {
+            store.clean_deleted_files(&commit_info.deleted_files, false)?
+        } else {
+            Vec::new()
+        };
+        Ok((session_id, zombies))
+    })?;
+    let zombies_cleaned = !zombies.is_empty();
+    let rules_synced = rules_file.exists()
+        && (entity_captured.is_some() || !relations.is_empty() || zombies_cleaned);
 
     Ok(Some(HookReport {
         commit_hash: commit_info.hash,

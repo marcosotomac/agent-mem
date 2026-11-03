@@ -166,13 +166,6 @@ fn lock_export_target(path: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
-fn atomic_write_file(path: &Path, content: &str) -> Result<()> {
-    let lock = lock_export_target(path)?;
-    let result = atomic_write_file_unlocked(path, content);
-    let _ = FileExt::unlock(&lock);
-    result
-}
-
 fn atomic_write_file_unlocked(path: &Path, content: &str) -> Result<()> {
     let target_path = resolve_write_target(path)?;
     let parent = target_path
@@ -221,6 +214,25 @@ fn atomic_write_file_unlocked(path: &Path, content: &str) -> Result<()> {
         let _ = fs::remove_file(&temp_path);
     }
     result
+}
+
+fn pending_export_key(path: &Path) -> Result<String> {
+    let resolved = std::path::absolute(resolve_write_target(path)?)?;
+    let canonical = match fs::canonicalize(&resolved) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = resolved
+                .parent()
+                .ok_or_else(|| Error::Usage("Rules path has no parent".into()))?;
+            fs::canonicalize(parent)?.join(
+                resolved
+                    .file_name()
+                    .ok_or_else(|| Error::Usage("Rules path has no file name".into()))?,
+            )
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(canonical.to_string_lossy().into_owned())
 }
 
 const RELATIONS_GRAPH_FILE: &str = "_relations.rules";
@@ -496,17 +508,95 @@ impl Store {
         Ok(())
     }
 
+    /// Serialize a mutation with its export. The durable marker survives process
+    /// exit or partial filesystem writes and prevents stale imports on restart.
+    pub fn with_rules_export<T>(
+        &mut self,
+        path: Option<&Path>,
+        write: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let Some(path) = path else { return write(self) };
+        let _lock = lock_export_target(path)?;
+        self.ensure_no_pending_export(path)?;
+        self.begin_pending_export(path)?;
+        let generation = self.get_db_fingerprint()?;
+        let value = match write(self) {
+            Ok(value) => value,
+            Err(error) => {
+                self.clear_pending_export(path, &generation)?;
+                return Err(error);
+            }
+        };
+        let result = if path.is_dir() || path.extension().is_some_and(|ext| ext == "d") {
+            self.export_to_dir_unlocked(path, false)
+        } else {
+            self.export_to_file_unlocked(path, false)
+        };
+        result.map_err(|error| Error::Usage(format!(
+            "Changes saved locally, but export to '{}' is pending: {error}. Repair the I/O failure and run 'agent-mem sync --export' for this path before importing",
+            path.display(),
+        )))?;
+        Ok(value)
+    }
+
+    fn begin_pending_export(&self, path: &Path) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _pending_exports (path TEXT PRIMARY KEY);",
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO _pending_exports (path) VALUES (?1);",
+            params![pending_export_key(path)?],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_no_pending_export(&self, path: &Path) -> Result<()> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_pending_exports');",
+            [], |row| row.get(0),
+        )?;
+        if exists
+            && self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM _pending_exports);",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            return Err(Error::Usage(format!(
+                "Pending export: local changes have not been fully exported. Import/write to '{}' refused to prevent data loss; repair the I/O failure and run 'agent-mem sync --export' for the pending rules path first",
+                path.display(),
+            )));
+        }
+        Ok(())
+    }
+
+    fn clear_pending_export(&self, path: &Path, generation: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM _pending_exports WHERE path = ?1
+             AND ?2 = (SELECT CAST(generation AS TEXT) FROM store_generation WHERE singleton = 1);",
+            params![pending_export_key(path)?, generation],
+        )?;
+        Ok(())
+    }
+
     /// Export current rules to a file on disk.
     pub fn export_to_file(&self, path: &Path) -> Result<()> {
-        let lock = lock_export_target(path)?;
-        let result = (|| -> Result<()> {
-            let content = self.export_rules_text()?;
-            atomic_write_file_unlocked(path, &content)?;
-            self.record_sync_state(path, &content)?;
-            Ok(())
-        })();
-        let _ = FileExt::unlock(&lock);
-        result
+        let _lock = lock_export_target(path)?;
+        self.begin_pending_export(path)?;
+        self.export_to_file_unlocked(path, false)
+    }
+
+    fn export_to_file_unlocked(&self, path: &Path, accepted_conflicts: bool) -> Result<()> {
+        let generation = self.get_db_fingerprint()?;
+        let content = self.export_rules_text()?;
+        atomic_write_file_unlocked(path, &content)?;
+        self.record_sync_state_at_generation(
+            path,
+            Self::compute_content_hash(&content) as i64,
+            accepted_conflicts,
+            &generation,
+        )?;
+        self.clear_pending_export(path, &generation)
     }
 
     /// Export rules partitioned by namespace into a directory of *.rules files.
@@ -515,11 +605,15 @@ impl Store {
     }
 
     fn export_to_dir_mode(&self, dir: &Path, accepted_conflicts: bool) -> Result<()> {
-        if !dir.exists() {
-            fs::create_dir_all(dir)?;
-        }
-        let lock = lock_export_target(dir)?;
-        let result = (|| -> Result<()> {
+        let _lock = lock_export_target(dir)?;
+        self.begin_pending_export(dir)?;
+        self.export_to_dir_unlocked(dir, accepted_conflicts)
+    }
+
+    fn export_to_dir_unlocked(&self, dir: &Path, accepted_conflicts: bool) -> Result<()> {
+        fs::create_dir_all(dir)?;
+        let generation = self.get_db_fingerprint()?;
+        {
             let snapshot = self.conn.unchecked_transaction()?;
 
             let mut active_by_ns: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -684,11 +778,15 @@ impl Store {
             }
 
             let combined_hash = aggregate_hasher.finish() as i64;
-            self.record_sync_state_mode(dir, combined_hash, accepted_conflicts)?;
+            self.record_sync_state_at_generation(
+                dir,
+                combined_hash,
+                accepted_conflicts,
+                &generation,
+            )?;
+            self.clear_pending_export(dir, &generation)?;
             Ok(())
-        })();
-        let _ = FileExt::unlock(&lock);
-        result
+        }
     }
 
     /// Export to a rules path (either a single file like `.agent-rules` or a modular directory like `.agent-rules.d`).
@@ -716,11 +814,6 @@ impl Store {
         Ok(fp)
     }
 
-    pub(crate) fn record_sync_state(&self, path: &Path, content: &str) -> Result<()> {
-        let content_hash = Self::compute_content_hash(content) as i64;
-        self.record_sync_state_mode(path, content_hash, false)
-    }
-
     fn record_sync_state_mode(
         &self,
         path: &Path,
@@ -728,10 +821,20 @@ impl Store {
         accepted_conflicts: bool,
     ) -> Result<()> {
         let generation = self.get_db_fingerprint()?;
+        self.record_sync_state_at_generation(path, content_hash, accepted_conflicts, &generation)
+    }
+
+    fn record_sync_state_at_generation(
+        &self,
+        path: &Path,
+        content_hash: i64,
+        accepted_conflicts: bool,
+        generation: &str,
+    ) -> Result<()> {
         let db_state = if accepted_conflicts {
             format!("accepted:{generation}")
         } else {
-            generation
+            generation.to_string()
         };
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS _sync_state (path TEXT PRIMARY KEY, content_hash INTEGER NOT NULL, db_state TEXT NOT NULL);",
@@ -766,8 +869,11 @@ impl Store {
 
     /// Reconcile SQLite database with a directory of plain-text rules files (*.rules).
     pub fn sync_with_dir(&mut self, dir: &Path, accept_conflicts: bool) -> Result<SyncReport> {
+        let _lock = lock_export_target(dir)?;
+        self.ensure_no_pending_export(dir)?;
         if !dir.exists() {
-            self.export_to_dir(dir)?;
+            self.begin_pending_export(dir)?;
+            self.export_to_dir_unlocked(dir, false)?;
             let total = self
                 .conn
                 .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
@@ -793,7 +899,8 @@ impl Store {
         entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
         if entries.is_empty() {
-            self.export_to_dir(dir)?;
+            self.begin_pending_export(dir)?;
+            self.export_to_dir_unlocked(dir, false)?;
             let total = self
                 .conn
                 .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
@@ -893,8 +1000,11 @@ impl Store {
     }
 
     fn sync_with_file_mode(&mut self, path: &Path, accept_conflicts: bool) -> Result<SyncReport> {
+        let _lock = lock_export_target(path)?;
+        self.ensure_no_pending_export(path)?;
         if !path.exists() {
-            self.export_to_file(path)?;
+            self.begin_pending_export(path)?;
+            self.export_to_file_unlocked(path, false)?;
             let total = self
                 .conn
                 .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
@@ -1350,13 +1460,11 @@ impl Store {
         tx.commit()?;
         let file_updated = !conflicts.is_empty();
         if file_updated {
+            self.begin_pending_export(path)?;
             if path.is_dir() || path.extension().is_some_and(|ext| ext == "d") {
-                self.export_to_dir_mode(path, true)?;
+                self.export_to_dir_unlocked(path, true)?;
             } else {
-                let clean_content = self.export_rules_text()?;
-                atomic_write_file(path, &clean_content)?;
-                let clean_hash = Self::compute_content_hash(&clean_content) as i64;
-                self.record_sync_state_mode(path, clean_hash, true)?;
+                self.export_to_file_unlocked(path, true)?;
             }
         } else {
             let _ = self.record_sync_state_mode(path, content_hash, false);

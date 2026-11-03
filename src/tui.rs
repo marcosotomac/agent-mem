@@ -201,17 +201,26 @@ impl App {
 
         if self.db_path.exists() {
             let mut store = Store::open(&self.db_path, true)?;
-            if is_currently_archived {
-                store.unarchive(&rule_key)?;
-                self.set_toast(format!("Reactivated rule: {}", rule_key));
-            } else {
-                store.archive(&rule_key, Some("Archived via TUI"))?;
-                self.set_toast(format!("Archived rule: {}", rule_key));
-            }
             let rules_file = crate::store::resolve_rules_path(&self.root);
-            if rules_file.exists() {
-                store.export_to_path(&rules_file)?;
-            }
+            store.with_rules_export(
+                rules_file.exists().then_some(rules_file.as_path()),
+                |store| {
+                    if is_currently_archived {
+                        store.unarchive(&rule_key)
+                    } else {
+                        store.archive(&rule_key, Some("Archived via TUI"))
+                    }
+                },
+            )?;
+            self.set_toast(format!(
+                "{} rule: {}",
+                if is_currently_archived {
+                    "Reactivated"
+                } else {
+                    "Archived"
+                },
+                rule_key
+            ));
         }
         self.reload_data()
     }
@@ -224,11 +233,11 @@ impl App {
 
         if self.db_path.exists() {
             let mut store = Store::open(&self.db_path, true)?;
-            store.del(&rule_key)?;
             let rules_file = crate::store::resolve_rules_path(&self.root);
-            if rules_file.exists() {
-                store.export_to_path(&rules_file)?;
-            }
+            store.with_rules_export(
+                rules_file.exists().then_some(rules_file.as_path()),
+                |store| store.del(&rule_key),
+            )?;
             self.set_toast(format!("Deleted rule: {}", rule_key));
         }
         self.reload_data()
@@ -241,15 +250,17 @@ impl App {
         }
 
         let mut store = Store::open(&self.db_path, true)?;
-        store.set_with_anchor(
-            key.trim(),
-            val.trim(),
-            anchor.filter(|a| !a.trim().is_empty()),
-        )?;
         let rules_file = crate::store::resolve_rules_path(&self.root);
-        if rules_file.exists() {
-            store.export_to_path(&rules_file)?;
-        }
+        store.with_rules_export(
+            rules_file.exists().then_some(rules_file.as_path()),
+            |store| {
+                store.set_with_anchor(
+                    key.trim(),
+                    val.trim(),
+                    anchor.filter(|a| !a.trim().is_empty()),
+                )
+            },
+        )?;
         self.set_toast(format!("Saved rule: {}", key.trim()));
         self.reload_data()?;
         Ok(true)

@@ -211,6 +211,7 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 
 ### Recovery and local safety
 
+- CLI, MCP, hooks, and TUI mutations serialize with rules-file exports. If an export fails after SQLite commits, the error reports that changes were saved locally. A persistent pending-export marker blocks subsequent imports and writes, including after restart, so a stale team file cannot erase those changes. Fix the filesystem error, inspect any concurrent team-file edits, then run `agent-mem sync [file] --export` for the failed target to complete recovery. SQLite and filesystem writes are not a single atomic transaction.
 - Modular export groups case variants of a namespace into one shard while preserving the exact memory keys, including on case-insensitive filesystems.
 - `doctor --fix` rebuilds only databases SQLite identifies as corrupt. It refuses unsupported newer schemas and other opening errors. Before rebuilding, it preserves the database and existing WAL/SHM files in a private `.agent-mem/mem.db.backup-*` directory.
 - Human review applies to the stored content: replacing its value, anchor, or kind through a local write or Git capture clears `reviewed` status and the old review timestamp. Identical writes preserve review.
