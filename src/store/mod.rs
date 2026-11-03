@@ -60,6 +60,64 @@ pub(crate) fn rule_content_unchanged(
         .query_row(params![key, val, anchor, kind], |row| row.get(0))?)
 }
 
+/// Shared lifecycle semantics for API batches, explicit links, and Git capture.
+/// The caller owns the transaction, so a rejected edge rolls back its whole write.
+pub(crate) fn apply_relation(
+    tx: &Transaction<'_>,
+    source: &str,
+    rel_type: &str,
+    target: &str,
+    now: i64,
+) -> Result<()> {
+    if rel_type == "supersedes" {
+        if source == target {
+            return Err(crate::error::Error::Usage(
+                "A memory cannot supersede itself".into(),
+            ));
+        }
+        for key in [source, target] {
+            let exists: bool = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1);")?
+                .query_row(params![key], |row| row.get(0))?;
+            if !exists {
+                return Err(crate::error::Error::NotFound(key.to_string()));
+            }
+        }
+        let creates_cycle: bool = tx.prepare_cached(
+            "WITH RECURSIVE chain(key) AS (
+                SELECT target_key FROM relations WHERE source_key = ?1 AND rel_type = 'supersedes'
+                UNION
+                SELECT relations.target_key FROM relations JOIN chain ON relations.source_key = chain.key
+                WHERE relations.rel_type = 'supersedes'
+             ) SELECT EXISTS(SELECT 1 FROM chain WHERE key = ?2);",
+        )?.query_row(params![target, source], |row| row.get(0))?;
+        if creates_cycle {
+            return Err(crate::error::Error::Usage(
+                "A supersedes relation cannot create a cycle".into(),
+            ));
+        }
+    }
+    tx.prepare_cached(
+        "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+    )?.execute(params![source, rel_type, target, now])?;
+    if rel_type == "supersedes" {
+        tx.execute(
+            "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?1
+             WHERE key = ?3 AND archived_at IS NULL;",
+            params![now, format!("superseded_by: {source}"), target],
+        )?;
+        tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![target])?;
+        tx.execute(
+            "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind)
+             SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
+            params![target],
+        )?;
+        mark_semantic_dirty(tx)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn mark_semantic_dirty(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "UPDATE semantic_state SET dirty = 1 WHERE singleton = 1;",
@@ -260,10 +318,6 @@ impl Store {
             let mut insert_fts = tx.prepare_cached(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
             )?;
-            let mut insert_rel = tx.prepare_cached(
-                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
-            )?;
             let mut delete_routes =
                 tx.prepare_cached("DELETE FROM memory_routes WHERE memory_key = ?1;")?;
             let mut upsert_metadata = tx.prepare_cached(
@@ -334,12 +388,7 @@ impl Store {
                     if !target_exists {
                         return Err(crate::error::Error::NotFound(trimmed_target.to_string()));
                     }
-                    insert_rel.execute(params![
-                        trimmed_key,
-                        rel_type.trim(),
-                        trimmed_target,
-                        now
-                    ])?;
+                    apply_relation(&tx, trimmed_key, rel_type.trim(), trimmed_target, now)?;
                 }
             }
         }
