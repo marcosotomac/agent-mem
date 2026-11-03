@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -476,10 +477,22 @@ pub(crate) fn write_config_safely(path: &Path, content: &str) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    if path.exists() {
-        fs::copy(path, backup_path(path))?;
+    let permissions = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(ref permissions) = permissions {
+        write_config_atomically(&backup_path(path), &fs::read(path)?, Some(permissions))?;
     }
+    write_config_atomically(path, content.as_bytes(), permissions.as_ref())
+}
 
+fn write_config_atomically(
+    path: &Path,
+    content: &[u8],
+    permissions: Option<&fs::Permissions>,
+) -> Result<()> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -489,18 +502,33 @@ pub(crate) fn write_config_safely(path: &Path, content: &str) -> Result<()> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config".to_string());
     let temp_path = path.with_file_name(format!(".{name}.agent-mem.{nonce}.tmp"));
-    fs::write(&temp_path, content)?;
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp_path)?;
+        file.write_all(content)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions.clone())?;
+        }
+        file.sync_all()?;
+        drop(file);
 
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-
-    if let Err(error) = fs::rename(&temp_path, path) {
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
         let _ = fs::remove_file(&temp_path);
-        return Err(error.into());
     }
-    Ok(())
+    result
 }
 
 pub fn escape_toml_string(raw: &str) -> String {
