@@ -209,6 +209,10 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 
 `agent-mem history <key>` shows the current value and up to 20 previous local versions, including values superseded by a team-file merge. Each entry includes its available provenance and trust state. History lives in the local SQLite database; `.agent-rules` remains the shared current-state file. By default, sync rejects conflicting definitions of the same key without changing SQLite. Edit the team file to resolve the conflict, or explicitly run `agent-mem sync --accept-conflicts` to choose the last definition and retain the alternative in local history.
 
+### Recovery and local safety
+
+- `doctor --fix` rebuilds only databases SQLite identifies as corrupt. It refuses unsupported newer schemas and other opening errors. Before rebuilding, it preserves the database and existing WAL/SHM files in a private `.agent-mem/mem.db.backup-*` directory.
+
 ## Model Context Protocol (MCP) Setup
 
 `agent-mem` is dual-era compatible: it preserves the legacy `2024-11-05`

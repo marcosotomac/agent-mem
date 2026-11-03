@@ -668,6 +668,42 @@ where
     }
 }
 
+fn is_database_corruption(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Db(rusqlite::Error::SqliteFailure(code, _))
+            if matches!(code.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    )
+}
+
+fn backup_corrupt_database(db_path: &Path) -> Result<std::path::PathBuf> {
+    let parent = db_path.parent().expect("database has a parent directory");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let backup = parent.join(format!("mem.db.backup-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&backup)?;
+    crate::init::secure_private_dir(&backup)?;
+    // Preserve the WAL and SHM too: sessions and revisions may exist only in WAL.
+    // Do not delete anything unless every existing file has been backed up.
+    for name in ["mem.db", "mem.db-wal", "mem.db-shm"] {
+        let source = parent.join(name);
+        if source.exists() {
+            let target = backup.join(name);
+            std::fs::copy(&source, &target)?;
+            crate::init::secure_private_file(&target)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(target)?
+                .sync_all()?;
+        }
+    }
+    #[cfg(unix)]
+    std::fs::File::open(&backup)?.sync_all()?;
+    Ok(backup)
+}
+
 pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
     match cmd {
         Command::Help => {
@@ -752,21 +788,32 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             if db_path.exists() {
                 match Store::open(&db_path, false) {
                     Ok(s) => {
-                        if s.stats(&db_path).is_err() {
-                            db_corrupted = true;
+                        if let Err(error) = s.stats(&db_path) {
+                            if is_database_corruption(&error) {
+                                db_corrupted = true;
+                            } else {
+                                return Err(error);
+                            }
                         }
                     }
-                    Err(_) => {
-                        db_corrupted = true;
-                    }
+                    Err(error) if is_database_corruption(&error) => db_corrupted = true,
+                    Err(error) => return Err(error),
                 }
             }
 
             if fix {
                 if db_corrupted {
-                    let _ = std::fs::remove_file(&db_path);
-                    let _ = std::fs::remove_file(root.join(".agent-mem").join("mem.db-wal"));
-                    let _ = std::fs::remove_file(root.join(".agent-mem").join("mem.db-shm"));
+                    let backup = backup_corrupt_database(&db_path)?;
+                    println!(
+                        "doctor fix: preserved original database in {}",
+                        backup.display()
+                    );
+                    for name in ["mem.db", "mem.db-wal", "mem.db-shm"] {
+                        let path = root.join(".agent-mem").join(name);
+                        if path.exists() {
+                            std::fs::remove_file(path)?;
+                        }
+                    }
 
                     let mut store = Store::open(&db_path, true)?;
                     let rules_path = crate::store::resolve_rules_path(root);
