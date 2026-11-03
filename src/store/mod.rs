@@ -45,6 +45,21 @@ pub struct Store {
     pub(crate) semantic_runtime: RefCell<semantic::SemanticRuntime>,
 }
 
+pub(crate) fn rule_content_unchanged(
+    conn: &Connection,
+    key: &str,
+    val: &str,
+    anchor: Option<&str>,
+    kind: &str,
+) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1 AND val IS ?2
+         AND anchor IS ?3 AND kind IS ?4 AND archived_at IS NULL AND archive_reason IS NULL);",
+        )?
+        .query_row(params![key, val, anchor, kind], |row| row.get(0))?)
+}
+
 pub(crate) fn mark_semantic_dirty(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "UPDATE semantic_state SET dirty = 1 WHERE singleton = 1;",
@@ -257,12 +272,12 @@ impl Store {
                  ON CONFLICT(memory_key) DO UPDATE SET
                     provenance = excluded.provenance,
                     trust = CASE
-                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local'
+                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local' AND ?5
                             THEN 'reviewed'
                         ELSE excluded.trust
                     END,
                     reviewed_at = CASE
-                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local'
+                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local' AND ?5
                             THEN memory_metadata.reviewed_at
                         ELSE excluded.reviewed_at
                     END;",
@@ -278,6 +293,14 @@ impl Store {
                     .filter(|k| !k.is_empty())
                     .unwrap_or_else(|| infer_kind(trimmed_key));
 
+                let unchanged = !unique_initial_load
+                    && rule_content_unchanged(
+                        &tx,
+                        trimmed_key,
+                        trimmed_val,
+                        trimmed_anchor,
+                        effective_kind,
+                    )?;
                 insert_mem.execute(params![
                     trimmed_key,
                     trimmed_val,
@@ -296,7 +319,7 @@ impl Store {
                     effective_kind
                 ])?;
                 insert_memory_routes(&tx, trimmed_key, trimmed_anchor)?;
-                upsert_metadata.execute(params![trimmed_key, provenance, trust, now])?;
+                upsert_metadata.execute(params![trimmed_key, provenance, trust, now, unchanged])?;
             }
 
             for r in rules {

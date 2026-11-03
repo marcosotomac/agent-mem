@@ -213,6 +213,7 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 
 - Modular export groups case variants of a namespace into one shard while preserving the exact memory keys, including on case-insensitive filesystems.
 - `doctor --fix` rebuilds only databases SQLite identifies as corrupt. It refuses unsupported newer schemas and other opening errors. Before rebuilding, it preserves the database and existing WAL/SHM files in a private `.agent-mem/mem.db.backup-*` directory.
+- Human review applies to the stored content: replacing its value, anchor, or kind through a local write or Git capture clears `reviewed` status and the old review timestamp. Identical writes preserve review.
 - MCP configuration updates and their backups retain existing permissions; newly created configurations use private `0600` permissions on Unix.
 
 ## Model Context Protocol (MCP) Setup

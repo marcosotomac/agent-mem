@@ -92,6 +92,13 @@ impl Store {
                 .filter(|k| !k.is_empty())
                 .unwrap_or_else(|| infer_kind(trimmed_key));
 
+            let unchanged = super::rule_content_unchanged(
+                &tx,
+                trimmed_key,
+                trimmed_val,
+                trimmed_anchor,
+                effective_kind,
+            )?;
             tx.execute(
                 "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind)
                  VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
@@ -124,9 +131,9 @@ impl Store {
                  VALUES (?1, 'git-hook:commit', ?2, ?3, NULL)
                  ON CONFLICT(memory_key) DO UPDATE SET
                     provenance = 'git-hook:commit',
-                    trust = CASE WHEN memory_metadata.trust = 'reviewed' THEN 'reviewed' ELSE ?2 END,
-                    reviewed_at = CASE WHEN memory_metadata.trust = 'reviewed' THEN memory_metadata.reviewed_at ELSE NULL END;",
-                params![trimmed_key, TRUST_LOCAL, now],
+                    trust = CASE WHEN memory_metadata.trust = 'reviewed' AND ?4 THEN 'reviewed' ELSE ?2 END,
+                    reviewed_at = CASE WHEN memory_metadata.trust = 'reviewed' AND ?4 THEN memory_metadata.reviewed_at ELSE NULL END;",
+                params![trimmed_key, TRUST_LOCAL, now, unchanged],
             )?;
             mark_semantic_dirty(&tx)?;
         }

@@ -32,7 +32,9 @@ in Git, malformed encoded records are rejected atomically, and archived rules
 are distinguishable from active ones. Imports from `.agent-rules` are recorded
 with `untrusted` trust and `rules-file:.agent-rules` provenance; MCP context and
 search label those values. Only the local CLI can promote a record to `reviewed`,
-so a model cannot approve its own input through MCP. Consumers must treat
+so a model cannot approve its own input through MCP. Local replacements and Git
+captures invalidate approval when the value, anchor, kind, or archived state changes;
+identical writes retain approval. Consumers must treat
 returned values as quoted evidence and validate any requested action against
 higher-priority policy.
 Semantic prompt-injection detection is intentionally not claimed: keyword filters
