@@ -982,6 +982,10 @@ impl Store {
                 kind: Some(&rule.kind),
                 relation: None,
             })?;
+            if let Some(reason) = &rule.archive_reason {
+                super::reject_oversized("archive reason", reason, super::MAX_VALUE_BYTES)?;
+                crate::security::reject_secret(reason)?;
+            }
         }
         for (source, rel_type, target) in &parsed.relations {
             super::validate_batch_rule(&super::BatchRule {

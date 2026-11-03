@@ -42,7 +42,8 @@ are bypassable and would create false confidence.
 
 Writes and imports reject high-confidence credential shapes (private-key PEMs,
 GitHub and AWS keys, JWTs, bearer credentials, and explicit secret assignments)
-before opening a transaction. Rejection is atomic and errors never echo the
+before writing rule content, including archive reasons in plain-text, JSON, and
+modular imports. Rejection is atomic and errors never echo the
 suspected credential. The scanner deliberately avoids entropy-only guesses and
 keyword-only matches, so it reduces accidental persistence but cannot prove that
 arbitrary text contains no secret. Upstream clients must still redact credentials
