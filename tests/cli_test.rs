@@ -2,6 +2,19 @@ use agent_mem::cli::{Command, parse_args};
 use agent_mem::init::find_project_root_from;
 use std::fs;
 
+fn isolated_cli(
+    root: &std::path::Path,
+    global: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_agent-mem"))
+        .args(args)
+        .current_dir(root)
+        .env("AGENT_MEM_GLOBAL_DIR", global)
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn test_parse_args() {
     // Empty args defaults to help
@@ -891,11 +904,8 @@ fn test_not_initialized_error_distinguishes_git_and_bare_dirs() {
 
 #[test]
 fn test_not_initialized_error_suggests_most_recent_project() {
-    let lock = std::sync::Mutex::new(());
-    let _guard = lock.lock().unwrap();
     let global_dir = std::env::temp_dir().join(format!("agent_mem_ni_reg_{}", std::process::id()));
-    fs::create_dir_all(global_dir.clone()).unwrap();
-    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
+    fs::create_dir_all(&global_dir).unwrap();
 
     let project_dir =
         std::env::temp_dir().join(format!("agent_mem_ni_proj_{}", std::process::id()));
@@ -915,11 +925,17 @@ fn test_not_initialized_error_suggests_most_recent_project() {
     };
     let mut registry = agent_mem::registry::ProjectRegistry::default();
     registry.projects.push(record);
-    registry.save().unwrap();
+    fs::write(
+        global_dir.join("projects.json"),
+        serde_json::to_vec(&registry).unwrap(),
+    )
+    .unwrap();
 
     let elsewhere = std::env::temp_dir().join(format!("agent_mem_ni_else_{}", std::process::id()));
     fs::create_dir_all(&elsewhere).unwrap();
-    let err = agent_mem::cli::not_initialized_error(&elsewhere).to_string();
+    let output = isolated_cli(&elsewhere, &global_dir, &["get", "any"]);
+    assert!(!output.status.success());
+    let err = String::from_utf8(output.stderr).unwrap();
     assert!(
         err.contains("most recent project: wired-project (7 active rules)"),
         "got: {err}"
@@ -929,8 +945,7 @@ fn test_not_initialized_error_suggests_most_recent_project() {
         "got: {err}"
     );
 
-    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
-    let _ = fs::remove_file(global_dir.join("projects.json"));
+    let _ = fs::remove_dir_all(global_dir);
     let _ = fs::remove_dir_all(project_dir);
     let _ = fs::remove_dir_all(elsewhere);
 }
@@ -1143,16 +1158,18 @@ fn test_inspect_git_health_counts_only_active_rules() {
 
 #[test]
 fn test_stats_refreshes_registry() {
-    let lock = std::sync::Mutex::new(());
-    let _guard = lock.lock().unwrap();
     let global_dir =
         std::env::temp_dir().join(format!("agent_mem_stats_reg_{}", std::process::id()));
     fs::create_dir_all(&global_dir).unwrap();
-    unsafe { std::env::set_var("AGENT_MEM_GLOBAL_DIR", &global_dir) };
 
     let dir = std::env::temp_dir().join(format!("agent_mem_stats_refresh_{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    agent_mem::init::init_project(&dir).unwrap();
+    let initialized = isolated_cli(&dir, &global_dir, &["init"]);
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
 
     // Add a rule directly to db
     let db = dir.join(".agent-mem/mem.db");
@@ -1162,9 +1179,15 @@ fn test_stats_refreshes_registry() {
     }
 
     // Running stats should register/refresh the project
-    agent_mem::cli::execute_command(Command::Stats, &dir).unwrap();
+    let stats = isolated_cli(&dir, &global_dir, &["stats"]);
+    assert!(
+        stats.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stats.stderr)
+    );
 
-    let reg = agent_mem::registry::ProjectRegistry::load().unwrap();
+    let reg: agent_mem::registry::ProjectRegistry =
+        serde_json::from_slice(&fs::read(global_dir.join("projects.json")).unwrap()).unwrap();
     let canonical = agent_mem::registry::ProjectRegistry::canonicalize_path(&dir);
     let canonical_str = canonical.to_string_lossy().to_string();
     let project = reg
@@ -1178,7 +1201,6 @@ fn test_stats_refreshes_registry() {
     let p = project.unwrap();
     assert_eq!(p.rules_count, 1, "active rules count must match");
 
-    unsafe { std::env::remove_var("AGENT_MEM_GLOBAL_DIR") };
     let _ = fs::remove_dir_all(global_dir);
     let _ = fs::remove_dir_all(dir);
 }
