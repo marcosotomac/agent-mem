@@ -543,8 +543,9 @@ impl Store {
                             kind: row_text(row, 4)?,
                         },
                     )?;
+                    // Coalesce case variants into one portable shard without changing keys.
                     active_by_ns
-                        .entry(ns.to_string())
+                        .entry(ns.to_ascii_lowercase())
                         .or_default()
                         .push(rule_str);
                 }
@@ -572,7 +573,7 @@ impl Store {
                         },
                     )?;
                     archived_by_ns
-                        .entry(ns.to_string())
+                        .entry(ns.to_ascii_lowercase())
                         .or_default()
                         .push(rule_str);
                 }
@@ -662,16 +663,23 @@ impl Store {
                 written_files.insert(file_name.clone());
             }
 
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file()
-                        && path.extension().is_some_and(|e| e == "rules")
-                        && let Some(name) = path.file_name().and_then(|n| n.to_str())
-                        && !written_files.contains(name)
+            for entry in fs::read_dir(dir)? {
+                let path = entry?.path();
+                if path.is_file()
+                    && path.extension().is_some_and(|e| e == "rules")
+                    && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && !written_files.contains(name)
+                {
+                    let folded = name.to_ascii_lowercase();
+                    // APFS can retain the old destination spelling after rename.
+                    // Do not mistake that alias for an obsolete shard. On a
+                    // case-sensitive filesystem the two canonical paths differ.
+                    if written_files.contains(&folded)
+                        && fs::canonicalize(&path)? == fs::canonicalize(dir.join(&folded))?
                     {
-                        let _ = fs::remove_file(&path);
+                        continue;
                     }
+                    fs::remove_file(&path)?;
                 }
             }
 

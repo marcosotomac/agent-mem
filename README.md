@@ -211,6 +211,7 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 
 ### Recovery and local safety
 
+- Modular export groups case variants of a namespace into one shard while preserving the exact memory keys, including on case-insensitive filesystems.
 - `doctor --fix` rebuilds only databases SQLite identifies as corrupt. It refuses unsupported newer schemas and other opening errors. Before rebuilding, it preserves the database and existing WAL/SHM files in a private `.agent-mem/mem.db.backup-*` directory.
 
 ## Model Context Protocol (MCP) Setup
