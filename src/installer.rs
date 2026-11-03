@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -476,10 +477,22 @@ pub(crate) fn write_config_safely(path: &Path, content: &str) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    if path.exists() {
-        fs::copy(path, backup_path(path))?;
+    let permissions = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(ref permissions) = permissions {
+        write_config_atomically(&backup_path(path), &fs::read(path)?, Some(permissions))?;
     }
+    write_config_atomically(path, content.as_bytes(), permissions.as_ref())
+}
 
+fn write_config_atomically(
+    path: &Path,
+    content: &[u8],
+    permissions: Option<&fs::Permissions>,
+) -> Result<()> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -489,18 +502,50 @@ pub(crate) fn write_config_safely(path: &Path, content: &str) -> Result<()> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config".to_string());
     let temp_path = path.with_file_name(format!(".{name}.agent-mem.{nonce}.tmp"));
-    fs::write(&temp_path, content)?;
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp_path)?;
+        file.write_all(content)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions.clone())?;
+        }
+        file.sync_all()?;
+        drop(file);
 
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-
-    if let Err(error) = fs::rename(&temp_path, path) {
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
         let _ = fs::remove_file(&temp_path);
-        return Err(error.into());
     }
-    Ok(())
+    result
+}
+
+pub fn escape_toml_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub fn install_to_path(
@@ -510,6 +555,7 @@ pub fn install_to_path(
     let binary_cmd = resolve_binary_command();
 
     if client == TargetClient::Codex {
+        let escaped_cmd = escape_toml_string(&binary_cmd);
         let (already_configured, updated_content) = if config_path.exists() {
             let raw = fs::read_to_string(config_path)?;
             let has_header = raw.contains("[mcp_servers.agent-mem]")
@@ -522,15 +568,15 @@ pub fn install_to_path(
                     c.push('\n');
                 }
                 c.push_str(&format!(
-                    "\n[mcp_servers.agent-mem]\ncommand = \"{}\"\nargs = [\"mcp\"]\n",
-                    binary_cmd
+                    "\n[mcp_servers.agent-mem]\ncommand = {}\nargs = [\"mcp\"]\n",
+                    escaped_cmd
                 ));
                 (false, c)
             }
         } else {
             let c = format!(
-                "[mcp_servers.agent-mem]\ncommand = \"{}\"\nargs = [\"mcp\"]\n",
-                binary_cmd
+                "[mcp_servers.agent-mem]\ncommand = {}\nargs = [\"mcp\"]\n",
+                escaped_cmd
             );
             (false, c)
         };

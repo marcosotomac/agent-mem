@@ -448,3 +448,330 @@ fn test_context_budget_reserves_graph_and_universal_qrels() {
         .unwrap();
     assert_eq!(unbounded.len(), 47);
 }
+
+#[test]
+fn test_suggest_relations_and_auto_relate() {
+    let mut store = Store::open_in_memory().unwrap();
+
+    // 1. Co-located gotcha and decision on same anchor file
+    store
+        .set_entry(
+            "gotcha/scanner/scan-timeout",
+            "Starship default 30ms timeout aborts scan on large directories",
+            Some("src/scanner.rs:42"),
+            Some("gotcha"),
+        )
+        .unwrap();
+
+    let suggestions = store
+        .suggest_relations(
+            "architecture/scanner/increase-timeout",
+            "Increase scan timeout to 150ms to prevent aborts",
+            Some("src/scanner.rs:42"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    assert!(!suggestions.is_empty());
+    let top = &suggestions[0];
+    assert_eq!(top.source_key, "architecture/scanner/increase-timeout");
+    assert_eq!(top.rel_type, "mitigates");
+    assert_eq!(top.target_key, "gotcha/scanner/scan-timeout");
+    assert_eq!(top.confidence, 85);
+
+    // 2. Exact anchor match for two decisions -> supersedes (90% confidence)
+    store
+        .set_entry(
+            "decision/auth/v1-hasher",
+            "Use sha256 for passwords",
+            Some("src/auth/hash.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let suggestions_exact = store
+        .suggest_relations(
+            "decision/auth/v2-argon2",
+            "Use argon2id for passwords",
+            Some("src/auth/hash.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let supersedes_cand = suggestions_exact
+        .iter()
+        .find(|s| s.rel_type == "supersedes")
+        .expect("supersedes suggestion found");
+    assert_eq!(supersedes_cand.confidence, 90);
+    assert_eq!(supersedes_cand.target_key, "decision/auth/v1-hasher");
+
+    // 3. Test auto_relate_high_confidence
+    store
+        .set_entry(
+            "decision/auth/v2-argon2",
+            "Use argon2id for passwords",
+            Some("src/auth/hash.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "architecture/scanner/increase-timeout",
+            "Increase scan timeout to 150ms",
+            Some("src/scanner.rs:42"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let linked = store.auto_relate_high_confidence(80).unwrap();
+    assert!(!linked.is_empty());
+
+    let rels = store
+        .get_relations("architecture/scanner/increase-timeout")
+        .unwrap();
+    assert!(
+        rels.iter()
+            .any(|(rel, target)| rel == "mitigates" && target == "gotcha/scanner/scan-timeout")
+    );
+}
+
+#[test]
+fn test_p2_5_suggest_relations_resolved_anchor_exact_match() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_entry(
+            "decision/auth/v1",
+            "Use basic auth",
+            Some("src/auth.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "decision/auth/v2",
+            "Use oauth2",
+            Some("src/auth.rs:10"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    // Calling suggest_relations with anchor: None must resolve anchor from DB and suggest supersedes
+    let suggestions = store
+        .suggest_relations("decision/auth/v2", "Use oauth2", None, None)
+        .unwrap();
+    let supersedes = suggestions.iter().find(|s| s.rel_type == "supersedes");
+    assert!(
+        supersedes.is_some(),
+        "Resolved anchor from DB should detect exact match and suggest supersedes: {:?}",
+        suggestions
+    );
+}
+
+#[test]
+fn test_p2_5_shared_file_without_exact_line_does_not_suggest_supersedes() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_entry(
+            "decision/auth/part1",
+            "Handle login flow",
+            Some("src/auth.rs"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "decision/auth/part2",
+            "Handle logout flow",
+            Some("src/auth.rs"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let suggestions = store
+        .suggest_relations(
+            "decision/auth/part2",
+            "Handle logout flow",
+            Some("src/auth.rs"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let supersedes = suggestions.iter().find(|s| s.rel_type == "supersedes");
+    assert!(
+        supersedes.is_none(),
+        "Rules sharing only file without path:line must NOT suggest supersedes: {:?}",
+        supersedes
+    );
+    let relates = suggestions.iter().find(|s| s.rel_type == "relates_to");
+    assert!(relates.is_some(), "Should suggest relates_to instead");
+}
+
+#[test]
+fn test_p2_5_auto_relate_does_not_iterate_archived_rules_or_duplicate_symmetric_relates_to() {
+    let mut store = Store::open_in_memory().unwrap();
+    // Rule 1 and Rule 2: exact same line -> Rule 2 supersedes Rule 1 (Rule 1 gets archived)
+    store
+        .set_entry(
+            "decision/cache/v1",
+            "Use redis cache",
+            Some("src/cache.rs:5"),
+            Some("decision"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "decision/cache/v2",
+            "Use memcached",
+            Some("src/cache.rs:5"),
+            Some("decision"),
+        )
+        .unwrap();
+    // Rule 3: related to cache by namespace/file (line 20)
+    store
+        .set_entry(
+            "decision/cache/v3",
+            "Use local in-memory lru",
+            Some("src/cache.rs:20"),
+            Some("decision"),
+        )
+        .unwrap();
+
+    let _applied = store.auto_relate_high_confidence(80).unwrap();
+    // One of v1 or v2 supersedes the other and the target is archived
+    let r1 = store.get_entry("decision/cache/v1").unwrap().unwrap();
+    let r2 = store.get_entry("decision/cache/v2").unwrap().unwrap();
+    assert!(r1.is_archived() || r2.is_archived());
+    assert!(!(r1.is_archived() && r2.is_archived()));
+
+    // Verify relations for relates_to: there should be NO duplicate symmetric edges
+    let all_rels = store.get_all_relations().unwrap();
+    let mut relates_to_pairs = std::collections::HashSet::new();
+    for r in all_rels {
+        if r.rel_type == "relates_to" {
+            let pair = if r.source_key < r.target_key {
+                (r.source_key.clone(), r.target_key.clone())
+            } else {
+                (r.target_key.clone(), r.source_key.clone())
+            };
+            assert!(
+                relates_to_pairs.insert(pair.clone()),
+                "Duplicate symmetric relates_to found for pair {:?}",
+                pair
+            );
+        }
+    }
+}
+
+#[test]
+fn test_p2_6_context_and_relations_filter_archived_neighbors_and_budget() {
+    let mut store = Store::open_in_memory().unwrap();
+    // 1. Direct active rule
+    store
+        .set_entry(
+            "rule/active1",
+            "active direct rule",
+            Some("src/foo.rs:1"),
+            Some("rule"),
+        )
+        .unwrap();
+    // 2. Target rule that gets archived
+    store
+        .set_entry(
+            "rule/archived_neighbor",
+            "obsolete rule",
+            Some("src/other.rs:10"),
+            Some("rule"),
+        )
+        .unwrap();
+    store
+        .relate("rule/active1", "relates_to", "rule/archived_neighbor")
+        .unwrap();
+    store
+        .archive("rule/archived_neighbor", Some("deprecated"))
+        .unwrap();
+
+    // 3. Universal active rule to fill budget
+    store
+        .set_entry(
+            "rule/universal_active",
+            "universal rule always relevant",
+            None,
+            Some("rule"),
+        )
+        .unwrap();
+
+    // In context_filtered:
+    let (rules, rels, _) = store
+        .context_filtered(Some("src/foo.rs:1"), None, 2)
+        .unwrap();
+
+    // rels must NOT contain the archived neighbor
+    assert!(
+        rels.iter().all(|r| r.target_key != "rule/archived_neighbor"
+            && r.source_key != "rule/archived_neighbor"),
+        "RELATIONS section must not include archived neighbors: {:?}",
+        rels
+    );
+
+    // rules must contain 2 active rules (archived neighbor must not eat the budget of 2)
+    assert_eq!(
+        rules.len(),
+        2,
+        "Budget of 2 must only count active rules, got: {:?}",
+        rules.iter().map(|r| &r.key).collect::<Vec<_>>()
+    );
+
+    // In context_for_files:
+    let (files_rules, files_rels, _) = store
+        .context_for_files(&["src/foo.rs".to_string()], None, 2)
+        .unwrap();
+
+    assert!(
+        files_rels
+            .iter()
+            .all(|r| r.target_key != "rule/archived_neighbor"
+                && r.source_key != "rule/archived_neighbor"),
+        "context_for_files RELATIONS must not include archived neighbors: {:?}",
+        files_rels
+    );
+    assert_eq!(
+        files_rules.len(),
+        2,
+        "context_for_files budget of 2 must only count active rules, got: {:?}",
+        files_rules.iter().map(|r| &r.key).collect::<Vec<_>>()
+    );
+
+    // 4. Validate existence before inserting relations in batch or relate
+    let bad_batch = [agent_mem::store::BatchRule {
+        key: "rule/new_batch",
+        val: "desc",
+        anchor: None,
+        kind: None,
+        relation: Some(("depends_on", "rule/does_not_exist")),
+    }];
+    assert!(
+        store.set_batch(&bad_batch).is_err(),
+        "set_batch with nonexistent target relation must fail"
+    );
+    assert!(
+        store
+            .relate("rule/active1", "relates_to", "rule/does_not_exist")
+            .is_err(),
+        "relate with nonexistent target must fail"
+    );
+}
+
+#[test]
+fn test_store_relate_validates_rel_type() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.set("rule1", "First rule").unwrap();
+    store.set("rule2", "Second rule").unwrap();
+
+    let err = store.relate("rule1", "invalid_relation", "rule2");
+    assert!(err.is_err(), "relate with invalid rel_type must fail");
+    let err_msg = err.unwrap_err().to_string();
+    assert!(err_msg.contains("Invalid relation type"), "got: {err_msg}");
+
+    let ok = store.relate("rule1", "mitigates", "rule2");
+    assert!(ok.is_ok(), "relate with valid rel_type must succeed");
+}

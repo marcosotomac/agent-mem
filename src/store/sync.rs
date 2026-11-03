@@ -1,12 +1,13 @@
 use super::{Store, insert_memory_routes, mark_semantic_dirty, now_epoch};
 use crate::error::{Error, Result};
 use crate::store::models::{ParsedRules, RuleRecord, SyncReport, infer_kind};
+use fs2::FileExt;
 use rusqlite::{Row, TransactionBehavior, params, types::Type, types::ValueRef};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static EXPORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -63,6 +64,7 @@ fn needs_json(rule: &ExportRule<'_>) -> bool {
         || (rule.archived_at.is_none() && rule.archive_reason.is_some())
         || rule.kind.is_empty()
         || !rule.kind.bytes().all(|b| b.is_ascii_lowercase())
+        || matches!(rule.kind, "archived" | "deprecated" | "rel")
 }
 
 fn append_rule(out: &mut String, rule: &ExportRule<'_>) -> Result<()> {
@@ -101,6 +103,168 @@ fn append_json(out: &mut String, prefix: &str, record: &impl serde::Serialize) -
     out.push_str(&json);
     out.push('\n');
     Ok(())
+}
+
+fn resolve_write_target(path: &Path) -> Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..32 {
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = fs::read_link(&current)?;
+                if target.is_absolute() {
+                    current = target;
+                } else {
+                    let parent = current
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."));
+                    current = parent.join(target);
+                }
+            }
+            _ => return Ok(current),
+        }
+    }
+    Err(Error::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "Too many symbolic link levels resolving '{}'",
+            path.display()
+        ),
+    )))
+}
+
+fn lock_export_target(path: &Path) -> Result<fs::File> {
+    let resolved = resolve_write_target(path)?;
+    let parent = resolved
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(".agent-rules");
+    let clean_name = file_name.trim_start_matches('.');
+    let lock_path = if parent.join(".agent-mem").is_dir() {
+        parent.join(".agent-mem").join(format!("{clean_name}.lock"))
+    } else if let Some(grandparent) = parent.parent().filter(|p| p.join(".agent-mem").is_dir()) {
+        grandparent
+            .join(".agent-mem")
+            .join(format!("{clean_name}.lock"))
+    } else {
+        parent.join(format!(".{clean_name}.lock"))
+    };
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
+fn atomic_write_file_unlocked(path: &Path, content: &str) -> Result<()> {
+    let target_path = resolve_write_target(path)?;
+    let parent = target_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = target_path.file_name().ok_or_else(|| {
+        crate::error::Error::Usage(format!(
+            "Export path '{}' has no file name",
+            target_path.display()
+        ))
+    })?;
+
+    let (mut temp, temp_path) = loop {
+        let mut temp_name = OsString::from(".");
+        temp_name.push(file_name);
+        temp_name.push(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            EXPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let candidate = parent.join(temp_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (file, candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    };
+
+    let result = (|| -> Result<()> {
+        temp.write_all(content.as_bytes())?;
+        temp.sync_all()?;
+        drop(temp);
+        fs::rename(&temp_path, &target_path)?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn pending_export_key(path: &Path) -> Result<String> {
+    let resolved = std::path::absolute(resolve_write_target(path)?)?;
+    let canonical = match fs::canonicalize(&resolved) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = resolved
+                .parent()
+                .ok_or_else(|| Error::Usage("Rules path has no parent".into()))?;
+            fs::canonicalize(parent)?.join(
+                resolved
+                    .file_name()
+                    .ok_or_else(|| Error::Usage("Rules path has no file name".into()))?,
+            )
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+const RELATIONS_GRAPH_FILE: &str = "_relations.rules";
+
+fn extract_export_namespace(key: &str) -> &str {
+    let clean = key.trim();
+    if let Some((ns, _)) = clean.split_once('/') {
+        let trimmed_ns = ns.trim();
+        if !trimmed_ns.is_empty()
+            && trimmed_ns
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && trimmed_ns
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return trimmed_ns;
+        }
+    }
+    "default"
+}
+
+/// Resolve the project rules target: `.agent-rules.d` if it is an existing directory,
+/// otherwise `.agent-rules`.
+pub fn resolve_rules_path(root: &Path) -> PathBuf {
+    let dir_target = root.join(".agent-rules.d");
+    if dir_target.is_dir() {
+        dir_target
+    } else {
+        root.join(".agent-rules")
+    }
 }
 
 impl Store {
@@ -344,52 +508,294 @@ impl Store {
         Ok(())
     }
 
-    /// Export current rules to a file on disk.
-    pub fn export_to_file(&self, path: &Path) -> Result<()> {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = self.export_rules_text()?;
-        let file_name = path.file_name().ok_or_else(|| {
-            crate::error::Error::Usage(format!("Export path '{}' has no file name", path.display()))
-        })?;
-
-        let (mut temp, temp_path) = loop {
-            let mut temp_name = OsString::from(".");
-            temp_name.push(file_name);
-            temp_name.push(format!(
-                ".tmp-{}-{}",
-                std::process::id(),
-                EXPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-            ));
-            let candidate = parent.join(temp_name);
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(file) => break (file, candidate),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error.into()),
+    /// Serialize a mutation with its export. The durable marker survives process
+    /// exit or partial filesystem writes and prevents stale imports on restart.
+    pub fn with_rules_export<T>(
+        &mut self,
+        path: Option<&Path>,
+        write: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let Some(path) = path else { return write(self) };
+        let _lock = lock_export_target(path)?;
+        self.ensure_no_pending_export(path)?;
+        self.begin_pending_export(path)?;
+        let generation = self.get_db_fingerprint()?;
+        let value = match write(self) {
+            Ok(value) => value,
+            Err(error) => {
+                self.clear_pending_export(path, &generation)?;
+                return Err(error);
             }
         };
+        let result = if path.is_dir() || path.extension().is_some_and(|ext| ext == "d") {
+            self.export_to_dir_unlocked(path, false)
+        } else {
+            self.export_to_file_unlocked(path, false)
+        };
+        result.map_err(|error| Error::Usage(format!(
+            "Changes saved locally, but export to '{}' is pending: {error}. Repair the I/O failure and run 'agent-mem sync --export' for this path before importing",
+            path.display(),
+        )))?;
+        Ok(value)
+    }
 
-        let result = (|| -> Result<()> {
-            temp.write_all(content.as_bytes())?;
-            drop(temp);
-            fs::rename(&temp_path, path)?;
-            let _ = self.record_sync_state(path, &content);
-            Ok(())
-        })();
+    fn begin_pending_export(&self, path: &Path) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _pending_exports (path TEXT PRIMARY KEY);",
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO _pending_exports (path) VALUES (?1);",
+            params![pending_export_key(path)?],
+        )?;
+        Ok(())
+    }
 
-        if result.is_err() {
-            let _ = fs::remove_file(&temp_path);
+    fn ensure_no_pending_export(&self, path: &Path) -> Result<()> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_pending_exports');",
+            [], |row| row.get(0),
+        )?;
+        if exists
+            && self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM _pending_exports);",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            return Err(Error::Usage(format!(
+                "Pending export: local changes have not been fully exported. Import/write to '{}' refused to prevent data loss; repair the I/O failure and run 'agent-mem sync --export' for the pending rules path first",
+                path.display(),
+            )));
         }
-        result
+        Ok(())
+    }
+
+    fn clear_pending_export(&self, path: &Path, generation: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM _pending_exports WHERE path = ?1
+             AND ?2 = (SELECT CAST(generation AS TEXT) FROM store_generation WHERE singleton = 1);",
+            params![pending_export_key(path)?, generation],
+        )?;
+        Ok(())
+    }
+
+    /// Export current rules to a file on disk.
+    pub fn export_to_file(&self, path: &Path) -> Result<()> {
+        let _lock = lock_export_target(path)?;
+        self.begin_pending_export(path)?;
+        self.export_to_file_unlocked(path, false)
+    }
+
+    fn export_to_file_unlocked(&self, path: &Path, accepted_conflicts: bool) -> Result<()> {
+        let generation = self.get_db_fingerprint()?;
+        let content = self.export_rules_text()?;
+        atomic_write_file_unlocked(path, &content)?;
+        self.record_sync_state_at_generation(
+            path,
+            Self::compute_content_hash(&content) as i64,
+            accepted_conflicts,
+            &generation,
+        )?;
+        self.clear_pending_export(path, &generation)
+    }
+
+    /// Export rules partitioned by namespace into a directory of *.rules files.
+    pub fn export_to_dir(&self, dir: &Path) -> Result<()> {
+        self.export_to_dir_mode(dir, false)
+    }
+
+    fn export_to_dir_mode(&self, dir: &Path, accepted_conflicts: bool) -> Result<()> {
+        let _lock = lock_export_target(dir)?;
+        self.begin_pending_export(dir)?;
+        self.export_to_dir_unlocked(dir, accepted_conflicts)
+    }
+
+    fn export_to_dir_unlocked(&self, dir: &Path, accepted_conflicts: bool) -> Result<()> {
+        fs::create_dir_all(dir)?;
+        let generation = self.get_db_fingerprint()?;
+        {
+            let snapshot = self.conn.unchecked_transaction()?;
+
+            let mut active_by_ns: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            {
+                let mut stmt = snapshot.prepare_cached(
+                    "SELECT key, val, anchor, archive_reason, kind FROM memories WHERE archived_at IS NULL ORDER BY key;",
+                )?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let key = row_text(row, 0)?;
+                    let ns = extract_export_namespace(key);
+                    let mut rule_str = String::new();
+                    append_rule(
+                        &mut rule_str,
+                        &ExportRule {
+                            key,
+                            val: row_text(row, 1)?,
+                            anchor: optional_row_text(row, 2)?,
+                            archived_at: None,
+                            archive_reason: optional_row_text(row, 3)?,
+                            kind: row_text(row, 4)?,
+                        },
+                    )?;
+                    // Coalesce case variants into one portable shard without changing keys.
+                    active_by_ns
+                        .entry(ns.to_ascii_lowercase())
+                        .or_default()
+                        .push(rule_str);
+                }
+            }
+
+            let mut archived_by_ns: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            {
+                let mut stmt = snapshot.prepare_cached(
+                    "SELECT key, val, anchor, archive_reason, kind FROM memories WHERE archived_at IS NOT NULL ORDER BY key;",
+                )?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let key = row_text(row, 0)?;
+                    let ns = extract_export_namespace(key);
+                    let mut rule_str = String::new();
+                    append_rule(
+                        &mut rule_str,
+                        &ExportRule {
+                            key,
+                            val: row_text(row, 1)?,
+                            anchor: optional_row_text(row, 2)?,
+                            archived_at: Some(1),
+                            archive_reason: optional_row_text(row, 3)?,
+                            kind: row_text(row, 4)?,
+                        },
+                    )?;
+                    archived_by_ns
+                        .entry(ns.to_ascii_lowercase())
+                        .or_default()
+                        .push(rule_str);
+                }
+            }
+
+            let mut relations_content = String::new();
+            {
+                let mut stmt = snapshot.prepare_cached(
+                    "SELECT source_key, rel_type, target_key FROM relations ORDER BY source_key, rel_type, target_key;",
+                )?;
+                let mut rows = stmt.query([])?;
+                let mut header_written = false;
+                while let Some(row) = rows.next()? {
+                    if !header_written {
+                        relations_content.push_str("# Relations\n");
+                        header_written = true;
+                    }
+                    let fields = (row_text(row, 0)?, row_text(row, 1)?, row_text(row, 2)?);
+                    if [fields.0, fields.1, fields.2].iter().any(|s| {
+                        s.trim() != *s
+                            || s.contains("->")
+                            || s.bytes().any(|b| b.is_ascii_control())
+                    }) {
+                        append_json(&mut relations_content, JSON_RELATION, &fields)?;
+                    } else {
+                        relations_content.push_str("[rel] ");
+                        relations_content.push_str(fields.0);
+                        relations_content.push_str(" -> ");
+                        relations_content.push_str(fields.1);
+                        relations_content.push_str(" -> ");
+                        relations_content.push_str(fields.2);
+                        relations_content.push('\n');
+                    }
+                }
+            }
+
+            snapshot.commit()?;
+
+            let mut all_ns: BTreeSet<String> = active_by_ns.keys().cloned().collect();
+            all_ns.extend(archived_by_ns.keys().cloned());
+
+            let mut files_to_write: BTreeMap<String, String> = BTreeMap::new();
+
+            if all_ns.is_empty() {
+                files_to_write.insert(
+                    "default.rules".to_string(),
+                    "# .agent-rules.d/default.rules - agent-mem shared team memory\n\n".to_string(),
+                );
+            } else {
+                for ns in &all_ns {
+                    let mut out = String::with_capacity(2048);
+                    out.push_str(&format!(
+                        "# .agent-rules.d/{ns}.rules - agent-mem shared team memory\n\n"
+                    ));
+                    if let Some(actives) = active_by_ns.get(ns) {
+                        for r in actives {
+                            out.push_str(r);
+                        }
+                    }
+                    if let Some(archives) = archived_by_ns.get(ns) {
+                        out.push_str("\n# Archived Rules\n");
+                        for r in archives {
+                            out.push_str(r);
+                        }
+                    }
+                    files_to_write.insert(format!("{ns}.rules"), out);
+                }
+            }
+
+            if !relations_content.is_empty() {
+                let rel_header = format!(
+                    "# .agent-rules.d/{RELATIONS_GRAPH_FILE} - relations graph\n\n{relations_content}"
+                );
+                files_to_write.insert(RELATIONS_GRAPH_FILE.to_string(), rel_header);
+            }
+
+            let mut written_files = HashSet::with_capacity(files_to_write.len());
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut aggregate_hasher = DefaultHasher::new();
+
+            for (file_name, content) in &files_to_write {
+                let file_path = dir.join(file_name);
+                atomic_write_file_unlocked(&file_path, content)?;
+                file_name.hash(&mut aggregate_hasher);
+                content.hash(&mut aggregate_hasher);
+                written_files.insert(file_name.clone());
+            }
+
+            for entry in fs::read_dir(dir)? {
+                let path = entry?.path();
+                if path.is_file()
+                    && path.extension().is_some_and(|e| e == "rules")
+                    && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && !written_files.contains(name)
+                {
+                    let folded = name.to_ascii_lowercase();
+                    // APFS can retain the old destination spelling after rename.
+                    // Do not mistake that alias for an obsolete shard. On a
+                    // case-sensitive filesystem the two canonical paths differ.
+                    if written_files.contains(&folded)
+                        && fs::canonicalize(&path)? == fs::canonicalize(dir.join(&folded))?
+                    {
+                        continue;
+                    }
+                    fs::remove_file(&path)?;
+                }
+            }
+
+            let combined_hash = aggregate_hasher.finish() as i64;
+            self.record_sync_state_at_generation(
+                dir,
+                combined_hash,
+                accepted_conflicts,
+                &generation,
+            )?;
+            self.clear_pending_export(dir, &generation)?;
+            Ok(())
+        }
+    }
+
+    /// Export to a rules path (either a single file like `.agent-rules` or a modular directory like `.agent-rules.d`).
+    pub fn export_to_path(&self, path: &Path) -> Result<()> {
+        if path.is_dir() || path.extension().is_some_and(|ext| ext == "d") {
+            self.export_to_dir(path)
+        } else {
+            self.export_to_file(path)
+        }
     }
 
     fn compute_content_hash(content: &str) -> u64 {
@@ -408,22 +814,27 @@ impl Store {
         Ok(fp)
     }
 
-    pub(crate) fn record_sync_state(&self, path: &Path, content: &str) -> Result<()> {
-        self.record_sync_state_mode(path, content, false)
-    }
-
     fn record_sync_state_mode(
         &self,
         path: &Path,
-        content: &str,
+        content_hash: i64,
         accepted_conflicts: bool,
     ) -> Result<()> {
-        let content_hash = Self::compute_content_hash(content) as i64;
         let generation = self.get_db_fingerprint()?;
+        self.record_sync_state_at_generation(path, content_hash, accepted_conflicts, &generation)
+    }
+
+    fn record_sync_state_at_generation(
+        &self,
+        path: &Path,
+        content_hash: i64,
+        accepted_conflicts: bool,
+        generation: &str,
+    ) -> Result<()> {
         let db_state = if accepted_conflicts {
             format!("accepted:{generation}")
         } else {
-            generation
+            generation.to_string()
         };
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS _sync_state (path TEXT PRIMARY KEY, content_hash INTEGER NOT NULL, db_state TEXT NOT NULL);",
@@ -437,19 +848,163 @@ impl Store {
         Ok(())
     }
 
-    /// Reconcile SQLite database with a plain-text rules file (.agent-rules).
-    pub fn sync_with_file(&mut self, path: &Path) -> Result<SyncReport> {
-        self.sync_with_file_mode(path, false)
+    /// Sync with a rules path (either a single file like `.agent-rules` or a modular directory like `.agent-rules.d`).
+    pub fn sync_with_path(&mut self, path: &Path, accept_conflicts: bool) -> Result<SyncReport> {
+        if path.is_dir() || path.extension().is_some_and(|ext| ext == "d") {
+            self.sync_with_dir(path, accept_conflicts)
+        } else {
+            self.sync_with_file_mode(path, accept_conflicts)
+        }
     }
 
-    /// Explicitly accept the last definition of a duplicate key in a team file.
+    /// Reconcile SQLite database with a plain-text rules file (.agent-rules) or directory (.agent-rules.d).
+    pub fn sync_with_file(&mut self, path: &Path) -> Result<SyncReport> {
+        self.sync_with_path(path, false)
+    }
+
+    /// Explicitly accept the last definition of a duplicate key in a team file or directory.
     pub fn sync_with_file_accept_conflicts(&mut self, path: &Path) -> Result<SyncReport> {
-        self.sync_with_file_mode(path, true)
+        self.sync_with_path(path, true)
+    }
+
+    /// Reconcile SQLite database with a directory of plain-text rules files (*.rules).
+    pub fn sync_with_dir(&mut self, dir: &Path, accept_conflicts: bool) -> Result<SyncReport> {
+        let _lock = lock_export_target(dir)?;
+        self.ensure_no_pending_export(dir)?;
+        if !dir.exists() {
+            self.begin_pending_export(dir)?;
+            self.export_to_dir_unlocked(dir, false)?;
+            let total = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
+            return Ok(SyncReport {
+                path: dir.to_path_buf(),
+                imported: 0,
+                total,
+                file_created: true,
+                file_updated: false,
+                conflicts_resolved: 0,
+            });
+        }
+
+        let mut entries = Vec::new();
+        if let Ok(dir_entries) = fs::read_dir(dir) {
+            for entry in dir_entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|e| e == "rules") {
+                    entries.push(path);
+                }
+            }
+        }
+        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+        if entries.is_empty() {
+            self.begin_pending_export(dir)?;
+            self.export_to_dir_unlocked(dir, false)?;
+            let total = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
+            return Ok(SyncReport {
+                path: dir.to_path_buf(),
+                imported: 0,
+                total,
+                file_created: false,
+                file_updated: true,
+                conflicts_resolved: 0,
+            });
+        }
+
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut aggregate_hasher = DefaultHasher::new();
+        let mut files_content = Vec::with_capacity(entries.len());
+
+        const MAX_RULES_FILE_BYTES: u64 = 32 * 1024 * 1024;
+        for path in &entries {
+            let file_size = fs::metadata(path)?.len();
+            if file_size > MAX_RULES_FILE_BYTES {
+                return Err(crate::error::Error::Usage(format!(
+                    "Rules file '{}' exceeds the {}-byte import limit",
+                    path.display(),
+                    MAX_RULES_FILE_BYTES
+                )));
+            }
+            let content = fs::read_to_string(path)?;
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                name.hash(&mut aggregate_hasher);
+            }
+            content.hash(&mut aggregate_hasher);
+            files_content.push((path, content));
+        }
+
+        let combined_hash = aggregate_hasher.finish() as i64;
+        let generation = self.get_db_fingerprint()?;
+        let accepted_generation = format!("accepted:{generation}");
+
+        let is_noop: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sync_state');",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false)
+            && self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _sync_state WHERE path = ?1 AND content_hash = ?2 AND (db_state = ?3 OR db_state = ?4));",
+                    rusqlite::params![
+                        dir.to_string_lossy(),
+                        combined_hash,
+                        generation,
+                        accepted_generation
+                    ],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+
+        if is_noop {
+            let total: usize = self
+                .conn
+                .query_row("SELECT count(*) FROM memories;", [], |r| r.get(0))?;
+            return Ok(SyncReport {
+                path: dir.to_path_buf(),
+                imported: total,
+                total,
+                file_created: false,
+                file_updated: false,
+                conflicts_resolved: 0,
+            });
+        }
+
+        let mut all_rules = Vec::new();
+        let mut all_relations = Vec::new();
+        for (path, content) in &files_content {
+            let (parsed, parse_error) = Self::parse_rules_with_error(content);
+            if let Some(error) = parse_error {
+                return Err(crate::error::Error::Usage(format!(
+                    "Error parsing '{}': {error}",
+                    path.display()
+                )));
+            }
+            all_rules.extend(parsed.rules);
+            all_relations.extend(parsed.relations);
+        }
+
+        let parsed = ParsedRules {
+            rules: all_rules,
+            relations: all_relations,
+        };
+
+        self.reconcile_parsed_rules(dir, combined_hash, parsed, accept_conflicts)
     }
 
     fn sync_with_file_mode(&mut self, path: &Path, accept_conflicts: bool) -> Result<SyncReport> {
+        let _lock = lock_export_target(path)?;
+        self.ensure_no_pending_export(path)?;
         if !path.exists() {
-            self.export_to_file(path)?;
+            self.begin_pending_export(path)?;
+            self.export_to_file_unlocked(path, false)?;
             let total = self
                 .conn
                 .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;
@@ -474,11 +1029,7 @@ impl Store {
         let content = fs::read_to_string(path)?;
         let content_hash = Self::compute_content_hash(&content) as i64;
         let generation = self.get_db_fingerprint()?;
-        let db_state = if accept_conflicts {
-            format!("accepted:{generation}")
-        } else {
-            generation
-        };
+        let accepted_generation = format!("accepted:{generation}");
 
         // Fast path: if the file content and database state have not changed since last sync/export,
         // bypass parsing, memory allocation, transaction locking, and diffing entirely.
@@ -493,8 +1044,13 @@ impl Store {
             && self
                 .conn
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM _sync_state WHERE path = ?1 AND content_hash = ?2 AND db_state = ?3);",
-                    rusqlite::params![path.to_string_lossy(), content_hash, db_state],
+                    "SELECT EXISTS(SELECT 1 FROM _sync_state WHERE path = ?1 AND content_hash = ?2 AND (db_state = ?3 OR db_state = ?4));",
+                    rusqlite::params![
+                        path.to_string_lossy(),
+                        content_hash,
+                        generation,
+                        accepted_generation
+                    ],
                     |r| r.get(0),
                 )
                 .unwrap_or(false);
@@ -518,6 +1074,16 @@ impl Store {
             return Err(error);
         }
 
+        self.reconcile_parsed_rules(path, content_hash, parsed, accept_conflicts)
+    }
+
+    fn reconcile_parsed_rules(
+        &mut self,
+        path: &Path,
+        content_hash: i64,
+        parsed: ParsedRules,
+        accept_conflicts: bool,
+    ) -> Result<SyncReport> {
         for rule in &parsed.rules {
             super::validate_batch_rule(&super::BatchRule {
                 key: &rule.key,
@@ -526,6 +1092,10 @@ impl Store {
                 kind: Some(&rule.kind),
                 relation: None,
             })?;
+            if let Some(reason) = &rule.archive_reason {
+                super::reject_oversized("archive reason", reason, super::MAX_VALUE_BYTES)?;
+                crate::security::reject_secret(reason)?;
+            }
         }
         for (source, rel_type, target) in &parsed.relations {
             super::validate_batch_rule(&super::BatchRule {
@@ -888,7 +1458,17 @@ impl Store {
         mark_semantic_dirty(&tx)?;
 
         tx.commit()?;
-        let _ = self.record_sync_state_mode(path, &content, !conflicts.is_empty());
+        let file_updated = !conflicts.is_empty();
+        if file_updated {
+            self.begin_pending_export(path)?;
+            if path.is_dir() || path.extension().is_some_and(|ext| ext == "d") {
+                self.export_to_dir_unlocked(path, true)?;
+            } else {
+                self.export_to_file_unlocked(path, true)?;
+            }
+        } else {
+            let _ = self.record_sync_state_mode(path, content_hash, false);
+        }
 
         let total: usize = self
             .conn
@@ -899,15 +1479,15 @@ impl Store {
             imported: total,
             total,
             file_created: false,
-            file_updated: false,
+            file_updated,
             conflicts_resolved,
         })
     }
 
-    /// Explicitly export SQLite memories to a file.
+    /// Explicitly export SQLite memories to a file or directory.
     pub fn sync_export(&self, path: &Path) -> Result<SyncReport> {
         let exists = path.exists();
-        self.export_to_file(path)?;
+        self.export_to_path(path)?;
         let total = self
             .conn
             .query_row("SELECT COUNT(*) FROM memories;", [], |row| row.get(0))?;

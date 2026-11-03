@@ -4,30 +4,43 @@ use crate::store::Store;
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityKind {
     Gotcha,
     Decision,
     Pattern,
     Rule,
+    Custom(String),
 }
 
 impl EntityKind {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             EntityKind::Gotcha => "gotcha",
             EntityKind::Decision => "decision",
             EntityKind::Pattern => "pattern",
             EntityKind::Rule => "rule",
+            EntityKind::Custom(s) => s.as_str(),
         }
     }
 
-    pub fn default_key_prefix(&self) -> &'static str {
+    pub fn default_key_prefix(&self) -> &str {
         match self {
             EntityKind::Gotcha => "gotcha",
             EntityKind::Decision => "decision",
             EntityKind::Pattern => "pattern",
             EntityKind::Rule => "architecture",
+            EntityKind::Custom(s) => s.as_str(),
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "gotcha" => Self::Gotcha,
+            "decision" => Self::Decision,
+            "pattern" => Self::Pattern,
+            "rule" => Self::Rule,
+            other => Self::Custom(other.to_string()),
         }
     }
 }
@@ -249,8 +262,18 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
                     continuation_trailer = Some("pattern");
                     continue;
                 }
+                "security" => {
+                    trailers.explicit_kind = Some(EntityKind::Custom("security".to_string()));
+                    trailers.explicit_content = Some(val_trim.to_string());
+                    continuation_trailer = Some("content");
+                    continue;
+                }
                 "key" | "memory-key" | "memory_key" => {
-                    trailers.explicit_key = Some(val_trim.to_string());
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        trailers.explicit_key = Some(val_trim.to_string());
+                    }
                     continuation_trailer = None;
                     continue;
                 }
@@ -260,48 +283,64 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
                     continue;
                 }
                 "relates-to" | "relates_to" => {
-                    for target in val_trim.split(',') {
-                        let t = target.trim();
-                        if !t.is_empty() {
-                            trailers
-                                .relations
-                                .push(("relates_to".to_string(), t.to_string()));
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        for target in val_trim.split(',') {
+                            let t = target.trim();
+                            if !t.is_empty() {
+                                trailers
+                                    .relations
+                                    .push(("relates_to".to_string(), t.to_string()));
+                            }
                         }
                     }
                     continuation_trailer = None;
                     continue;
                 }
                 "mitigates" => {
-                    for target in val_trim.split(',') {
-                        let t = target.trim();
-                        if !t.is_empty() {
-                            trailers
-                                .relations
-                                .push(("mitigates".to_string(), t.to_string()));
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        for target in val_trim.split(',') {
+                            let t = target.trim();
+                            if !t.is_empty() {
+                                trailers
+                                    .relations
+                                    .push(("mitigates".to_string(), t.to_string()));
+                            }
                         }
                     }
                     continuation_trailer = None;
                     continue;
                 }
                 "depends-on" | "depends_on" => {
-                    for target in val_trim.split(',') {
-                        let t = target.trim();
-                        if !t.is_empty() {
-                            trailers
-                                .relations
-                                .push(("depends_on".to_string(), t.to_string()));
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        for target in val_trim.split(',') {
+                            let t = target.trim();
+                            if !t.is_empty() {
+                                trailers
+                                    .relations
+                                    .push(("depends_on".to_string(), t.to_string()));
+                            }
                         }
                     }
                     continuation_trailer = None;
                     continue;
                 }
                 "supersedes" => {
-                    for target in val_trim.split(',') {
-                        let t = target.trim();
-                        if !t.is_empty() {
-                            trailers
-                                .relations
-                                .push(("supersedes".to_string(), t.to_string()));
+                    if val_trim.is_empty() {
+                        eprintln!("warning: trailer '{}' has empty value, ignoring", raw_key);
+                    } else {
+                        for target in val_trim.split(',') {
+                            let t = target.trim();
+                            if !t.is_empty() {
+                                trailers
+                                    .relations
+                                    .push(("supersedes".to_string(), t.to_string()));
+                            }
                         }
                     }
                     continuation_trailer = None;
@@ -314,7 +353,7 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
         // Handle continuation lines for multi-line trailer values
         if let Some(trailer_type) = continuation_trailer {
             match trailer_type {
-                "decision" | "gotcha" | "rule" | "pattern" => {
+                "decision" | "gotcha" | "rule" | "pattern" | "content" => {
                     if let Some(existing) = trailers.explicit_content.as_mut() {
                         if !existing.is_empty() {
                             existing.push(' ');
@@ -337,7 +376,153 @@ pub fn parse_trailers(body: &str) -> ParsedTrailers {
         }
     }
 
+    if let Some(content) = &trailers.explicit_content
+        && content.trim().is_empty()
+    {
+        eprintln!("warning: trailer has empty value, ignoring");
+        trailers.explicit_content = None;
+        trailers.explicit_kind = None;
+    }
+    if let Some(breaking) = &trailers.breaking_change
+        && breaking.trim().is_empty()
+    {
+        eprintln!("warning: trailer 'breaking change' has empty value, ignoring");
+        trailers.breaking_change = None;
+    }
+
     trailers
+}
+
+fn trim_comment_prefix(s: &str) -> &str {
+    let trimmed = s.trim_start();
+    for prefix in &[
+        "///", "//! ", "//", "/*", "*", "#", "--", ";;", "\"\"\"", "'''",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim_start();
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("rem ") {
+        return rest.trim_start();
+    }
+    trimmed
+}
+
+fn is_valid_directive_tag(tag: &str) -> bool {
+    tag.len() >= 3
+        && tag.len() <= 20
+        && tag.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+        && tag != "TODO"
+}
+
+/// Dynamically scan diff for developer directives in added comment lines.
+/// Matches any added line with a comment token followed by `[A-Z0-9_]{3,20}: <message>`.
+pub fn scan_diff_for_directives(diff_text: &str) -> Option<(EntityProposal, Option<String>)> {
+    let mut current_file: Option<String> = None;
+    let mut current_line: usize = 0;
+
+    for line in diff_text.lines() {
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            let trimmed = rest.trim().trim_matches('"');
+            let file = trimmed
+                .strip_prefix("b/")
+                .unwrap_or(trimmed)
+                .trim_matches('"')
+                .trim();
+            if is_relevant_source_file(file) {
+                current_file = Some(file.to_string());
+            } else {
+                current_file = None;
+            }
+            continue;
+        }
+
+        if line.starts_with("@@ ") {
+            if let Some(plus_idx) = line.find('+') {
+                let rest = &line[plus_idx + 1..];
+                let num_str = rest
+                    .split(|c: char| c == ',' || c == ' ' || !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("0");
+                current_line = num_str.parse::<usize>().unwrap_or(1);
+            }
+            continue;
+        }
+
+        if let Some(stripped) = line.strip_prefix('+') {
+            if line.starts_with("+++") {
+                continue;
+            }
+            current_line = current_line.saturating_add(1);
+
+            let Some(ref file) = current_file else {
+                continue;
+            };
+
+            let trimmed = stripped.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let comment_body = trim_comment_prefix(trimmed);
+            if comment_body.is_empty() {
+                continue;
+            }
+
+            if let Some((tag, msg)) = comment_body.split_once(':') {
+                let tag_trimmed = tag.trim();
+                let msg_trimmed = msg.trim();
+                if is_valid_directive_tag(tag_trimmed)
+                    && msg_trimmed.split_whitespace().count() >= 3
+                {
+                    let kind = EntityKind::parse(tag_trimmed);
+                    let scope = file
+                        .split(['/', '\\'])
+                        .find(|part| {
+                            !part.is_empty() && *part != "src" && *part != "lib" && *part != "pkg"
+                        })
+                        .unwrap_or("core");
+                    let clean_scope = scope.split('.').next().unwrap_or(scope);
+                    let key = derive_entity_key(
+                        kind.default_key_prefix(),
+                        Some(clean_scope),
+                        msg_trimmed,
+                        None,
+                    );
+                    let anchor = format!("{}:{}", file, current_line.saturating_sub(1).max(1));
+                    return Some((
+                        EntityProposal {
+                            kind,
+                            key,
+                            val: msg_trimmed.to_string(),
+                        },
+                        Some(anchor),
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_diff_directives(
+    root: &Path,
+    hash: &str,
+) -> Result<Option<(EntityProposal, Option<String>)>> {
+    if hash.is_empty() {
+        return Ok(None);
+    }
+    let diff_output = Command::new("git")
+        .args(["show", "-U0", "--no-color", hash])
+        .current_dir(root)
+        .output();
+
+    let diff_str = match diff_output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
+        _ => return Ok(None),
+    };
+
+    Ok(scan_diff_for_directives(&diff_str))
 }
 
 #[inline]
@@ -481,11 +666,15 @@ pub fn parse_conventional_commit(subject: &str, body: &str) -> ParsedCommit {
             trailers.explicit_key.as_deref(),
         );
         let val = trailers.explicit_content.unwrap_or_else(|| summary.clone());
-        Some(EntityProposal {
-            kind: explicit_kind,
-            key,
-            val,
-        })
+        if val.trim().is_empty() || key.trim().is_empty() {
+            None
+        } else {
+            Some(EntityProposal {
+                kind: explicit_kind,
+                key,
+                val,
+            })
+        }
     } else if is_breaking {
         let key = derive_entity_key(
             "architecture",
@@ -602,7 +791,10 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
 
     let deleted_output = Command::new("git")
         .args([
+            "-c",
+            "core.quotePath=false",
             "diff-tree",
+            "-z",
             "--root",
             "--no-commit-id",
             "--name-only",
@@ -617,8 +809,8 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
         Ok(out) if out.status.success() => {
             let diff_str = String::from_utf8_lossy(&out.stdout);
             diff_str
-                .lines()
-                .map(|l| l.trim().to_string())
+                .split('\0')
+                .map(|l| l.trim().trim_matches('"').to_string())
                 .filter(|l| !l.is_empty())
                 .collect()
         }
@@ -627,7 +819,10 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
 
     let diff_output = Command::new("git")
         .args([
+            "-c",
+            "core.quotePath=false",
             "diff-tree",
+            "-z",
             "--root",
             "--no-commit-id",
             "--name-only",
@@ -641,8 +836,8 @@ pub fn extract_git_commit_info(root: &Path) -> Result<Option<GitCommitInfo>> {
         Ok(out) if out.status.success() => {
             let diff_str = String::from_utf8_lossy(&out.stdout);
             diff_str
-                .lines()
-                .map(|l| l.trim().to_string())
+                .split('\0')
+                .map(|l| l.trim().trim_matches('"').to_string())
                 .filter(|l| !l.is_empty() && !deleted_files.contains(l))
                 .collect()
         }
@@ -682,21 +877,59 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
     } else {
         Some(Store::open(&db_path, true)?)
     };
-    let (entity, skip_reason) = assess_entity(store.as_ref(), &parsed, &commit_info.body)?;
+    let (mut entity, mut skip_reason) = assess_entity(store.as_ref(), &parsed, &commit_info.body)?;
+    let mut resolved_anchor = anchor;
+
+    if entity.is_none()
+        && !commit_info.hash.is_empty()
+        && let Ok(Some((diff_entity, diff_anchor))) =
+            extract_diff_directives(root, &commit_info.hash)
+    {
+        let diff_parsed = ParsedCommit {
+            commit_type: None,
+            scope: None,
+            is_breaking: false,
+            summary: diff_entity.val.clone(),
+            entity: Some(diff_entity),
+            relations: Vec::new(),
+        };
+        let (approved, reason) = assess_entity(store.as_ref(), &diff_parsed, "")?;
+        if let Some(approved_entity) = approved {
+            entity = Some(approved_entity);
+            skip_reason = None;
+            if diff_anchor.is_some() {
+                resolved_anchor = diff_anchor;
+            }
+        } else if reason.is_some() {
+            skip_reason = reason;
+        }
+    }
 
     let entity_captured = entity.map(|e| HookEntity {
         key: e.key,
         val: e.val,
         kind: e.kind.as_str().to_string(),
-        anchor,
+        anchor: resolved_anchor,
     });
 
     let relations: Vec<(String, String, String)> = if let Some(ent) = &entity_captured {
-        parsed
-            .relations
-            .into_iter()
-            .map(|(rel_type, target)| (ent.key.clone(), rel_type, target))
-            .collect()
+        let mut rels = Vec::new();
+        for (rel_type, target) in parsed.relations {
+            if rel_type == "supersedes"
+                && let Some(store_ref) = store.as_ref()
+            {
+                let exists = store_ref.get_entry(&target)?.is_some();
+                if !exists {
+                    eprintln!(
+                        "warning: supersedes target '{}' does not exist, ignoring relation",
+                        target
+                    );
+                    continue;
+                }
+            }
+            rels.push((ent.key.clone(), rel_type, target));
+        }
+        rels
     } else {
         Vec::new()
     };
@@ -750,32 +983,32 @@ pub fn run_post_commit(root: &Path, dry_run: bool) -> Result<Option<HookReport>>
         .session_list(20)?
         .iter()
         .any(|session| session.1 == session_summary);
-    let session_id = store.capture_commit(
-        entity_tuple,
-        &rel_tuples,
-        if already_recorded {
-            ""
+    let rules_file = crate::store::resolve_rules_path(root);
+    let export_path = (rules_file.exists()
+        && (entity_captured.is_some()
+            || !relations.is_empty()
+            || !commit_info.deleted_files.is_empty()))
+    .then_some(rules_file.as_path());
+    let (session_id, zombies) = store.with_rules_export(export_path, |store| {
+        let session_id = store.capture_commit(
+            entity_tuple,
+            &rel_tuples,
+            if already_recorded {
+                ""
+            } else {
+                &session_summary
+            },
+        )?;
+        let zombies = if !commit_info.deleted_files.is_empty() {
+            store.clean_deleted_files(&commit_info.deleted_files, false)?
         } else {
-            &session_summary
-        },
-    )?;
-
-    let zombies = if !commit_info.deleted_files.is_empty() {
-        store.clean_deleted_files(&commit_info.deleted_files, false)?
-    } else {
-        Vec::new()
-    };
+            Vec::new()
+        };
+        Ok((session_id, zombies))
+    })?;
     let zombies_cleaned = !zombies.is_empty();
-
-    let rules_file = root.join(".agent-rules");
-    let rules_synced = if rules_file.exists()
-        && (entity_captured.is_some() || !relations.is_empty() || zombies_cleaned)
-    {
-        store.export_to_file(&rules_file)?;
-        true
-    } else {
-        false
-    };
+    let rules_synced = rules_file.exists()
+        && (entity_captured.is_some() || !relations.is_empty() || zombies_cleaned);
 
     Ok(Some(HookReport {
         commit_hash: commit_info.hash,
@@ -826,7 +1059,10 @@ pub fn get_diff_files(root: &Path) -> Vec<String> {
     if files.is_empty()
         && let Ok(out) = Command::new("git")
             .args([
+                "-c",
+                "core.quotePath=false",
                 "diff-tree",
+                "-z",
                 "--root",
                 "--no-commit-id",
                 "--name-only",
@@ -837,7 +1073,7 @@ pub fn get_diff_files(root: &Path) -> Vec<String> {
             .output()
         && out.status.success()
     {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
+        for line in String::from_utf8_lossy(&out.stdout).split('\0') {
             let trimmed = line.trim().trim_matches('"');
             if !trimmed.is_empty() && !files.iter().any(|f| f == trimmed) {
                 files.push(trimmed.to_string());

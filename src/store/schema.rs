@@ -47,6 +47,7 @@ impl Store {
     }
 
     pub(crate) fn configure_conn(conn: &mut Connection, need_write: bool) -> Result<()> {
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch(
             "PRAGMA busy_timeout = 10000;
              PRAGMA synchronous = NORMAL;
@@ -54,6 +55,24 @@ impl Store {
              PRAGMA temp_store = MEMORY;",
         )?;
 
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match Self::configure_conn_once(conn, need_write) {
+                Ok(()) => return Ok(()),
+                Err(Error::Db(rusqlite::Error::SqliteFailure(err, _)))
+                    if matches!(
+                        err.code,
+                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                    ) && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn configure_conn_once(conn: &mut Connection, need_write: bool) -> Result<()> {
         let user_version: u32 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
 
         if user_version > SCHEMA_VERSION {
@@ -66,7 +85,33 @@ impl Store {
             return Ok(());
         }
 
-        let has_schema: bool = conn.query_row(
+        if !need_write {
+            let has_schema: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories');",
+                [],
+                |r| r.get(0),
+            )?;
+            if !has_schema {
+                return Err(Error::NotInitialized);
+            }
+        } else {
+            conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        }
+
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let user_version: u32 = tx.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
+        if user_version > SCHEMA_VERSION {
+            return Err(Error::Usage(format!(
+                "Database schema {user_version} is newer than supported schema {SCHEMA_VERSION}; upgrade agent-mem before writing"
+            )));
+        }
+        if user_version == SCHEMA_VERSION {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let has_schema: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories');",
             [],
             |r| r.get(0),
@@ -77,8 +122,7 @@ impl Store {
                 return Err(Error::NotInitialized);
             }
 
-            conn.execute_batch("PRAGMA journal_mode = WAL;")?;
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let _ = tx.execute_batch("PRAGMA journal_mode = WAL;");
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS memories (
                     key TEXT PRIMARY KEY,
@@ -124,8 +168,7 @@ impl Store {
                     dirty INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS semantic_records (
-                    semantic_id INTEGER PRIMARY KEY,
-                    memory_key TEXT NOT NULL UNIQUE,
+                    semantic_id INTEGER PRIMARY KEY,\n                    memory_key TEXT NOT NULL UNIQUE,
                     fingerprint_hi INTEGER NOT NULL,
                     fingerprint_lo INTEGER NOT NULL
                 );
@@ -141,25 +184,21 @@ impl Store {
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 6 {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             create_history_schema(&tx)?;
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 5 {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             create_metadata_schema(&tx)?;
             create_history_schema(&tx)?;
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 4 {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             create_semantic_schema(&tx)?;
             create_metadata_schema(&tx)?;
             create_history_schema(&tx)?;
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else if user_version == 3 {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             create_route_schema(&tx)?;
             backfill_routes(&tx)?;
             create_semantic_schema(&tx)?;
@@ -168,7 +207,6 @@ impl Store {
             tx.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION};"), [])?;
             tx.commit()?;
         } else {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             // Migrations check: ensure anchor, archived_at, archive_reason, and kind columns exist
             let has_anchor: bool = tx.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'anchor';",

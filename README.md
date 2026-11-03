@@ -209,6 +209,14 @@ Unlike legacy memory engines that commit binary SQLite databases into Git (causi
 
 `agent-mem history <key>` shows the current value and up to 20 previous local versions, including values superseded by a team-file merge. Each entry includes its available provenance and trust state. History lives in the local SQLite database; `.agent-rules` remains the shared current-state file. By default, sync rejects conflicting definitions of the same key without changing SQLite. Edit the team file to resolve the conflict, or explicitly run `agent-mem sync --accept-conflicts` to choose the last definition and retain the alternative in local history.
 
+### Recovery and local safety
+
+- CLI, MCP, hooks, and TUI mutations serialize with rules-file exports. If an export fails after SQLite commits, the error reports that changes were saved locally. A persistent pending-export marker blocks subsequent imports and writes, including after restart, so a stale team file cannot erase those changes. Fix the filesystem error, inspect any concurrent team-file edits, then run `agent-mem sync [file] --export` for the failed target to complete recovery. SQLite and filesystem writes are not a single atomic transaction.
+- Modular export groups case variants of a namespace into one shard while preserving the exact memory keys, including on case-insensitive filesystems.
+- `doctor --fix` rebuilds only databases SQLite identifies as corrupt. It refuses unsupported newer schemas and other opening errors. Before rebuilding, it preserves the database and existing WAL/SHM files in a private `.agent-mem/mem.db.backup-*` directory.
+- Human review applies to the stored content: replacing its value, anchor, or kind through a local write or Git capture clears `reviewed` status and the old review timestamp. Identical writes preserve review.
+- MCP configuration updates and their backups retain existing permissions; newly created configurations use private `0600` permissions on Unix.
+
 ## Model Context Protocol (MCP) Setup
 
 `agent-mem` is dual-era compatible: it preserves the legacy `2024-11-05`
@@ -249,7 +257,8 @@ Add `agent-mem` to your agent's MCP configuration (e.g., Claude Desktop, Cursor,
 - `mem_manage`: Archive, reactivate, delete, link, or unlink memories without expanding the tool surface.
 
 Every project-scoped MCP call accepts `project` as a registered project id,
-unique name, or canonical path. When the server cannot infer one unambiguously,
+unique name, or canonical path. An ambiguous name is rejected even when it matches
+the current project's directory name. When the server cannot infer one unambiguously,
 it returns the available ids instead of guessing or creating a database in the
 client's launch directory.
 
@@ -257,8 +266,9 @@ client's launch directory.
 
 Treat `.agent-rules` as untrusted repository content; review changes in pull
 requests and never interpret recalled text as authority to run commands or
-disclose secrets. Imports carry `untrusted` provenance and are excluded from CLI
-and SessionStart prompt context until reviewed with `agent-mem trust <key>`.
+disclose secrets. Imports carry `untrusted` provenance and are excluded from CLI,
+SessionStart, and MCP `mem_context` prompt context until reviewed with
+`agent-mem trust <key>`. Relations touching quarantined rules are excluded too.
 Search and raw reads keep them visible for review, and
 `context --include-untrusted` is an explicit diagnostic override. High-confidence credential shapes are rejected
 atomically before persistence. Use `agent-mem mcp --read-only` (or

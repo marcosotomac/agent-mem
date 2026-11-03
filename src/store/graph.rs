@@ -2,7 +2,7 @@ use super::{Store, mark_semantic_dirty, now_epoch};
 use crate::error::Result;
 use crate::store::models::{
     ROUTE_PATH_SUFFIX, RelationRecord, RuleEntry, RuleRecord, SessionEntry, ZombieReport,
-    extract_anchor_paths, route_hash, routing_entries_for_path,
+    extract_anchor_paths, parse_anchor_elements, route_hash, routing_entries_for_path,
 };
 use rusqlite::{TransactionBehavior, params};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -11,6 +11,15 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextCandidate {
     pub key: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SuggestedRelation {
+    pub source_key: String,
+    pub rel_type: String,
+    pub target_key: String,
+    pub confidence: u8,
     pub reason: String,
 }
 
@@ -57,6 +66,19 @@ impl ContextExplanation {
     }
 }
 
+fn extract_key_namespace<'a>(key: &'a str, kind: &str) -> Option<&'a str> {
+    let stripped = if let Some(rest) = key.strip_prefix(kind).and_then(|r| r.strip_prefix('/')) {
+        rest
+    } else {
+        key
+    };
+    if stripped.contains('/') {
+        stripped.split('/').next().filter(|s| !s.is_empty())
+    } else {
+        None
+    }
+}
+
 impl Store {
     fn context_key_is_trusted(&self, key: &str) -> Result<bool> {
         let trust = self.conn.query_row(
@@ -69,6 +91,24 @@ impl Store {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(true),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Quarantine applies to diagnostic candidates too: their keys and routing
+    /// reasons are tool data, not a way to bypass the context trust boundary.
+    pub(crate) fn filter_trusted_task_context(
+        &self,
+        mut context: TaskContext,
+    ) -> Result<TaskContext> {
+        (context.rules, context.relations) =
+            self.filter_trusted_context(context.rules, context.relations)?;
+        let mut candidates = Vec::with_capacity(context.candidates.len());
+        for candidate in context.candidates {
+            if self.context_key_is_trusted(&candidate.key)? {
+                candidates.push(candidate);
+            }
+        }
+        context.candidates = candidates;
+        Ok(context)
     }
 
     /// Remove quarantined memories and relations that touch them before
@@ -184,6 +224,14 @@ impl Store {
                 "Relation source, type, and target cannot be empty".into(),
             ));
         }
+        if !matches!(r, "mitigates" | "supersedes" | "depends_on" | "relates_to") {
+            return Err(crate::error::Error::Usage(format!(
+                "Invalid relation type '{r}'. Allowed: mitigates, supersedes, depends_on, relates_to"
+            )));
+        }
+        super::reject_oversized("relation type", r, super::MAX_RELATION_TYPE_BYTES)?;
+        crate::security::reject_secret(r)?;
+
         let now = now_epoch();
         let tx = self
             .conn
@@ -198,51 +246,7 @@ impl Store {
                 return Err(crate::error::Error::NotFound(key.to_string()));
             }
         }
-        if r == "supersedes" {
-            if s == t {
-                return Err(crate::error::Error::Usage(
-                    "A memory cannot supersede itself".into(),
-                ));
-            }
-            let creates_cycle: bool = tx.query_row(
-                "WITH RECURSIVE chain(key) AS (
-                    SELECT target_key FROM relations
-                    WHERE source_key = ?1 AND rel_type = 'supersedes'
-                    UNION
-                    SELECT relations.target_key FROM relations
-                    JOIN chain ON relations.source_key = chain.key
-                    WHERE relations.rel_type = 'supersedes'
-                 )
-                 SELECT EXISTS(SELECT 1 FROM chain WHERE key = ?2);",
-                params![t, s],
-                |row| row.get(0),
-            )?;
-            if creates_cycle {
-                return Err(crate::error::Error::Usage(
-                    "A supersedes relation cannot create a cycle".into(),
-                ));
-            }
-        }
-        tx.execute(
-            "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
-            params![s, r, t, now],
-        )?;
-        if r == "supersedes" {
-            tx.execute(
-                "UPDATE memories
-                 SET archived_at = ?1, archive_reason = ?2, updated_at = ?1
-                 WHERE key = ?3 AND archived_at IS NULL;",
-                params![now, format!("superseded_by: {s}"), t],
-            )?;
-            tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![t])?;
-            tx.execute(
-                "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind)
-                 SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
-                params![t],
-            )?;
-            mark_semantic_dirty(&tx)?;
-        }
+        super::apply_relation(&tx, s, r, t, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -274,9 +278,11 @@ impl Store {
             return Ok(Vec::new());
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT target_key FROM relations
-             WHERE source_key = ?1
-             ORDER BY rel_type, target_key
+            "SELECT r.target_key FROM relations r
+             JOIN memories s ON s.key = r.source_key AND s.archived_at IS NULL
+             JOIN memories t ON t.key = r.target_key AND t.archived_at IS NULL
+             WHERE r.source_key = ?1
+             ORDER BY r.rel_type, r.target_key
              LIMIT ?2;",
         )?;
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -311,6 +317,286 @@ impl Store {
         Ok(list)
     }
 
+    fn is_exact_path_line_anchor(a: &str) -> bool {
+        let clean = a.trim().trim_start_matches('@').trim();
+        if let Some((path, line_str)) = clean.rsplit_once(':') {
+            !path.trim().is_empty()
+                && !line_str.trim().is_empty()
+                && line_str.trim().chars().all(|c| c.is_ascii_digit())
+        } else {
+            false
+        }
+    }
+
+    /// Discover suggested relations between a memory and existing memories based on anchor co-location
+    /// and namespace hierarchy topology.
+    pub fn suggest_relations(
+        &self,
+        key: &str,
+        _val: &str,
+        anchor: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<Vec<SuggestedRelation>> {
+        let clean_key = key.trim();
+        let (db_anchor, db_kind) = if anchor.is_none() || kind.is_none() {
+            self.conn
+                .query_row(
+                    "SELECT anchor, kind FROM memories WHERE key = ?1;",
+                    params![clean_key],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+                )
+                .ok()
+                .map(|(a, k)| (a, Some(k)))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+        let resolved_anchor = anchor.or(db_anchor.as_deref());
+        let effective_kind = kind
+            .or(db_kind.as_deref())
+            .unwrap_or_else(|| crate::store::infer_kind(clean_key));
+        let anchor_file = resolved_anchor
+            .map(|a| a.split(':').next().unwrap_or(a).trim())
+            .filter(|a| !a.is_empty());
+
+        let key_namespace = extract_key_namespace(clean_key, effective_kind);
+
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key, val, anchor, kind FROM memories WHERE archived_at IS NULL AND key != ?1 LIMIT 250;",
+        )?;
+        let mut rows = stmt.query(params![clean_key])?;
+
+        let mut existing_relations = HashSet::new();
+        let mut existing_relates_to_pairs = HashSet::new();
+        let mut rel_stmt = self.conn.prepare_cached(
+            "SELECT source_key, rel_type, target_key FROM relations WHERE source_key = ?1 OR target_key = ?1;",
+        )?;
+        let mut rel_rows = rel_stmt.query(params![clean_key])?;
+        while let Some(r) = rel_rows.next()? {
+            let s: String = r.get(0)?;
+            let rel_type: String = r.get(1)?;
+            let t: String = r.get(2)?;
+            existing_relations.insert((s.clone(), t.clone()));
+            if rel_type == "relates_to" {
+                let pair = if s < t { (s, t) } else { (t, s) };
+                existing_relates_to_pairs.insert(pair);
+            }
+        }
+
+        let mut suggestions = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            let other_key: String = row.get(0)?;
+            let _other_val: String = row.get(1)?;
+            let other_anchor: Option<String> = row.get(2)?;
+            let other_kind: String = row.get(3)?;
+
+            let other_anchor_file = other_anchor
+                .as_deref()
+                .map(|a| a.split(':').next().unwrap_or(a).trim())
+                .filter(|a| !a.is_empty());
+
+            let other_namespace = extract_key_namespace(&other_key, &other_kind);
+
+            let same_anchor_file = anchor_file.is_some()
+                && other_anchor_file.is_some()
+                && anchor_file == other_anchor_file;
+
+            let same_namespace = key_namespace.is_some()
+                && other_namespace.is_some()
+                && key_namespace == other_namespace;
+
+            if same_anchor_file {
+                let file_name = anchor_file.unwrap();
+                let exact_anchor_match = match (resolved_anchor, other_anchor.as_deref()) {
+                    (Some(a), Some(oa)) => {
+                        let clean_a = a.trim().trim_start_matches('@').trim();
+                        let clean_oa = oa.trim().trim_start_matches('@').trim();
+                        Self::is_exact_path_line_anchor(clean_a) && clean_a == clean_oa
+                    }
+                    _ => false,
+                };
+
+                if effective_kind == "decision" && other_kind == "gotcha" {
+                    if !existing_relations.contains(&(clean_key.to_string(), other_key.clone())) {
+                        suggestions.push(SuggestedRelation {
+                            source_key: clean_key.to_string(),
+                            rel_type: "mitigates".to_string(),
+                            target_key: other_key.clone(),
+                            confidence: 85,
+                            reason: format!("Decision and gotcha both anchor to {file_name}"),
+                        });
+                    }
+                } else if effective_kind == "gotcha" && other_kind == "decision" {
+                    if !existing_relations.contains(&(other_key.clone(), clean_key.to_string())) {
+                        suggestions.push(SuggestedRelation {
+                            source_key: other_key.clone(),
+                            rel_type: "mitigates".to_string(),
+                            target_key: clean_key.to_string(),
+                            confidence: 85,
+                            reason: format!("Decision and gotcha both anchor to {file_name}"),
+                        });
+                    }
+                } else if effective_kind == other_kind {
+                    if exact_anchor_match {
+                        if !existing_relations.contains(&(clean_key.to_string(), other_key.clone()))
+                        {
+                            suggestions.push(SuggestedRelation {
+                                source_key: clean_key.to_string(),
+                                rel_type: "supersedes".to_string(),
+                                target_key: other_key.clone(),
+                                confidence: 90,
+                                reason: format!(
+                                    "Both {effective_kind}s anchor to exact same code location"
+                                ),
+                            });
+                        }
+                    } else {
+                        let relates_pair = if clean_key < other_key.as_str() {
+                            (clean_key.to_string(), other_key.clone())
+                        } else {
+                            (other_key.clone(), clean_key.to_string())
+                        };
+                        if !existing_relations.contains(&(clean_key.to_string(), other_key.clone()))
+                            && !existing_relates_to_pairs.contains(&relates_pair)
+                        {
+                            suggestions.push(SuggestedRelation {
+                                source_key: clean_key.to_string(),
+                                rel_type: "relates_to".to_string(),
+                                target_key: other_key.clone(),
+                                confidence: 80,
+                                reason: format!("Both {effective_kind}s anchor to {file_name}"),
+                            });
+                        }
+                    }
+                }
+            } else if same_namespace {
+                let ns = key_namespace.unwrap();
+                if (effective_kind == "decision" && other_kind == "gotcha")
+                    || (effective_kind == "gotcha" && other_kind == "decision")
+                {
+                    let (decision, gotcha) = if effective_kind == "decision" {
+                        (clean_key.to_string(), other_key.clone())
+                    } else {
+                        (other_key.clone(), clean_key.to_string())
+                    };
+                    if !existing_relations.contains(&(decision.clone(), gotcha.clone())) {
+                        suggestions.push(SuggestedRelation {
+                            source_key: decision,
+                            rel_type: "mitigates".to_string(),
+                            target_key: gotcha,
+                            confidence: 75,
+                            reason: format!("Decision and gotcha share namespace '{ns}'"),
+                        });
+                    }
+                } else if effective_kind == other_kind {
+                    let relates_pair = if clean_key < other_key.as_str() {
+                        (clean_key.to_string(), other_key.clone())
+                    } else {
+                        (other_key.clone(), clean_key.to_string())
+                    };
+                    if !existing_relations.contains(&(clean_key.to_string(), other_key.clone()))
+                        && !existing_relates_to_pairs.contains(&relates_pair)
+                    {
+                        suggestions.push(SuggestedRelation {
+                            source_key: clean_key.to_string(),
+                            rel_type: "relates_to".to_string(),
+                            target_key: other_key.clone(),
+                            confidence: 65,
+                            reason: format!("Both {effective_kind}s share namespace '{ns}'"),
+                        });
+                    }
+                }
+            }
+        }
+
+        suggestions.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        Ok(suggestions)
+    }
+
+    /// Automatically establish high-confidence relations across recent active memories.
+    pub fn auto_relate_high_confidence(
+        &mut self,
+        min_confidence: u8,
+    ) -> Result<Vec<SuggestedRelation>> {
+        let keys: Vec<(String, String, Option<String>, String)> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT key, val, anchor, kind FROM memories WHERE archived_at IS NULL ORDER BY updated_at DESC LIMIT 100;",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut list = Vec::new();
+            while let Some(row) = rows.next()? {
+                list.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
+            }
+            list
+        };
+
+        let mut seen_relates_to_pairs = HashSet::new();
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT source_key, target_key FROM relations WHERE rel_type = 'relates_to';",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let s: String = r.get(0)?;
+                let t: String = r.get(1)?;
+                let pair = if s < t { (s, t) } else { (t, s) };
+                seen_relates_to_pairs.insert(pair);
+            }
+        }
+
+        let mut applied = Vec::new();
+        for (key, val, anchor, kind) in &keys {
+            let is_archived: bool = self
+                .conn
+                .query_row(
+                    "SELECT archived_at IS NOT NULL FROM memories WHERE key = ?1;",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .unwrap_or(true);
+            if is_archived {
+                continue;
+            }
+
+            let suggestions = self.suggest_relations(key, val, anchor.as_deref(), Some(kind))?;
+            for s in suggestions {
+                if s.confidence >= min_confidence {
+                    if s.rel_type == "relates_to" {
+                        let pair = if s.source_key < s.target_key {
+                            (s.source_key.clone(), s.target_key.clone())
+                        } else {
+                            (s.target_key.clone(), s.source_key.clone())
+                        };
+                        if !seen_relates_to_pairs.insert(pair) {
+                            continue;
+                        }
+                    }
+
+                    let target_archived: bool = self
+                        .conn
+                        .query_row(
+                            "SELECT archived_at IS NOT NULL FROM memories WHERE key = ?1;",
+                            params![&s.target_key],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(true);
+                    if target_archived {
+                        continue;
+                    }
+
+                    if self
+                        .relate(&s.source_key, &s.rel_type, &s.target_key)
+                        .is_ok()
+                    {
+                        applied.push(s);
+                    }
+                }
+            }
+        }
+        Ok(applied)
+    }
+
     pub(crate) fn get_relations_touching(
         &self,
         keys: &[&str],
@@ -322,10 +608,12 @@ impl Store {
 
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare_cached(
-            "SELECT source_key, rel_type, target_key, created_at
-             FROM relations
-             WHERE source_key = ?1 OR target_key = ?1
-             ORDER BY source_key, rel_type, target_key
+            "SELECT r.source_key, r.rel_type, r.target_key, r.created_at
+             FROM relations r
+             JOIN memories s ON s.key = r.source_key AND s.archived_at IS NULL
+             JOIN memories t ON t.key = r.target_key AND t.archived_at IS NULL
+             WHERE r.source_key = ?1 OR r.target_key = ?1
+             ORDER BY r.source_key, r.rel_type, r.target_key
              LIMIT ?2;",
         )?;
         let mut relations = Vec::with_capacity(limit.min(64));
@@ -417,21 +705,24 @@ impl Store {
 
         for m in active {
             if let Some(anchor_raw) = m.anchor {
-                let paths = extract_anchor_paths(&anchor_raw);
-                if paths.is_empty() {
+                let elements = parse_anchor_elements(&anchor_raw);
+                if elements.is_empty() {
                     continue;
                 }
 
-                let missing: Vec<String> = paths
+                let missing: Vec<String> = elements
                     .iter()
+                    .map(|(path, _)| path.clone())
                     .filter(|p| !project_root.join(p).exists())
-                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .collect();
 
                 if !missing.is_empty() {
-                    let remaining = paths
+                    let remaining = elements
                         .into_iter()
-                        .filter(|p| !missing.contains(p))
+                        .filter(|(path, _)| !missing.contains(path))
+                        .map(|(_, formatted)| formatted)
                         .collect::<Vec<_>>();
                     zombies.push(ZombieReport {
                         key: m.key.clone(),
@@ -465,21 +756,24 @@ impl Store {
 
         for m in active {
             if let Some(anchor_raw) = m.anchor {
-                let paths = extract_anchor_paths(&anchor_raw);
-                if paths.is_empty() {
+                let elements = parse_anchor_elements(&anchor_raw);
+                if elements.is_empty() {
                     continue;
                 }
 
-                let missing: Vec<String> = paths
+                let missing: Vec<String> = elements
                     .iter()
-                    .filter(|p| deleted_files.iter().any(|d| d == *p))
-                    .cloned()
+                    .map(|(path, _)| path.clone())
+                    .filter(|p| deleted_files.iter().any(|d| d == p))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .collect();
 
                 if !missing.is_empty() {
-                    let remaining = paths
+                    let remaining = elements
                         .into_iter()
-                        .filter(|p| !missing.contains(p))
+                        .filter(|(path, _)| !missing.contains(path))
+                        .map(|(_, formatted)| formatted)
                         .collect::<Vec<_>>();
                     zombies.push(ZombieReport {
                         key: m.key.clone(),
@@ -802,7 +1096,7 @@ impl Store {
                     (&relation.source_key, &relation.target_key)
                 };
                 if clean_topic.is_none_or(|prefix| other.starts_with(prefix)) {
-                    if explain {
+                    if explain && self.context_key_is_trusted(origin)? {
                         related_reasons.entry(other.clone()).or_insert_with(|| {
                             format!("linked from {origin} via {}", relation.rel_type)
                         });

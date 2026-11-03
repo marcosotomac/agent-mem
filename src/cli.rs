@@ -50,6 +50,10 @@ pub enum Command {
         rel_type: String,
         target: String,
     },
+    RelateAuto,
+    RelateSuggest {
+        key: String,
+    },
     Unrelate {
         source: String,
         rel_type: String,
@@ -152,6 +156,7 @@ impl Command {
             self,
             Command::Set { .. }
                 | Command::Relate { .. }
+                | Command::RelateAuto
                 | Command::Unrelate { .. }
                 | Command::Del { .. }
                 | Command::Archive { .. }
@@ -245,7 +250,17 @@ where
                     anchor = Some(args[i + 1].clone());
                     i += 2;
                 } else if (args[i] == "--kind" || args[i] == "-k") && i + 1 < args.len() {
-                    kind = Some(args[i + 1].clone());
+                    let k = args[i + 1].clone();
+                    if !matches!(
+                        k.to_ascii_lowercase().as_str(),
+                        "rule" | "decision" | "gotcha" | "pattern"
+                    ) {
+                        return Err(Error::Usage(format!(
+                            "Invalid kind '{}'. Allowed kinds: rule, decision, gotcha, pattern",
+                            k
+                        )));
+                    }
+                    kind = Some(k.to_ascii_lowercase());
                     i += 2;
                 } else if args[i] == "--scope" && i + 1 < args.len() {
                     scope = MemoryScope::parse(&args[i + 1], false)?;
@@ -265,16 +280,33 @@ where
             })
         }
         "relate" | "link" => {
-            if args.len() < 5 {
-                return Err(Error::Usage(
-                    "Usage: agent-mem relate <source_key> <rel_type> <target_key>".to_string(),
-                ));
+            if args.len() >= 3 && (args[2] == "--auto" || args[2] == "-a") {
+                Ok(Command::RelateAuto)
+            } else if args.len() >= 4 && (args[2] == "--suggest" || args[2] == "-s") {
+                Ok(Command::RelateSuggest {
+                    key: args[3].clone(),
+                })
+            } else if args.len() < 5 {
+                Err(Error::Usage(
+                    "Usage: agent-mem relate <source_key> <rel_type> <target_key>\n       agent-mem relate --suggest <key>\n       agent-mem relate --auto".to_string(),
+                ))
+            } else {
+                let rel_type = args[3].clone();
+                if !matches!(
+                    rel_type.as_str(),
+                    "mitigates" | "supersedes" | "depends_on" | "relates_to"
+                ) {
+                    return Err(Error::Usage(format!(
+                        "Invalid relation type '{}'. Allowed: mitigates, supersedes, depends_on, relates_to",
+                        rel_type
+                    )));
+                }
+                Ok(Command::Relate {
+                    source: args[2].clone(),
+                    rel_type,
+                    target: args[4].clone(),
+                })
             }
-            Ok(Command::Relate {
-                source: args[2].clone(),
-                rel_type: args[3].clone(),
-                target: args[4].clone(),
-            })
         }
         "unrelate" | "unlink" => {
             if args.len() < 5 {
@@ -282,9 +314,19 @@ where
                     "Usage: agent-mem unrelate <source_key> <rel_type> <target_key>".to_string(),
                 ));
             }
+            let rel_type = args[3].clone();
+            if !matches!(
+                rel_type.as_str(),
+                "mitigates" | "supersedes" | "depends_on" | "relates_to"
+            ) {
+                return Err(Error::Usage(format!(
+                    "Invalid relation type '{}'. Allowed: mitigates, supersedes, depends_on, relates_to",
+                    rel_type
+                )));
+            }
             Ok(Command::Unrelate {
                 source: args[2].clone(),
-                rel_type: args[3].clone(),
+                rel_type,
                 target: args[4].clone(),
             })
         }
@@ -579,12 +621,25 @@ where
                     let dry_run = args.iter().skip(3).any(|a| a == "--dry-run" || a == "-n");
                     Ok(Command::HookPostCommit { dry_run })
                 }
-                "session-start" => Ok(Command::HookSessionStart {
-                    json: args
-                        .iter()
-                        .skip(3)
-                        .any(|a| a == "--json" || a == "--format=json"),
-                }),
+                "session-start" => {
+                    let mut json = false;
+                    let mut i = 3;
+                    while i < args.len() {
+                        if args[i] == "--json" || args[i] == "--format=json" {
+                            json = true;
+                            i += 1;
+                        } else if args[i] == "--format"
+                            && i + 1 < args.len()
+                            && args[i + 1] == "json"
+                        {
+                            json = true;
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    Ok(Command::HookSessionStart { json })
+                }
                 other => Err(Error::Usage(format!(
                     "Unknown hook subcommand '{}'. Usage: agent-mem hook [post-commit|session-start]",
                     other
@@ -611,6 +666,42 @@ where
             unknown
         ))),
     }
+}
+
+fn is_database_corruption(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Db(rusqlite::Error::SqliteFailure(code, _))
+            if matches!(code.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    )
+}
+
+fn backup_corrupt_database(db_path: &Path) -> Result<std::path::PathBuf> {
+    let parent = db_path.parent().expect("database has a parent directory");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let backup = parent.join(format!("mem.db.backup-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&backup)?;
+    crate::init::secure_private_dir(&backup)?;
+    // Preserve the WAL and SHM too: sessions and revisions may exist only in WAL.
+    // Do not delete anything unless every existing file has been backed up.
+    for name in ["mem.db", "mem.db-wal", "mem.db-shm"] {
+        let source = parent.join(name);
+        if source.exists() {
+            let target = backup.join(name);
+            std::fs::copy(&source, &target)?;
+            crate::init::secure_private_file(&target)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(target)?
+                .sync_all()?;
+        }
+    }
+    #[cfg(unix)]
+    std::fs::File::open(&backup)?.sync_all()?;
+    Ok(backup)
 }
 
 pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
@@ -691,7 +782,57 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             non_interactive,
         } => crate::tutor::run_tutor(root, step, non_interactive),
         Command::Doctor { fix } => {
+            let db_path = root.join(".agent-mem").join("mem.db");
+            let mut db_corrupted = false;
+
+            if db_path.exists() {
+                match Store::open(&db_path, false) {
+                    Ok(s) => {
+                        if let Err(error) = s.stats(&db_path) {
+                            if is_database_corruption(&error) {
+                                db_corrupted = true;
+                            } else {
+                                return Err(error);
+                            }
+                        }
+                    }
+                    Err(error) if is_database_corruption(&error) => db_corrupted = true,
+                    Err(error) => return Err(error),
+                }
+            }
+
             if fix {
+                if db_corrupted {
+                    let backup = backup_corrupt_database(&db_path)?;
+                    println!(
+                        "doctor fix: preserved original database in {}",
+                        backup.display()
+                    );
+                    for name in ["mem.db", "mem.db-wal", "mem.db-shm"] {
+                        let path = root.join(".agent-mem").join(name);
+                        if path.exists() {
+                            std::fs::remove_file(path)?;
+                        }
+                    }
+
+                    let mut store = Store::open(&db_path, true)?;
+                    let rules_path = crate::store::resolve_rules_path(root);
+                    if rules_path.exists() {
+                        let report = store.sync_with_file(&rules_path)?;
+                        println!(
+                            "doctor fix: rebuilt mem.db from {} ({} rules)",
+                            rules_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(".agent-rules"),
+                            report.total
+                        );
+                    } else {
+                        println!("doctor fix: initialized fresh mem.db");
+                    }
+                    db_corrupted = false;
+                }
+
                 if crate::init::resolve_git_dir(root).is_some()
                     || root.join(".agent-mem").join("mem.db").exists()
                 {
@@ -703,17 +844,27 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     "doctor fix: repaired project integration; pruned {pruned} stale project(s)"
                 );
             }
-            let db_path = root.join(".agent-mem").join("mem.db");
-            let store_stats = if db_path.exists() {
-                Store::open(&db_path, false)
-                    .ok()
-                    .and_then(|s| s.stats(&db_path).ok())
+
+            let store_stats = if db_path.exists() && !db_corrupted {
+                match Store::open(&db_path, false) {
+                    Ok(s) => s.stats(&db_path).ok(),
+                    Err(_) => {
+                        db_corrupted = true;
+                        None
+                    }
+                }
             } else {
                 None
             };
             let git_stats = crate::init::inspect_git_health(root);
             let clients = crate::installer::check_all_clients();
-            print_doctor(store_stats.as_ref(), &git_stats, &clients);
+            print_doctor(store_stats.as_ref(), &git_stats, &clients, db_corrupted);
+
+            if db_corrupted {
+                return Err(Error::Usage(
+                    "Database is corrupted. Run 'agent-mem doctor --fix' to rebuild.".into(),
+                ));
+            }
             Ok(())
         }
         Command::Stats => {
@@ -734,7 +885,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
             } else {
                 (None, None, 0)
             };
-            let registry = crate::registry::ProjectRegistry::load()?;
+            let mut registry = crate::registry::ProjectRegistry::load()?;
+            if db_path.exists() {
+                let _ = registry.register(root);
+            }
             print_stats(
                 root,
                 store_stats.as_ref(),
@@ -988,6 +1142,8 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                 return Err(not_initialized_error(root));
             }
             let mut store = Store::open(&db_path, cmd.is_write())?;
+            let rules_file = crate::store::resolve_rules_path(root);
+            let export_path = rules_file.exists().then_some(rules_file.as_path());
 
             match cmd {
                 Command::Get { key } => {
@@ -1004,64 +1160,99 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     kind,
                     scope: MemoryScope::Project,
                 } => {
-                    store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())?;
-                    let rules_file = root.join(".agent-rules");
-                    if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
-                    }
+                    store.with_rules_export(export_path, |store| {
+                        store.set_entry(&key, &val, anchor.as_deref(), kind.as_deref())
+                    })?;
                     print_set(&key, anchor.as_deref(), kind.as_deref());
+                    let suggestions = store
+                        .suggest_relations(&key, &val, anchor.as_deref(), kind.as_deref())
+                        .unwrap_or_default();
+                    if let Some(top) = suggestions
+                        .into_iter()
+                        .next()
+                        .filter(|s| s.confidence >= 75)
+                    {
+                        println!(
+                            "  💡 Graph Hint: Discovered relation '{} -> {} -> {}' (confidence: {}%, reason: {}). Run 'agent-mem relate {} {} {}' to link.",
+                            top.source_key,
+                            top.rel_type,
+                            top.target_key,
+                            top.confidence,
+                            top.reason,
+                            top.source_key,
+                            top.rel_type,
+                            top.target_key
+                        );
+                    }
                 }
                 Command::Relate {
                     source,
                     rel_type,
                     target,
                 } => {
-                    store.relate(&source, &rel_type, &target)?;
-                    let rules_file = root.join(".agent-rules");
-                    if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
-                    }
+                    store.with_rules_export(export_path, |store| {
+                        store.relate(&source, &rel_type, &target)
+                    })?;
                     print_relate(&source, &rel_type, &target);
+                }
+                Command::RelateAuto => {
+                    let applied = store.with_rules_export(export_path, |store| {
+                        store.auto_relate_high_confidence(80)
+                    })?;
+                    if applied.is_empty() {
+                        println!("No high-confidence relations discovered to auto-link.");
+                    } else {
+                        println!("Auto-linked {} high-confidence relations:", applied.len());
+                        for s in &applied {
+                            println!(
+                                "  • {} -> {} -> {} ({}% confidence: {})",
+                                s.source_key, s.rel_type, s.target_key, s.confidence, s.reason
+                            );
+                        }
+                    }
+                }
+                Command::RelateSuggest { key } => {
+                    let suggestions = store.suggest_relations(&key, "", None, None)?;
+                    if suggestions.is_empty() {
+                        println!("No relations suggested for '{key}'.");
+                    } else {
+                        println!("Suggested relations for '{key}':");
+                        for s in &suggestions {
+                            println!(
+                                "  • {} -> {} -> {} ({}% confidence: {})",
+                                s.source_key, s.rel_type, s.target_key, s.confidence, s.reason
+                            );
+                        }
+                    }
                 }
                 Command::Unrelate {
                     source,
                     rel_type,
                     target,
                 } => {
-                    let unlinked = store.unrelate(&source, &rel_type, &target)?;
-                    let rules_file = root.join(".agent-rules");
-                    if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
-                    }
+                    let unlinked = store.with_rules_export(export_path, |store| {
+                        store.unrelate(&source, &rel_type, &target)
+                    })?;
                     print_unrelate(&source, &rel_type, &target, unlinked);
                 }
                 Command::Del { key } => {
-                    let deleted = store.del(&key)?;
-                    let rules_file = root.join(".agent-rules");
-                    if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
-                    }
+                    let deleted = store.with_rules_export(export_path, |store| store.del(&key))?;
                     print_del(&key, deleted);
                 }
                 Command::Archive { key, reason } => {
-                    let archived = store.archive(&key, reason.as_deref())?;
+                    let archived = store.with_rules_export(export_path, |store| {
+                        store.archive(&key, reason.as_deref())
+                    })?;
                     if !archived {
                         return Err(crate::error::Error::NotFound(key));
-                    }
-                    let rules_file = root.join(".agent-rules");
-                    if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
                     }
                     print_archive(&key, reason.as_deref());
                 }
                 Command::Unarchive { key } => {
-                    let unarchived = store.unarchive(&key)?;
+                    let unarchived =
+                        store.with_rules_export(export_path, |store| store.unarchive(&key))?;
                     if !unarchived {
                         return Err(crate::error::Error::NotFound(key));
-                    }
-                    let rules_file = root.join(".agent-rules");
-                    if rules_file.exists() {
-                        store.export_to_file(&rules_file)?;
                     }
                     print_unarchive(&key);
                 }
@@ -1094,13 +1285,10 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     print_dump(&entries);
                 }
                 Command::Clean { dry_run } => {
-                    let report = store.clean_zombies(root, dry_run)?;
-                    if !dry_run && !report.is_empty() {
-                        let rules_file = root.join(".agent-rules");
-                        if rules_file.exists() {
-                            store.export_to_file(&rules_file)?;
-                        }
-                    }
+                    let report = store
+                        .with_rules_export(if dry_run { None } else { export_path }, |store| {
+                            store.clean_zombies(root, dry_run)
+                        })?;
                     print_clean(&report, dry_run);
                 }
                 Command::Find {
@@ -1165,11 +1353,16 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     }
                 }
                 Command::Sync { file, export } => {
-                    let target_file = file.as_deref().unwrap_or(".agent-rules");
-                    let file_path = if Path::new(target_file).is_absolute() {
-                        Path::new(target_file).to_path_buf()
-                    } else {
-                        root.join(target_file)
+                    let file_path = match file {
+                        Some(f) => {
+                            let p = Path::new(&f);
+                            if p.is_absolute() {
+                                p.to_path_buf()
+                            } else {
+                                root.join(p)
+                            }
+                        }
+                        None => crate::store::resolve_rules_path(root),
                     };
                     let report = if export {
                         store.sync_export(&file_path)?
@@ -1179,11 +1372,16 @@ pub fn execute_command(cmd: Command, root: &Path) -> Result<()> {
                     print_sync(&report);
                 }
                 Command::SyncAcceptConflicts { file } => {
-                    let target_file = file.as_deref().unwrap_or(".agent-rules");
-                    let file_path = if Path::new(target_file).is_absolute() {
-                        Path::new(target_file).to_path_buf()
-                    } else {
-                        root.join(target_file)
+                    let file_path = match file {
+                        Some(f) => {
+                            let p = Path::new(&f);
+                            if p.is_absolute() {
+                                p.to_path_buf()
+                            } else {
+                                root.join(p)
+                            }
+                        }
+                        None => crate::store::resolve_rules_path(root),
                     };
                     let report = store.sync_with_file_accept_conflicts(&file_path)?;
                     print_sync(&report);

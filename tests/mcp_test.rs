@@ -738,6 +738,77 @@ fn test_mcp_exceptions_and_errors() {
         "Must not hide corruption as 'No memories found'"
     );
 
+    // 10. mem_set with invalid kind returns isError: true
+    let clean_dir = temp_dir.join("clean_mcp_test");
+    fs::create_dir_all(&clean_dir).unwrap();
+    agent_mem::init::init_project(&clean_dir).unwrap();
+    let clean_server = McpServer::with_paths(clean_dir.clone(), global_dir.join("global.db"));
+
+    let invalid_kind_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(107)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "k", "val": "v", "kind": "unsupported_kind" }
+        }),
+    };
+    let resp = clean_server.handle_request(&invalid_kind_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid kind")
+    );
+
+    // 11. mem_set with invalid relation type returns isError: true
+    let invalid_rel_type_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(108)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": { "key": "k", "val": "v", "rel": "invalid_rel:target" }
+        }),
+    };
+    let resp = clean_server.handle_request(&invalid_rel_type_req).unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid relation type")
+    );
+
+    // 12. mem_set batch with invalid kind returns isError: true
+    let invalid_batch_kind_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(109)),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "mem_set",
+            "arguments": {
+                "batch": [
+                    { "key": "k", "val": "v", "kind": "unsupported_kind" }
+                ]
+            }
+        }),
+    };
+    let resp = clean_server
+        .handle_request(&invalid_batch_kind_req)
+        .unwrap();
+    let res = resp.result.unwrap();
+    assert_eq!(res["isError"], true);
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid kind")
+    );
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -1346,4 +1417,110 @@ fn test_read_only_mcp_omits_and_rejects_write_tools() {
     assert_eq!(verify.get("rule/new").unwrap(), None);
     drop(verify);
     fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[test]
+fn test_mcp_manage_auto_relate_and_suggest_relations() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agent_mem_mcp_graph_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let server = McpServer::with_paths(temp_dir.clone(), temp_dir.join("global.db"));
+
+    // 1. Add gotcha
+    let call1 = server
+        .handle_request(&JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "tools/call".into(),
+            params: json!({
+                "name": "mem_set",
+                "arguments": {
+                    "key": "gotcha/port-5000",
+                    "val": "AirPlay occupies port 5000",
+                    "anchor": "src/server.rs:20",
+                    "kind": "gotcha",
+                    "scope": "project"
+                }
+            }),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert!(!call1["isError"].as_bool().unwrap_or(false));
+
+    // 2. Add decision with same anchor -> response must include Graph Hint!
+    let call2 = server
+        .handle_request(&JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(2)),
+            method: "tools/call".into(),
+            params: json!({
+                "name": "mem_set",
+                "arguments": {
+                    "key": "decision/use-port-5001",
+                    "val": "Run server on port 5001 by default",
+                    "anchor": "src/server.rs:20",
+                    "kind": "decision",
+                    "scope": "project"
+                }
+            }),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert!(!call2["isError"].as_bool().unwrap_or(false));
+    let text = call2["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Graph Hint"));
+    assert!(text.contains("mitigates"));
+
+    // 3. Test suggest-relations via mem_manage
+    let call3 = server
+        .handle_request(&JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(3)),
+            method: "tools/call".into(),
+            params: json!({
+                "name": "mem_manage",
+                "arguments": {
+                    "action": "suggest-relations",
+                    "key": "decision/use-port-5001",
+                    "scope": "project"
+                }
+            }),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert!(!call3["isError"].as_bool().unwrap_or(false));
+    let suggest_text = call3["content"][0]["text"].as_str().unwrap();
+    assert!(suggest_text.contains("mitigates"));
+    assert!(suggest_text.contains("85% confidence"));
+
+    // 4. Test auto-relate via mem_manage
+    let call4 = server
+        .handle_request(&JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(4)),
+            method: "tools/call".into(),
+            params: json!({
+                "name": "mem_manage",
+                "arguments": {
+                    "action": "auto-relate",
+                    "scope": "project"
+                }
+            }),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert!(!call4["isError"].as_bool().unwrap_or(false));
+    let auto_text = call4["content"][0]["text"].as_str().unwrap();
+    assert!(auto_text.contains("auto-linked [project] 1 high-confidence relations"));
+
+    let _ = fs::remove_dir_all(temp_dir);
 }

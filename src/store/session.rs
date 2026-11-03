@@ -59,6 +59,12 @@ impl Store {
                     "Relation source, type, and target cannot be empty".into(),
                 ));
             }
+            let r = rel_type.trim();
+            if !matches!(r, "mitigates" | "supersedes" | "depends_on" | "relates_to") {
+                return Err(crate::error::Error::Usage(format!(
+                    "Invalid relation type '{r}'. Allowed: mitigates, supersedes, depends_on, relates_to"
+                )));
+            }
             reject_oversized("relation source", source, MAX_KEY_BYTES)?;
             reject_oversized("relation type", rel_type, MAX_RELATION_TYPE_BYTES)?;
             reject_oversized("relation target", target, MAX_KEY_BYTES)?;
@@ -86,6 +92,13 @@ impl Store {
                 .filter(|k| !k.is_empty())
                 .unwrap_or_else(|| infer_kind(trimmed_key));
 
+            let unchanged = super::rule_content_unchanged(
+                &tx,
+                trimmed_key,
+                trimmed_val,
+                trimmed_anchor,
+                effective_kind,
+            )?;
             tx.execute(
                 "INSERT INTO memories (key, val, updated_at, anchor, archived_at, archive_reason, kind)
                  VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
@@ -118,9 +131,9 @@ impl Store {
                  VALUES (?1, 'git-hook:commit', ?2, ?3, NULL)
                  ON CONFLICT(memory_key) DO UPDATE SET
                     provenance = 'git-hook:commit',
-                    trust = CASE WHEN memory_metadata.trust = 'reviewed' THEN 'reviewed' ELSE ?2 END,
-                    reviewed_at = CASE WHEN memory_metadata.trust = 'reviewed' THEN memory_metadata.reviewed_at ELSE NULL END;",
-                params![trimmed_key, TRUST_LOCAL, now],
+                    trust = CASE WHEN memory_metadata.trust = 'reviewed' AND ?4 THEN 'reviewed' ELSE ?2 END,
+                    reviewed_at = CASE WHEN memory_metadata.trust = 'reviewed' AND ?4 THEN memory_metadata.reviewed_at ELSE NULL END;",
+                params![trimmed_key, TRUST_LOCAL, now, unchanged],
             )?;
             mark_semantic_dirty(&tx)?;
         }
@@ -129,58 +142,7 @@ impl Store {
             let s = source.trim();
             let r = rel_type.trim();
             let t = target.trim();
-            if r == "supersedes" {
-                if s == t {
-                    return Err(crate::error::Error::Usage(
-                        "A memory cannot supersede itself".into(),
-                    ));
-                }
-                for key in [s, t] {
-                    let exists: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1);",
-                        params![key],
-                        |row| row.get(0),
-                    )?;
-                    if !exists {
-                        return Err(crate::error::Error::NotFound(key.to_string()));
-                    }
-                }
-                let creates_cycle: bool = tx.query_row(
-                    "WITH RECURSIVE chain(key) AS (
-                        SELECT target_key FROM relations WHERE source_key = ?1 AND rel_type = 'supersedes'
-                        UNION
-                        SELECT relations.target_key FROM relations
-                        JOIN chain ON relations.source_key = chain.key
-                        WHERE relations.rel_type = 'supersedes'
-                     ) SELECT EXISTS(SELECT 1 FROM chain WHERE key = ?2);",
-                    params![t, s],
-                    |row| row.get(0),
-                )?;
-                if creates_cycle {
-                    return Err(crate::error::Error::Usage(
-                        "A supersedes relation cannot create a cycle".into(),
-                    ));
-                }
-            }
-            tx.execute(
-                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
-                params![s, r, t, now],
-            )?;
-            if r == "supersedes" {
-                tx.execute(
-                    "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?1
-                     WHERE key = ?3 AND archived_at IS NULL;",
-                    params![now, format!("superseded_by: {s}"), t],
-                )?;
-                tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![t])?;
-                tx.execute(
-                    "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind)
-                     SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
-                    params![t],
-                )?;
-                mark_semantic_dirty(&tx)?;
-            }
+            super::apply_relation(&tx, s, r, t, now)?;
         }
 
         let mut session_id = None;

@@ -30,9 +30,13 @@ or exfiltrate a secret. `agent-mem` does not execute rule contents, fetch URLs
 from them, or elevate them above normal tool data. The text format is reviewable
 in Git, malformed encoded records are rejected atomically, and archived rules
 are distinguishable from active ones. Imports from `.agent-rules` are recorded
-with `untrusted` trust and `rules-file:.agent-rules` provenance; MCP context and
-search label those values. Only the local CLI can promote a record to `reviewed`,
-so a model cannot approve its own input through MCP. Consumers must treat
+with `untrusted` trust and `rules-file:.agent-rules` provenance. CLI, SessionStart,
+and MCP prompt context exclude these rules and relations touching them. MCP
+selection diagnostics also omit untrusted keys; explicit MCP search still labels
+values for review. Only the local CLI can promote a record to `reviewed`,
+so a model cannot approve its own input through MCP. Local replacements and Git
+captures invalidate approval when the value, anchor, kind, or archived state changes;
+identical writes retain approval. Consumers must treat
 returned values as quoted evidence and validate any requested action against
 higher-priority policy.
 Semantic prompt-injection detection is intentionally not claimed: keyword filters
@@ -42,7 +46,8 @@ are bypassable and would create false confidence.
 
 Writes and imports reject high-confidence credential shapes (private-key PEMs,
 GitHub and AWS keys, JWTs, bearer credentials, and explicit secret assignments)
-before opening a transaction. Rejection is atomic and errors never echo the
+before writing rule content, including archive reasons in plain-text, JSON, and
+modular imports. Rejection is atomic and errors never echo the
 suspected credential. The scanner deliberately avoids entropy-only guesses and
 keyword-only matches, so it reduces accidental persistence but cannot prove that
 arbitrary text contains no secret. Upstream clients must still redact credentials

@@ -26,6 +26,7 @@ pub mod schema;
 pub mod semantic;
 pub mod session;
 pub mod sync;
+pub use sync::resolve_rules_path;
 
 pub const MAX_KEY_BYTES: usize = 512;
 pub const MAX_VALUE_BYTES: usize = 64 * 1024;
@@ -42,6 +43,79 @@ pub struct Store {
     pub(crate) db_path: Option<PathBuf>,
     #[cfg(feature = "semantic-local")]
     pub(crate) semantic_runtime: RefCell<semantic::SemanticRuntime>,
+}
+
+pub(crate) fn rule_content_unchanged(
+    conn: &Connection,
+    key: &str,
+    val: &str,
+    anchor: Option<&str>,
+    kind: &str,
+) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1 AND val IS ?2
+         AND anchor IS ?3 AND kind IS ?4 AND archived_at IS NULL AND archive_reason IS NULL);",
+        )?
+        .query_row(params![key, val, anchor, kind], |row| row.get(0))?)
+}
+
+/// Shared lifecycle semantics for API batches, explicit links, and Git capture.
+/// The caller owns the transaction, so a rejected edge rolls back its whole write.
+pub(crate) fn apply_relation(
+    tx: &Transaction<'_>,
+    source: &str,
+    rel_type: &str,
+    target: &str,
+    now: i64,
+) -> Result<()> {
+    if rel_type == "supersedes" {
+        if source == target {
+            return Err(crate::error::Error::Usage(
+                "A memory cannot supersede itself".into(),
+            ));
+        }
+        for key in [source, target] {
+            let exists: bool = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1);")?
+                .query_row(params![key], |row| row.get(0))?;
+            if !exists {
+                return Err(crate::error::Error::NotFound(key.to_string()));
+            }
+        }
+        let creates_cycle: bool = tx.prepare_cached(
+            "WITH RECURSIVE chain(key) AS (
+                SELECT target_key FROM relations WHERE source_key = ?1 AND rel_type = 'supersedes'
+                UNION
+                SELECT relations.target_key FROM relations JOIN chain ON relations.source_key = chain.key
+                WHERE relations.rel_type = 'supersedes'
+             ) SELECT EXISTS(SELECT 1 FROM chain WHERE key = ?2);",
+        )?.query_row(params![target, source], |row| row.get(0))?;
+        if creates_cycle {
+            return Err(crate::error::Error::Usage(
+                "A supersedes relation cannot create a cycle".into(),
+            ));
+        }
+    }
+    tx.prepare_cached(
+        "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
+    )?.execute(params![source, rel_type, target, now])?;
+    if rel_type == "supersedes" {
+        tx.execute(
+            "UPDATE memories SET archived_at = ?1, archive_reason = ?2, updated_at = ?1
+             WHERE key = ?3 AND archived_at IS NULL;",
+            params![now, format!("superseded_by: {source}"), target],
+        )?;
+        tx.execute("DELETE FROM memories_fts WHERE key = ?1;", params![target])?;
+        tx.execute(
+            "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind)
+             SELECT key, val, anchor, archive_reason, kind FROM memories WHERE key = ?1;",
+            params![target],
+        )?;
+        mark_semantic_dirty(tx)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn mark_semantic_dirty(tx: &Transaction<'_>) -> Result<()> {
@@ -133,12 +207,36 @@ pub(crate) fn validate_batch_rule(rule: &BatchRule<'_>) -> Result<()> {
     if let Some(kind) = rule.kind {
         reject_oversized("kind", kind, MAX_KIND_BYTES)?;
         reject_secret(kind)?;
+        let trimmed_kind = kind.trim();
+        if trimmed_kind.is_empty() {
+            return Err(crate::error::Error::Usage(
+                "Memory kind cannot be empty".into(),
+            ));
+        }
+        let lower = trimmed_kind.to_ascii_lowercase();
+        let is_standard = matches!(lower.as_str(), "rule" | "decision" | "gotcha" | "pattern");
+        let is_valid_custom = trimmed_kind.len() >= 3
+            && trimmed_kind.len() <= 32
+            && trimmed_kind
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !is_standard && !is_valid_custom {
+            return Err(crate::error::Error::Usage(format!(
+                "Invalid memory kind '{trimmed_kind}'. Allowed kinds: rule, decision, gotcha, pattern, or valid identifier"
+            )));
+        }
     }
     if let Some((rel_type, target)) = rule.relation {
         if rel_type.trim().is_empty() || target.trim().is_empty() {
             return Err(crate::error::Error::Usage(
                 "Relation type and target cannot be empty".into(),
             ));
+        }
+        let r = rel_type.trim();
+        if !matches!(r, "mitigates" | "supersedes" | "depends_on" | "relates_to") {
+            return Err(crate::error::Error::Usage(format!(
+                "Invalid relation type '{r}'. Allowed: mitigates, supersedes, depends_on, relates_to"
+            )));
         }
         reject_oversized("relation type", rel_type, MAX_RELATION_TYPE_BYTES)?;
         reject_oversized("relation target", target, MAX_KEY_BYTES)?;
@@ -220,10 +318,6 @@ impl Store {
             let mut insert_fts = tx.prepare_cached(
                 "INSERT INTO memories_fts (key, val, anchor, archive_reason, kind) VALUES (?1, ?2, ?3, NULL, ?4);",
             )?;
-            let mut insert_rel = tx.prepare_cached(
-                "INSERT INTO relations (source_key, rel_type, target_key, created_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(source_key, rel_type, target_key) DO NOTHING;",
-            )?;
             let mut delete_routes =
                 tx.prepare_cached("DELETE FROM memory_routes WHERE memory_key = ?1;")?;
             let mut upsert_metadata = tx.prepare_cached(
@@ -232,12 +326,12 @@ impl Store {
                  ON CONFLICT(memory_key) DO UPDATE SET
                     provenance = excluded.provenance,
                     trust = CASE
-                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local'
+                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local' AND ?5
                             THEN 'reviewed'
                         ELSE excluded.trust
                     END,
                     reviewed_at = CASE
-                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local'
+                        WHEN memory_metadata.trust = 'reviewed' AND excluded.trust = 'local' AND ?5
                             THEN memory_metadata.reviewed_at
                         ELSE excluded.reviewed_at
                     END;",
@@ -253,6 +347,14 @@ impl Store {
                     .filter(|k| !k.is_empty())
                     .unwrap_or_else(|| infer_kind(trimmed_key));
 
+                let unchanged = !unique_initial_load
+                    && rule_content_unchanged(
+                        &tx,
+                        trimmed_key,
+                        trimmed_val,
+                        trimmed_anchor,
+                        effective_kind,
+                    )?;
                 insert_mem.execute(params![
                     trimmed_key,
                     trimmed_val,
@@ -271,15 +373,22 @@ impl Store {
                     effective_kind
                 ])?;
                 insert_memory_routes(&tx, trimmed_key, trimmed_anchor)?;
-                upsert_metadata.execute(params![trimmed_key, provenance, trust, now])?;
+                upsert_metadata.execute(params![trimmed_key, provenance, trust, now, unchanged])?;
+            }
 
+            for r in rules {
                 if let Some((rel_type, target)) = r.relation {
-                    insert_rel.execute(params![
-                        trimmed_key,
-                        rel_type.trim(),
-                        target.trim(),
-                        now
-                    ])?;
+                    let trimmed_key = r.key.trim();
+                    let trimmed_target = target.trim();
+                    let target_exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1);",
+                        params![trimmed_target],
+                        |row| row.get(0),
+                    )?;
+                    if !target_exists {
+                        return Err(crate::error::Error::NotFound(trimmed_target.to_string()));
+                    }
+                    apply_relation(&tx, trimmed_key, rel_type.trim(), trimmed_target, now)?;
                 }
             }
         }
@@ -425,6 +534,10 @@ impl Store {
 
         let now = now_epoch();
         let trimmed_reason = reason.map(|r| r.trim()).filter(|r| !r.is_empty());
+        if let Some(r) = trimmed_reason {
+            reject_oversized("archive reason", r, MAX_VALUE_BYTES)?;
+            reject_secret(r)?;
+        }
 
         let tx = self
             .conn
@@ -626,6 +739,20 @@ impl Store {
             list.push((row.get(0)?, row.get(1)?, row.get(2)?));
         }
         Ok(list)
+    }
+
+    /// Bounded global prompt context, excluding quarantined imports before LIMIT.
+    pub(crate) fn dump_trusted_limited(&self, limit: usize) -> Result<Vec<RuleEntry>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT m.key, m.val, m.anchor FROM memories m
+             WHERE m.archived_at IS NULL AND NOT EXISTS (
+                 SELECT 1 FROM memory_metadata d WHERE d.memory_key = m.key AND d.trust = 'untrusted'
+             ) ORDER BY m.key ASC LIMIT ?1;",
+        )?;
+        let rows = stmt.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Dump all memories (including archived) ordered by key.

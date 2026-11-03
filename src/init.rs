@@ -73,6 +73,30 @@ pub(crate) fn secure_private_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn is_real_git_dir(dir: &Path) -> bool {
+    // A standard gitdir or submodule gitdir contains HEAD and objects/
+    if dir.join("HEAD").exists() && dir.join("objects").is_dir() {
+        return true;
+    }
+    // A worktree gitdir contains HEAD and commondir, pointing to a common gitdir with objects/
+    if dir.join("HEAD").exists()
+        && dir.join("commondir").is_file()
+        && let Ok(commondir_content) = fs::read_to_string(dir.join("commondir"))
+    {
+        let common_path = PathBuf::from(commondir_content.trim());
+        let resolved = if common_path.is_absolute() {
+            common_path
+        } else {
+            dir.join(common_path)
+        };
+        let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
+        if canonical.join("objects").is_dir() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Resolves the actual git directory for standard repositories, git worktrees, or submodules.
 pub fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
     let dot_git = root.join(".git");
@@ -82,6 +106,7 @@ pub fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
     if dot_git.is_file()
         && let Ok(content) = fs::read_to_string(&dot_git)
     {
+        let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         for line in content.lines() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("gitdir:") {
@@ -94,7 +119,11 @@ pub fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
                 };
                 let canonical = fs::canonicalize(&resolved).unwrap_or(resolved);
                 if canonical.exists() {
-                    return Some(canonical);
+                    // Path must either be within the repository root or be a valid gitdir (with HEAD and objects/)
+                    let inside_root = canonical.starts_with(&canonical_root);
+                    if inside_root || is_real_git_dir(&canonical) {
+                        return Some(canonical);
+                    }
                 }
             }
         }
@@ -171,20 +200,32 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
 
     // 2. Update .gitattributes for automatic conflict-free union merges on team rules
     let gitattributes_path = root.join(".gitattributes");
-    let attr_line = ".agent-rules merge=union\n";
+    let attr_lines = [".agent-rules merge=union", "*.rules merge=union"];
+    let mut updated = false;
     if gitattributes_path.exists() {
         let content = fs::read_to_string(&gitattributes_path).unwrap_or_default();
-        if !content.contains(".agent-rules merge=union") {
-            let mut new_content = content;
-            if !new_content.ends_with('\n') && !new_content.is_empty() {
+        let mut new_content = content.clone();
+        for line in &attr_lines {
+            if !new_content.contains(line) {
+                if !new_content.ends_with('\n') && !new_content.is_empty() {
+                    new_content.push('\n');
+                }
+                new_content.push_str(line);
                 new_content.push('\n');
+                updated = true;
             }
-            new_content.push_str(attr_line);
+        }
+        if updated {
             fs::write(&gitattributes_path, new_content)?;
             report.gitattributes_updated = true;
         }
     } else {
-        fs::write(&gitattributes_path, attr_line)?;
+        let mut content = String::new();
+        for line in &attr_lines {
+            content.push_str(line);
+            content.push('\n');
+        }
+        fs::write(&gitattributes_path, content)?;
         report.gitattributes_updated = true;
     }
 
@@ -236,23 +277,24 @@ pub fn init_project(root: &Path) -> Result<InitReport> {
             install_git_hook(&git_hooks_dir, "post-rewrite", sync_cmd)?;
     }
 
-    // 4. Initialize .agent-rules plain text file for git tracking
-    let rules_path = root.join(".agent-rules");
+    // 4. Initialize .agent-rules plain text file or directory for git tracking
+    let rules_path = crate::store::resolve_rules_path(root);
     if !rules_path.exists() {
-        store.export_to_file(&rules_path)?;
+        store.export_to_path(&rules_path)?;
         report.rules_file_created = true;
     } else {
-        // The tracked file is authoritative, including after cloning or retrying init.
+        // The tracked file or directory is authoritative, including after cloning or retrying init.
         // Import before any subsequent write can export an empty/stale local cache.
-        store.sync_with_file(&rules_path)?;
+        store.sync_with_path(&rules_path, false)?;
     }
 
     const TRIGGER_BLOCK: &str = "\
 <!-- agent-mem -->
 ## Persistent Memory Protocol
-- **On start:** Run `agent-mem context --scope all` (or MCP `mem_context`) to load trusted project rules and global preferences.
-- **On decisions:** Run `agent-mem set <key> \"<rule>\"` (or MCP `mem_set`) only for durable ADRs, conventions, patterns, and gotchas.
-- **On search:** Run `agent-mem find <query> --scope all` (or MCP `mem_find`) when past decisions may affect the task.
+- **Task context:** Once the task is clear, run `agent-mem context --query \"<task>\" --scope all --limit 8` (or MCP `mem_context` with `query`, `scope: \"all\"`, and `limit: 8`). Add relevant `--files <paths>` when known; use `--diff` only when current changes concern the task. Use the CLI if the available MCP schema lacks `query`.
+- **Past decisions:** Run `agent-mem find \"<topic>\" --scope all` (or MCP `mem_find` with `scope: \"all\"`) before changing a convention or architecture decision.
+- **Durable capture:** Run `agent-mem set <key> \"<rule>\"` (or MCP `mem_set`) only for durable ADRs, conventions, patterns, and gotchas; use `--scope global` only for cross-project preferences.
+- **Diagnostics:** Use `context --explain` only when checking why relevant memories were included or omitted.
 <!-- /agent-mem -->\n";
 
     // 5. Inject minimal AI trigger instruction idempotently into rules file
@@ -348,7 +390,7 @@ pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
     let gitattributes_path = root.join(".gitattributes");
     let gitattributes_active = gitattributes_path.exists()
         && fs::read_to_string(&gitattributes_path)
-            .map(|c| c.contains(".agent-rules merge=union"))
+            .map(|c| c.contains(".agent-rules merge=union") || c.contains("*.rules merge=union"))
             .unwrap_or(false);
 
     let hooks_dir = resolve_git_hooks_dir(root);
@@ -368,11 +410,33 @@ pub fn inspect_git_health(root: &Path) -> GitDoctorReport {
     let post_checkout_active = check_hook("post-checkout", "agent-mem sync");
     let post_rewrite_active = check_hook("post-rewrite", "agent-mem sync");
 
-    let rules_path = root.join(".agent-rules");
+    let rules_path = crate::store::resolve_rules_path(root);
     let rules_file_exists = rules_path.exists();
-    let rules_count = if rules_file_exists {
+    let rules_count = if rules_path.is_dir() {
+        let mut total = 0;
+        if let Ok(entries) = fs::read_dir(&rules_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file()
+                    && p.extension().is_some_and(|e| e == "rules")
+                    && let Ok(c) = fs::read_to_string(&p)
+                {
+                    total += Store::parse_rules_text(&c)
+                        .iter()
+                        .filter(|r| !r.is_archived())
+                        .count();
+                }
+            }
+        }
+        total
+    } else if rules_file_exists {
         fs::read_to_string(&rules_path)
-            .map(|c| Store::parse_rules_text(&c).len())
+            .map(|c| {
+                Store::parse_rules_text(&c)
+                    .iter()
+                    .filter(|r| !r.is_archived())
+                    .count()
+            })
             .unwrap_or(0)
     } else {
         0

@@ -558,7 +558,7 @@ feature/auth = Use Passkeys WebAuthn (@ src/webauthn.rs:20)
     let report = store.sync_with_file_accept_conflicts(&rules_path).unwrap();
     assert_eq!(report.total, 2); // explicit last-definition choice
     assert_eq!(store.get_all_relations().unwrap().len(), 1);
-    assert!(store.sync_with_file(&rules_path).is_err());
+    store.sync_with_file(&rules_path).unwrap();
     assert_eq!(store.get_all_relations().unwrap().len(), 1);
     assert_eq!(
         store.get("feature/auth").unwrap().as_deref(),
@@ -797,6 +797,35 @@ fn test_sync_roundtrip_preserves_ambiguous_content_and_metadata() {
     // Existing simple rules stay compact and need no format migration.
     assert!(exported.contains("case/6 = Quotes"));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_archive_and_relate_reject_secrets_and_oversized() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.set("rule/active", "Normal content").unwrap();
+    store.set("rule/target", "Target content").unwrap();
+
+    // 1. archive with secret in reason must fail
+    let err_sec = store.archive(
+        "rule/active",
+        Some("Deprecated due to api_key=abcdefghijklmnopqrstuvwxyz123456"),
+    );
+    assert!(err_sec.is_err(), "archive with secret in reason must fail");
+
+    // 2. archive with oversized reason must fail
+    let err_over = store.archive("rule/active", Some(&"a".repeat(70_000)));
+    assert!(err_over.is_err(), "archive with oversized reason must fail");
+
+    // 3. relate with secret in rel_type must fail
+    let err_rel_sec = store.relate(
+        "rule/active",
+        "ghp_123456789012345678901234567890",
+        "rule/target",
+    );
+    assert!(
+        err_rel_sec.is_err(),
+        "relate with secret in rel_type must fail"
+    );
 }
 
 #[test]
@@ -1384,4 +1413,322 @@ fn test_v6_migration_adds_history_without_losing_rules() {
     assert_eq!(store.stats(&db_path).unwrap().user_version, 7);
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_sync_roundtrip_preserves_reserved_kinds_archived_deprecated_and_rel() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_p1_3_reserved_kinds_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rules_path = dir.join(".agent-rules");
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set_entry(
+            "policy/retention",
+            "Active rule whose custom kind is archived",
+            Some("src/retention.rs:10"),
+            Some("archived"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "api/v1-endpoint",
+            "Active rule whose custom kind is deprecated",
+            Some("src/api.rs:20"),
+            Some("deprecated"),
+        )
+        .unwrap();
+    store
+        .set_entry(
+            "graph/pipeline",
+            "step1 -> step2 -> step3",
+            Some("src/pipeline.rs:5"),
+            Some("rel"),
+        )
+        .unwrap();
+
+    store.export_to_file(&rules_path).unwrap();
+
+    let mut imported = Store::open_in_memory().unwrap();
+    imported.sync_with_file(&rules_path).unwrap();
+
+    let r1 = imported.get_entry("policy/retention").unwrap().unwrap();
+    assert!(
+        !r1.is_archived(),
+        "Active rule with kind 'archived' must not become archived"
+    );
+    assert_eq!(r1.kind, "archived");
+    assert_eq!(r1.val, "Active rule whose custom kind is archived");
+
+    let r2 = imported.get_entry("api/v1-endpoint").unwrap().unwrap();
+    assert!(
+        !r2.is_archived(),
+        "Active rule with kind 'deprecated' must not become archived"
+    );
+    assert_eq!(r2.kind, "deprecated");
+    assert_eq!(r2.val, "Active rule whose custom kind is deprecated");
+
+    let r3 = imported
+        .get_entry("graph/pipeline")
+        .unwrap()
+        .expect("Rule with kind 'rel' must not be swallowed as a relation");
+    assert!(!r3.is_archived());
+    assert_eq!(r3.kind, "rel");
+    assert_eq!(r3.val, "step1 -> step2 -> step3");
+    assert!(
+        imported.get_all_relations().unwrap().is_empty(),
+        "Rule with kind 'rel' must not create bogus graph relations"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_sync_accept_conflicts_persists_clean_file_and_subsequent_sync_is_noop() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_p3_8_accept_conflicts_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("mem.db");
+    let rules_path = dir.join(".agent-rules");
+
+    let mut store = Store::open(&db_path, true).unwrap();
+    let conflicted = "\
+arch/db = SQLite WAL
+<<<<<<< HEAD
+auth/mode = Use OAuth2 PKCE (@ src/auth.rs:10)
+=======
+auth/mode = Use Passkeys WebAuthn (@ src/webauthn.rs:20)
+>>>>>>> branch-b
+";
+    std::fs::write(&rules_path, conflicted).unwrap();
+
+    assert!(store.sync_with_file(&rules_path).is_err());
+
+    let resolved = store.sync_with_file_accept_conflicts(&rules_path).unwrap();
+    assert_eq!(resolved.conflicts_resolved, 1);
+    assert!(
+        resolved.file_updated,
+        "accept-conflicts must rewrite .agent-rules to persist resolution"
+    );
+
+    let rewritten = std::fs::read_to_string(&rules_path).unwrap();
+    assert_eq!(
+        rewritten.matches("auth/mode").count(),
+        1,
+        ".agent-rules must contain only the winning definition after accept-conflicts"
+    );
+    assert!(!rewritten.contains("<<<<<<<"));
+    assert!(rewritten.contains("Use Passkeys WebAuthn"));
+
+    // Next normal sync must succeed via no-op without failing on conflicts or state mismatch
+    let next_sync = store
+        .sync_with_file(&rules_path)
+        .expect("subsequent normal sync must succeed after accept-conflicts");
+    assert_eq!(next_sync.conflicts_resolved, 0);
+    assert!(!next_sync.file_updated);
+    assert_eq!(next_sync.total, 2);
+
+    // Repeating accept-conflicts on the clean state is also a no-op
+    let repeat_accept = store.sync_with_file_accept_conflicts(&rules_path).unwrap();
+    assert_eq!(repeat_accept.conflicts_resolved, 0);
+    assert!(!repeat_accept.file_updated);
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_concurrent_exports_are_serialized_without_torn_state() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_p3_11_concurrent_export_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rules_d = dir.join(".agent-rules.d");
+    let rules_file = dir.join(".agent-rules");
+
+    let workers = 6usize;
+    let barrier = Arc::new(Barrier::new(workers));
+    let mut handles = Vec::new();
+
+    for worker in 0..workers {
+        let barrier = Arc::clone(&barrier);
+        let rules_d = rules_d.clone();
+        let rules_file = rules_file.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut store = Store::open_in_memory().unwrap();
+            for ns_idx in 0..15 {
+                store
+                    .set(
+                        &format!("worker{worker}ns{ns_idx:02}/rule"),
+                        &format!("value from worker {worker} ns {ns_idx}"),
+                    )
+                    .unwrap();
+            }
+            barrier.wait();
+            for _ in 0..15 {
+                store.export_to_dir(&rules_d).unwrap();
+                store.export_to_file(&rules_file).unwrap();
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // Because export_to_dir is serialized with a file lock, all .rules files in .agent-rules.d
+    // must belong to the single last writer (15 files), never a torn mixture of multiple workers.
+    let rule_files: Vec<String> = std::fs::read_dir(&rules_d)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rules"))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    assert_eq!(
+        rule_files.len(),
+        15,
+        "Expected 15 namespace files from a single serialized export, got {}: {:?}",
+        rule_files.len(),
+        rule_files
+    );
+    let prefix = &rule_files[0][..7]; // "workerX"
+    assert!(
+        rule_files.iter().all(|name| name.starts_with(prefix)),
+        "Torn directory export detected across workers: {:?}",
+        rule_files
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_concurrent_initial_migration_across_8_processes_in_temp_global_dir() {
+    use std::process::Command;
+    use std::sync::{Arc, Barrier};
+
+    let base_dir = std::env::temp_dir().join(format!(
+        "agent_mem_p3_8b_concurrent_init_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&base_dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_agent-mem");
+
+    for round in 0..5 {
+        let global_dir = base_dir.join(format!("global_{round}"));
+        std::fs::create_dir_all(&global_dir).unwrap();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::with_capacity(8);
+
+        for i in 0..8 {
+            let barrier = Arc::clone(&barrier);
+            let global_dir = global_dir.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                Command::new(bin)
+                    .current_dir(&global_dir)
+                    .env("AGENT_MEM_GLOBAL_DIR", &global_dir)
+                    .args([
+                        "set",
+                        &format!("concurrent/worker-{i}"),
+                        &format!("value from process {i}"),
+                        "--scope",
+                        "global",
+                    ])
+                    .output()
+                    .expect("failed to execute agent-mem binary")
+            }));
+        }
+
+        for (i, handle) in handles.into_iter().enumerate() {
+            let output = handle.join().unwrap();
+            assert!(
+                output.status.success(),
+                "round {round} worker {i} failed during concurrent initial migration:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let db_path = global_dir.join("global.db");
+        let store = Store::open(&db_path, false).unwrap();
+        assert_eq!(store.dump_all().unwrap().len(), 8);
+        assert_eq!(store.stats(&db_path).unwrap().journal_mode, "wal");
+    }
+
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_export_preserves_symlink_and_writes_to_real_target() {
+    let dir = std::env::temp_dir().join(format!(
+        "agent_mem_p4_14_symlink_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let shared_dir = dir.join("shared");
+    std::fs::create_dir_all(&shared_dir).unwrap();
+    let real_target = shared_dir.join("team.rules");
+    std::fs::write(&real_target, "old/rule = old value\n").unwrap();
+
+    let symlink_path = dir.join(".agent-rules");
+    // Relative symlink from dir/.agent-rules -> shared/team.rules
+    std::os::unix::fs::symlink(std::path::Path::new("shared/team.rules"), &symlink_path).unwrap();
+    assert!(
+        std::fs::symlink_metadata(&symlink_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .set(
+            "symlink/preserved",
+            "written through symlink to real target",
+        )
+        .unwrap();
+    store.export_to_file(&symlink_path).unwrap();
+
+    assert!(
+        std::fs::symlink_metadata(&symlink_path)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "atomic_write_file must preserve the .agent-rules symlink instead of replacing it"
+    );
+    let real_content = std::fs::read_to_string(&real_target).unwrap();
+    assert!(
+        real_content.contains("symlink/preserved = written through symlink to real target"),
+        "real symlink target must receive the exported content, got:\n{real_content}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
 }
