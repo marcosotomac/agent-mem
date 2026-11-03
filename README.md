@@ -257,7 +257,8 @@ Add `agent-mem` to your agent's MCP configuration (e.g., Claude Desktop, Cursor,
 - `mem_manage`: Archive, reactivate, delete, link, or unlink memories without expanding the tool surface.
 
 Every project-scoped MCP call accepts `project` as a registered project id,
-unique name, or canonical path. When the server cannot infer one unambiguously,
+unique name, or canonical path. An ambiguous name is rejected even when it matches
+the current project's directory name. When the server cannot infer one unambiguously,
 it returns the available ids instead of guessing or creating a database in the
 client's launch directory.
 

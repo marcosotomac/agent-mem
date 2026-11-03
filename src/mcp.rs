@@ -146,26 +146,30 @@ impl McpServer {
         }
         if let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) {
             if let Some(default) = &self.default_project_root
-                && (selector == default.to_string_lossy()
-                    || selector
-                        == default
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or(""))
+                && selector == default.to_string_lossy()
             {
                 return Ok(default.clone());
             }
 
-            let matches: Vec<&ProjectRecord> = self
+            let mut matches: Vec<PathBuf> = self
                 .live_registered_projects()
                 .filter(|project| {
                     project.id == selector
                         || project.name == selector
                         || project.canonical_path == selector
                 })
+                .map(|project| PathBuf::from(&project.canonical_path))
                 .collect();
+            // The CWD project is a candidate, not an ambiguity bypass. Include
+            // it even when it has not yet been persisted in the registry.
+            if let Some(default) = &self.default_project_root
+                && default.file_name().and_then(|name| name.to_str()) == Some(selector)
+                && !matches.contains(default)
+            {
+                matches.push(default.clone());
+            }
             return match matches.as_slice() {
-                [project] => Ok(PathBuf::from(&project.canonical_path)),
+                [project] => Ok(project.clone()),
                 [] => Err(crate::error::Error::Usage(format!(
                     "Unknown project '{selector}'. Use an id, unique name, or registered path"
                 ))),
