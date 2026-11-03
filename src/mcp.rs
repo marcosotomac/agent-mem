@@ -1049,14 +1049,14 @@ impl McpServer {
                 if (scope == "all" || scope == "project")
                     && let Some(store) = self.open_read_store("project", project_root.as_deref())?
                 {
-                    let selected = store.context_for_task(
+                    let selected = store.filter_trusted_task_context(store.context_for_task(
                         &files,
                         anchor,
                         topic,
                         query,
                         project_rule_limit,
                         explain,
-                    )?;
+                    )?)?;
                     let explanation = explain.then(|| selected.clone_explanation());
                     let (rules, rels, sessions) =
                         (selected.rules, selected.relations, selected.sessions);
@@ -1157,14 +1157,15 @@ impl McpServer {
                     && let Some(store) = self.open_read_store("global", None)?
                 {
                     let (rules, explanation) = if query.is_some() || explain {
-                        let selected = store.context_for_task(
-                            &[],
-                            None,
-                            topic,
-                            query,
-                            global_rule_limit,
-                            explain,
-                        )?;
+                        let selected =
+                            store.filter_trusted_task_context(store.context_for_task(
+                                &[],
+                                None,
+                                topic,
+                                query,
+                                global_rule_limit,
+                                explain,
+                            )?)?;
                         let explanation = explain.then(|| selected.clone_explanation());
                         let rules = selected
                             .rules
@@ -1173,7 +1174,7 @@ impl McpServer {
                             .collect();
                         (rules, explanation)
                     } else {
-                        (store.dump_limited(global_rule_limit)?, None)
+                        (store.dump_trusted_limited(global_rule_limit)?, None)
                     };
                     let mut global_lines = Vec::new();
                     let mut emitted = std::collections::HashSet::new();

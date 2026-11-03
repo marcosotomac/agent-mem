@@ -93,6 +93,24 @@ impl Store {
         }
     }
 
+    /// Quarantine applies to diagnostic candidates too: their keys and routing
+    /// reasons are tool data, not a way to bypass the context trust boundary.
+    pub(crate) fn filter_trusted_task_context(
+        &self,
+        mut context: TaskContext,
+    ) -> Result<TaskContext> {
+        (context.rules, context.relations) =
+            self.filter_trusted_context(context.rules, context.relations)?;
+        let mut candidates = Vec::with_capacity(context.candidates.len());
+        for candidate in context.candidates {
+            if self.context_key_is_trusted(&candidate.key)? {
+                candidates.push(candidate);
+            }
+        }
+        context.candidates = candidates;
+        Ok(context)
+    }
+
     /// Remove quarantined memories and relations that touch them before
     /// context is injected into an agent prompt. Explicit search/get APIs keep
     /// exposing these records so a human can review and promote them.
@@ -1078,7 +1096,7 @@ impl Store {
                     (&relation.source_key, &relation.target_key)
                 };
                 if clean_topic.is_none_or(|prefix| other.starts_with(prefix)) {
-                    if explain {
+                    if explain && self.context_key_is_trusted(origin)? {
                         related_reasons.entry(other.clone()).or_insert_with(|| {
                             format!("linked from {origin} via {}", relation.rel_type)
                         });

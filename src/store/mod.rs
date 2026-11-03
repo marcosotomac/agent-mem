@@ -741,6 +741,20 @@ impl Store {
         Ok(list)
     }
 
+    /// Bounded global prompt context, excluding quarantined imports before LIMIT.
+    pub(crate) fn dump_trusted_limited(&self, limit: usize) -> Result<Vec<RuleEntry>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT m.key, m.val, m.anchor FROM memories m
+             WHERE m.archived_at IS NULL AND NOT EXISTS (
+                 SELECT 1 FROM memory_metadata d WHERE d.memory_key = m.key AND d.trust = 'untrusted'
+             ) ORDER BY m.key ASC LIMIT ?1;",
+        )?;
+        let rows = stmt.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Dump all memories (including archived) ordered by key.
     pub fn dump_all(&self) -> Result<Vec<RuleRecord>> {
         let mut stmt = self.conn.prepare_cached(

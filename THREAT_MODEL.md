@@ -30,8 +30,10 @@ or exfiltrate a secret. `agent-mem` does not execute rule contents, fetch URLs
 from them, or elevate them above normal tool data. The text format is reviewable
 in Git, malformed encoded records are rejected atomically, and archived rules
 are distinguishable from active ones. Imports from `.agent-rules` are recorded
-with `untrusted` trust and `rules-file:.agent-rules` provenance; MCP context and
-search label those values. Only the local CLI can promote a record to `reviewed`,
+with `untrusted` trust and `rules-file:.agent-rules` provenance. CLI, SessionStart,
+and MCP prompt context exclude these rules and relations touching them. MCP
+selection diagnostics also omit untrusted keys; explicit MCP search still labels
+values for review. Only the local CLI can promote a record to `reviewed`,
 so a model cannot approve its own input through MCP. Local replacements and Git
 captures invalidate approval when the value, anchor, kind, or archived state changes;
 identical writes retain approval. Consumers must treat

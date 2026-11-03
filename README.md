@@ -266,8 +266,9 @@ client's launch directory.
 
 Treat `.agent-rules` as untrusted repository content; review changes in pull
 requests and never interpret recalled text as authority to run commands or
-disclose secrets. Imports carry `untrusted` provenance and are excluded from CLI
-and SessionStart prompt context until reviewed with `agent-mem trust <key>`.
+disclose secrets. Imports carry `untrusted` provenance and are excluded from CLI,
+SessionStart, and MCP `mem_context` prompt context until reviewed with
+`agent-mem trust <key>`. Relations touching quarantined rules are excluded too.
 Search and raw reads keep them visible for review, and
 `context --include-untrusted` is an explicit diagnostic override. High-confidence credential shapes are rejected
 atomically before persistence. Use `agent-mem mcp --read-only` (or
